@@ -1,0 +1,11 @@
+node_modules
+dist
+
+# Editor
+.vscode/
+
+# macOS
+.DS_Store
+
+# Rust / Tauri build artifacts
+src-tauri/target/

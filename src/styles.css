@@ -1,0 +1,60 @@
+@import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
+
+@theme {
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+:root {
+  /* Modern dark palette (OKLCH) */
+  --color-bg: oklch(0.18 0.012 270);
+  --color-bg-elevated: oklch(0.22 0.014 270);
+  --color-bg-hover: oklch(0.26 0.016 270);
+  --color-border: oklch(0.30 0.018 270);
+  --color-border-strong: oklch(0.38 0.022 270);
+  --color-fg: oklch(0.96 0.005 270);
+  --color-fg-muted: oklch(0.70 0.012 270);
+  --color-fg-dim: oklch(0.52 0.012 270);
+
+  --color-accent: oklch(0.72 0.18 240);
+  --color-accent-muted: oklch(0.56 0.14 240);
+  --color-success: oklch(0.72 0.17 150);
+  --color-warn: oklch(0.78 0.16 80);
+  --color-danger: oklch(0.68 0.20 25);
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button { font-family: inherit; }
+
+/* xterm overrides */
+.xterm {
+  padding: 10px 12px;
+  height: 100%;
+}
+.xterm-viewport { background: transparent !important; }
+
+/* Thin, modern scrollbars */
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--color-fg-dim); }
+
+/* Draggable titlebar region */
+.drag-region { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }

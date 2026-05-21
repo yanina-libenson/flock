@@ -1,0 +1,292 @@
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import {
+  repoAdd,
+  reposList,
+  repoRemove,
+  worktreesList,
+  worktreeRemove,
+  worktreeDirty,
+  type Repo,
+  type Worktree,
+  type DirtySummary,
+} from "../lib/ipc";
+import {
+  appStore,
+  setAppStore,
+  openPane,
+  closePane,
+  prunePanes,
+} from "../lib/store";
+import {
+  FolderGit2,
+  Plus,
+  GitBranch,
+  X,
+  FolderPlus,
+  FolderOpen,
+} from "lucide-solid";
+
+export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
+  const [expanded, setExpanded] = createSignal<Record<number, boolean>>({});
+  const [dirty, setDirty] = createSignal<Record<number, DirtySummary>>({});
+
+  onMount(async () => {
+    await refresh();
+    const timer = setInterval(pollDirty, 10_000);
+    onCleanup(() => clearInterval(timer));
+  });
+
+  async function refresh() {
+    const repos = await reposList();
+    setAppStore("repos", repos);
+    // Build the worktree map fresh and replace it atomically so keys for
+    // removed repos disappear — otherwise `prunePanes` (which iterates
+    // Object.values) would keep treating their ids as known and never prune.
+    const nextExpanded: Record<number, boolean> = {};
+    const nextWorktrees: Record<number, Worktree[]> = {};
+    for (const r of repos) {
+      nextExpanded[r.id] = true;
+      nextWorktrees[r.id] = await worktreesList(r.id);
+    }
+    setAppStore("worktreesByRepo", nextWorktrees);
+    setExpanded(nextExpanded);
+    prunePanes();
+    pollDirty();
+  }
+
+  let polling = false;
+  async function pollDirty() {
+    // On a repo with many worktrees a single run can exceed the 10s interval.
+    // Without this guard, overlapping runs race and an older result can stomp
+    // a fresher one via setDirty.
+    if (polling) return;
+    polling = true;
+    try {
+      const next: Record<number, DirtySummary> = {};
+      for (const list of Object.values(appStore.worktreesByRepo)) {
+        for (const w of list) {
+          try {
+            next[w.id] = await worktreeDirty(w.id);
+          } catch {
+            // ignore
+          }
+        }
+      }
+      setDirty(next);
+    } finally {
+      polling = false;
+    }
+  }
+
+  async function onAddRepo() {
+    const selected = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "Select a git repository",
+    });
+    if (!selected) return;
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    try {
+      await repoAdd(path);
+      await refresh();
+    } catch (e) {
+      console.error(e);
+      alert(`Couldn't add repo:\n${String(e)}`);
+    }
+  }
+
+  async function onRemoveRepo(r: Repo) {
+    const worktrees = appStore.worktreesByRepo[r.id] ?? [];
+    const msg =
+      `Remove "${r.name}" from Flock?\n\n` +
+      `• Any running Claude sessions for this repo will be killed.\n` +
+      `• Worktree directories on disk are KEPT. Re-adding the repo will\n  re-discover them.\n` +
+      `• To reclaim disk space, remove each worktree first (× on the branch)` +
+      (worktrees.length > 0
+        ? `.\n\n${worktrees.length} worktree(s) currently registered.`
+        : `.`);
+    if (!confirm(msg)) return;
+
+    // Close any panes for this repo's worktrees.
+    for (const w of worktrees) {
+      closePane(w.id);
+    }
+    await repoRemove(r.id);
+    await refresh();
+  }
+
+  async function onRemoveWorktree(w: Worktree) {
+    if (
+      !confirm(
+        `Remove worktree "${w.branch}"?\nThis deletes the worktree directory at\n${w.path}`,
+      )
+    )
+      return;
+    try {
+      await worktreeRemove(w.id, false);
+    } catch {
+      if (confirm("Worktree is dirty or locked. Force remove?")) {
+        await worktreeRemove(w.id, true);
+      } else {
+        return;
+      }
+    }
+    closePane(w.id);
+    await refresh();
+  }
+
+  function toggleExpand(id: number) {
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  function dirtyDotColor(d?: DirtySummary): string | null {
+    if (!d) return null;
+    if (d.staged > 0) return "var(--color-warn)";
+    if (d.unstaged > 0 || d.untracked > 0) return "var(--color-accent)";
+    return null;
+  }
+
+  async function openInFinder(path: string) {
+    try {
+      await revealItemInDir(path);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  return (
+    <aside class="w-64 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-elevated)]/40 flex flex-col overflow-hidden">
+      <div class="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
+        <span class="text-[10px] font-semibold tracking-[0.14em] uppercase text-[var(--color-fg-dim)]">
+          Repositories
+        </span>
+        <button
+          class="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] transition"
+          title="Add repository"
+          onClick={onAddRepo}
+        >
+          <FolderPlus size={14} />
+        </button>
+      </div>
+
+      <div class="flex-1 overflow-y-auto py-1">
+        <Show
+          when={appStore.repos.length > 0}
+          fallback={
+            <div class="px-4 py-8 text-center text-[var(--color-fg-dim)] text-[12px]">
+              <FolderGit2 size={24} class="mx-auto mb-3 opacity-40" />
+              <div>No repositories yet.</div>
+              <button
+                class="mt-3 px-3 py-1.5 text-[11px] font-medium rounded-md bg-[var(--color-accent)]/20 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/30 transition"
+                onClick={onAddRepo}
+              >
+                Add repository
+              </button>
+            </div>
+          }
+        >
+          <For each={appStore.repos}>
+            {(r) => (
+              <div class="mb-1">
+                <div class="group flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md hover:bg-[var(--color-bg-hover)]">
+                  <button
+                    class="flex-1 flex items-center gap-2 text-left text-[13px] font-medium text-[var(--color-fg)]"
+                    onClick={() => toggleExpand(r.id)}
+                  >
+                    <FolderGit2
+                      size={14}
+                      class="text-[var(--color-accent)] shrink-0"
+                    />
+                    <span class="truncate">{r.name}</span>
+                  </button>
+                  <button
+                    class="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
+                    title="Remove from Flock"
+                    onClick={() => onRemoveRepo(r)}
+                  >
+                    <X size={12} />
+                  </button>
+                  <button
+                    class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] transition"
+                    title="New worktree"
+                    onClick={() => props.onCreateWorktree(r)}
+                  >
+                    <Plus size={13} />
+                  </button>
+                </div>
+                <Show when={expanded()[r.id]}>
+                  <div class="ml-3 border-l border-[var(--color-border)] pl-1">
+                    <For
+                      each={appStore.worktreesByRepo[r.id] ?? []}
+                      fallback={
+                        <div class="px-3 py-1.5 text-[11px] text-[var(--color-fg-dim)]">
+                          no worktrees
+                        </div>
+                      }
+                    >
+                      {(w) => {
+                        const isActive = () => appStore.activePaneId === w.id;
+                        const isOpen = () => appStore.openPaneIds.includes(w.id);
+                        const dotColor = () => dirtyDotColor(dirty()[w.id]);
+                        return (
+                          <div
+                            class="group flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md cursor-pointer text-[12px] transition"
+                            classList={{
+                              "bg-[var(--color-accent)]/15 text-[var(--color-fg)]":
+                                isActive(),
+                              "hover:bg-[var(--color-bg-hover)]": !isActive(),
+                              "text-[var(--color-fg-muted)]": !isActive(),
+                            }}
+                            onClick={() => openPane(w.id)}
+                          >
+                            <GitBranch size={11} class="shrink-0 opacity-70" />
+                            <span class="truncate flex-1">{w.branch}</span>
+                            <Show when={dotColor()}>
+                              <span
+                                class="w-1.5 h-1.5 rounded-full"
+                                style={{ background: dotColor()! }}
+                                title="uncommitted changes"
+                              />
+                            </Show>
+                            <Show when={isOpen() && !isActive()}>
+                              <span
+                                class="w-1 h-1 rounded-full bg-[var(--color-fg-dim)]"
+                                title="open in another pane"
+                              />
+                            </Show>
+                            <button
+                              class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+                              title="Reveal in Finder"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openInFinder(w.path);
+                              }}
+                            >
+                              <FolderOpen size={11} />
+                            </button>
+                            <button
+                              class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
+                              title="Remove worktree"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onRemoveWorktree(w);
+                              }}
+                            >
+                              <X size={11} />
+                            </button>
+                          </div>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+            )}
+          </For>
+        </Show>
+      </div>
+    </aside>
+  );
+}

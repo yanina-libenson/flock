@@ -1,0 +1,35 @@
+[package]
+name = "flock"
+version = "0.1.0"
+description = "Parallel Claude Code workbench"
+authors = ["yani"]
+edition = "2021"
+
+[lib]
+name = "flock_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-single-instance = "2"
+
+serde = { version = "1", features = ["derive"] }
+
+# PTY (wezterm's crate — battle-tested)
+portable-pty = "0.8"
+
+# SQLite (bundled — no system dep needed)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Errors + misc
+anyhow = "1"
+thiserror = "2"
+dirs = "5"
+base64 = "0.22"
+env_logger = "0.11"
