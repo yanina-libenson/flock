@@ -78,6 +78,10 @@ pub fn spawn(app: AppHandle) {
             prev.retain(|k, _| live.contains(k));
             last_status.retain(|k, _| live.contains(k));
             titled.retain(|k| live.contains(k));
+            // Mirror the live set into the shared status map the REST API reads.
+            if let Some(state) = app.try_state::<AppState>() {
+                state.statuses.lock().unwrap().retain(|k, _| live.contains(k));
+            }
 
             for id in ids {
                 let Some(captured) = pty::tmux_capture_pane(id) else {
@@ -87,6 +91,9 @@ pub fn spawn(app: AppHandle) {
 
                 if last_status.get(&id) != Some(&status) {
                     last_status.insert(id, status);
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.statuses.lock().unwrap().insert(id, status);
+                    }
                     let _ = app.emit(
                         "worktree:status",
                         WorktreeStatusEvent {

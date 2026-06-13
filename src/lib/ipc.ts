@@ -98,6 +98,18 @@ export const sessionClose = (worktreeId: number) =>
   invoke<void>("session_close", { worktreeId });
 export const tmuxCheck = () => invoke<boolean>("tmux_check");
 
+// ---------- Remote API / PWA ----------
+
+export interface RemoteInfo {
+  running: boolean;
+  token: string;
+  urls: string[];
+}
+
+export const remoteStart = () => invoke<RemoteInfo>("remote_start");
+export const remoteStop = () => invoke<RemoteInfo>("remote_stop");
+export const remoteInfo = () => invoke<RemoteInfo>("remote_info");
+
 // ---------- Events ----------
 
 export interface PtyOutput {

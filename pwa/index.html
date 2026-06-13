@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#0b0d10" />
+    <title>Flock</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <style>
+      :root {
+        --bg: #0b0d10;
+        --bg-elev: #14171c;
+        --border: #232830;
+        --fg: #e6e9ef;
+        --fg-muted: #9aa3b2;
+        --fg-dim: #5b6472;
+        --accent: #5b9dff;
+        --warn: #f0b429;
+        --ok: #3ecf8e;
+      }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      html, body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        height: 100%;
+      }
+      header {
+        position: sticky;
+        top: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: max(env(safe-area-inset-top), 12px) 16px 12px;
+        background: rgba(11, 13, 16, 0.85);
+        backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border);
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        font-size: 12px;
+        color: var(--fg-muted);
+      }
+      header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+      header .count { margin-left: auto; text-transform: none; color: var(--warn); font-weight: 600; }
+      main { padding: 8px 12px 40px; }
+      .repo { margin: 14px 4px 6px; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-dim); }
+      .wt {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 14px;
+        margin: 6px 0;
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+      }
+      .wt.needs_input { border-color: rgba(240, 180, 41, 0.5); }
+      .wt .status { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--fg-dim); }
+      .wt .status.working { background: var(--accent); }
+      .wt .status.idle { background: var(--fg-dim); opacity: 0.5; }
+      .wt .status.needs_input { background: var(--warn); animation: pulse 1.4s ease-in-out infinite; }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+      .wt .body { min-width: 0; flex: 1; }
+      .wt .title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .wt.needs_input .title { color: var(--fg); }
+      .wt .branch { font-family: ui-monospace, monospace; font-size: 11px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .empty, .offline { text-align: center; color: var(--fg-dim); padding: 60px 24px; }
+      .offline { display: none; }
+      .token-prompt { padding: 40px 24px; text-align: center; color: var(--fg-muted); }
+      .token-prompt input { width: 100%; margin-top: 12px; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--fg); font-family: ui-monospace, monospace; }
+      .token-prompt button { margin-top: 12px; padding: 10px 18px; border-radius: 8px; border: none; background: var(--accent); color: #000; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="dot"></span>
+      <span>Flock</span>
+      <span class="count" id="count"></span>
+    </header>
+    <main id="main">
+      <div class="empty" id="loading">Connecting…</div>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

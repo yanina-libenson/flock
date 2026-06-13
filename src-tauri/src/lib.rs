@@ -1,3 +1,4 @@
+mod api;
 mod commands;
 mod db;
 mod error;
@@ -46,6 +47,9 @@ pub fn run() {
             commands::session_resize,
             commands::session_close,
             commands::tmux_check,
+            api::remote_start,
+            api::remote_stop,
+            api::remote_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

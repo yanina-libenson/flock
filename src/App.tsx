@@ -11,6 +11,7 @@ import { Sidebar } from "./components/Sidebar";
 import { TabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/TerminalPane";
 import { NewWorktreeModal } from "./components/NewWorktreeModal";
+import { SettingsModal, remoteEnabledPref } from "./components/SettingsModal";
 import {
   appStore,
   closePane,
@@ -26,6 +27,7 @@ import {
   onWorktreeStatus,
   onWorktreeTitle,
   onPtyExit,
+  remoteStart,
   type Repo,
   type Worktree,
 } from "./lib/ipc";
@@ -34,10 +36,11 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { GitBranch } from "lucide-solid";
+import { GitBranch, Settings as SettingsIcon } from "lucide-solid";
 
 function App() {
   const [modalRepo, setModalRepo] = createSignal<Repo | null>(null);
+  const [showSettings, setShowSettings] = createSignal(false);
   // null = still checking; true/false once we know.
   const [tmuxOk, setTmuxOk] = createSignal<boolean | null>(null);
 
@@ -54,6 +57,11 @@ function App() {
     tmuxCheck()
       .then(setTmuxOk)
       .catch(() => setTmuxOk(false));
+
+    // Resume remote access if it was on last session.
+    if (remoteEnabledPref()) {
+      remoteStart().catch((e) => console.error("remoteStart on boot failed", e));
+    }
 
     // Ask for notification permission once, up front, so the first
     // needs-input event can actually surface a banner.
@@ -141,6 +149,13 @@ function App() {
     <div class="flex flex-col h-screen w-screen overflow-hidden bg-[var(--color-bg)] text-[var(--color-fg)]">
       <TitleBar>
         <WaitingIndicator />
+        <button
+          class="no-drag p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+          title="Settings"
+          onClick={() => setShowSettings(true)}
+        >
+          <SettingsIcon size={14} />
+        </button>
       </TitleBar>
       <div class="flex flex-1 min-h-0">
         <Sidebar onCreateWorktree={(r) => setModalRepo(r)} />
@@ -173,6 +188,9 @@ function App() {
           repo={modalRepo()!}
           onClose={() => setModalRepo(null)}
         />
+      </Show>
+      <Show when={showSettings()}>
+        <SettingsModal onClose={() => setShowSettings(false)} />
       </Show>
       <Show when={tmuxOk() === false}>
         <TmuxMissingModal />
