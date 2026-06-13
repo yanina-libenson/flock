@@ -1,4 +1,4 @@
-// Flock PWA — phase 3a: live worktree status list.
+// Flock PWA — phases 3a/3b: live worktree status list + read-only terminal.
 // Auth: token arrives once via ?token=… (paste from the desktop Settings),
 // gets stashed in localStorage, and is stripped from the URL so it isn't
 // left in history/screenshots.
@@ -17,6 +17,7 @@ function readToken() {
 }
 
 let token = readToken();
+let currentWorktrees = [];
 
 async function api(path) {
   const res = await fetch(path, {
@@ -37,7 +38,14 @@ const STATUS_LABEL = {
   needs_input: "Waiting for you",
 };
 
+const esc = (s) =>
+  String(s).replace(
+    /[&<>"]/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
+  );
+
 function render(worktrees) {
+  currentWorktrees = worktrees;
   const main = document.getElementById("main");
   const waiting = worktrees.filter((w) => w.status === "needs_input").length;
   document.getElementById("count").textContent = waiting
@@ -49,7 +57,6 @@ function render(worktrees) {
     return;
   }
 
-  // Group by repo, preserving server order.
   const groups = [];
   const byRepo = new Map();
   for (const w of worktrees) {
@@ -60,12 +67,6 @@ function render(worktrees) {
     byRepo.get(w.repo).push(w);
   }
 
-  const esc = (s) =>
-    String(s).replace(
-      /[&<>"]/g,
-      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
-    );
-
   main.innerHTML = groups
     .map((repo) => {
       const rows = byRepo
@@ -73,10 +74,14 @@ function render(worktrees) {
         .map((w) => {
           const status = w.status || "";
           const title = w.title && w.title.trim() ? w.title : w.branch;
-          const sub = w.title && w.title.trim() ? `<div class="branch">${esc(w.branch)}</div>` : "";
-          return `<div class="wt ${status}">
+          const sub =
+            w.title && w.title.trim()
+              ? `<div class="branch">${esc(w.branch)}</div>`
+              : "";
+          return `<div class="wt ${status}" data-id="${w.id}">
             <span class="status ${status}" title="${STATUS_LABEL[status] || ""}"></span>
             <div class="body"><div class="title">${esc(title)}</div>${sub}</div>
+            <span class="chev">›</span>
           </div>`;
         })
         .join("");
@@ -84,6 +89,106 @@ function render(worktrees) {
     })
     .join("");
 }
+
+// Delegated tap → open terminal.
+document.getElementById("main").addEventListener("click", (e) => {
+  const row = e.target.closest(".wt");
+  if (!row) return;
+  const id = Number(row.getAttribute("data-id"));
+  const w = currentWorktrees.find((x) => x.id === id);
+  if (w) openTerm(w);
+});
+
+// ---------- terminal view (read-only) ----------
+
+let term = null;
+let fit = null;
+let es = null;
+let overlay = null;
+let onResize = null;
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function openTerm(w) {
+  clearInterval(timer); // pause the list poll while viewing
+  const title = w.title && w.title.trim() ? w.title : w.branch;
+
+  overlay = document.createElement("div");
+  overlay.className = "term-screen";
+  overlay.innerHTML = `
+    <div class="term-header">
+      <button class="back">‹ Back</button>
+      <div class="t">${esc(title)}</div>
+    </div>
+    <div class="term-host" id="term-host"></div>
+    <div class="term-note" id="term-note">Read-only — typing comes next</div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector(".back").onclick = closeTerm;
+
+  term = new Terminal({
+    fontSize: 12,
+    fontFamily: "ui-monospace, Menlo, monospace",
+    cursorBlink: false,
+    disableStdin: true,
+    convertEol: false,
+    theme: { background: "#0b0d10", foreground: "#e6e9ef" },
+  });
+  fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("term-host"));
+  fit.fit();
+
+  onResize = () => {
+    try {
+      fit.fit();
+    } catch {}
+  };
+  window.addEventListener("resize", onResize);
+  window.addEventListener("orientationchange", onResize);
+
+  es = new EventSource(
+    `/api/worktrees/${w.id}/stream?token=${encodeURIComponent(token)}`,
+  );
+  es.onmessage = (ev) => {
+    // Each frame is a full screen snapshot; clear then repaint.
+    term.write("\x1b[2J\x1b[H");
+    term.write(b64ToBytes(ev.data));
+  };
+  es.addEventListener("exit", () => {
+    const note = document.getElementById("term-note");
+    if (note) note.textContent = "Session ended.";
+  });
+}
+
+function closeTerm() {
+  if (es) {
+    es.close();
+    es = null;
+  }
+  if (onResize) {
+    window.removeEventListener("resize", onResize);
+    window.removeEventListener("orientationchange", onResize);
+    onResize = null;
+  }
+  if (term) {
+    term.dispose();
+    term = null;
+    fit = null;
+  }
+  if (overlay) {
+    overlay.remove();
+    overlay = null;
+  }
+  tick();
+  timer = setInterval(tick, 2000);
+}
+
+// ---------- token prompt ----------
 
 function showTokenPrompt() {
   const main = document.getElementById("main");
@@ -104,6 +209,8 @@ function showTokenPrompt() {
   };
 }
 
+// ---------- list polling ----------
+
 let timer = null;
 async function tick() {
   if (!token) {
@@ -118,7 +225,6 @@ async function tick() {
       showTokenPrompt();
       return;
     }
-    // Network/daemon unreachable — keep the last render, retry quietly.
     const loading = document.getElementById("loading");
     if (loading) loading.textContent = "Can't reach Flock. Retrying…";
   }

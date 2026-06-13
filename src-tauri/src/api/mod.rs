@@ -9,17 +9,20 @@
 
 use crate::monitor::WorktreeStatus;
 use crate::state::AppState;
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
 use serde::Serialize;
+use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Manager};
 use tokio::net::TcpListener;
@@ -33,6 +36,9 @@ const INDEX_HTML: &str = include_str!("../../../pwa/index.html");
 const APP_JS: &str = include_str!("../../../pwa/app.js");
 const MANIFEST: &str = include_str!("../../../pwa/manifest.webmanifest");
 const SW_JS: &str = include_str!("../../../pwa/sw.js");
+const XTERM_JS: &str = include_str!("../../../pwa/vendor/xterm.js");
+const XTERM_CSS: &str = include_str!("../../../pwa/vendor/xterm.css");
+const ADDON_FIT_JS: &str = include_str!("../../../pwa/vendor/addon-fit.js");
 
 #[derive(Clone)]
 struct ApiCtx {
@@ -207,6 +213,42 @@ async fn status_counts(State(ctx): State<ApiCtx>) -> Json<StatusCounts> {
     Json(c)
 }
 
+/// SSE live terminal: emits a base64 `capture-pane -e` snapshot of the
+/// session whenever the rendered screen changes (polled ~2.5 fps server-side).
+/// Snapshots are full screens — the PWA clears and repaints each frame. This
+/// sidesteps tmux's attach-client sizing (a phone viewer can't shrink the
+/// desktop) and supports multiple viewers. An `exit` event ends the stream
+/// when the session is gone.
+async fn stream(Path(id): Path<i64>) -> impl IntoResponse {
+    let body = async_stream::stream! {
+        let mut last = String::new();
+        let mut first = true;
+        let mut ticker = tokio::time::interval(Duration::from_millis(400));
+        loop {
+            ticker.tick().await;
+            let cap = tokio::task::spawn_blocking(move || crate::pty::tmux_capture_pane_ansi(id))
+                .await
+                .ok()
+                .flatten();
+            match cap {
+                Some(screen) => {
+                    if first || screen != last {
+                        first = false;
+                        last = screen.clone();
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(screen.as_bytes());
+                        yield Ok::<Event, Infallible>(Event::default().data(b64));
+                    }
+                }
+                None => {
+                    yield Ok::<Event, Infallible>(Event::default().event("exit").data(""));
+                    break;
+                }
+            }
+        }
+    };
+    Sse::new(body).keep_alive(KeepAlive::default())
+}
+
 async fn index() -> impl IntoResponse {
     Html(INDEX_HTML)
 }
@@ -222,10 +264,20 @@ async fn manifest() -> impl IntoResponse {
 async fn service_worker() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "application/javascript")], SW_JS)
 }
+async fn xterm_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "application/javascript")], XTERM_JS)
+}
+async fn xterm_css() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/css")], XTERM_CSS)
+}
+async fn addon_fit_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "application/javascript")], ADDON_FIT_JS)
+}
 
 fn build_router(ctx: ApiCtx) -> Router {
     let api = Router::new()
         .route("/worktrees", get(worktrees))
+        .route("/worktrees/:id/stream", get(stream))
         .route("/status", get(status_counts))
         .route_layer(middleware::from_fn_with_state(ctx.clone(), require_auth));
     Router::new()
@@ -233,6 +285,9 @@ fn build_router(ctx: ApiCtx) -> Router {
         .route("/app.js", get(app_js))
         .route("/manifest.webmanifest", get(manifest))
         .route("/sw.js", get(service_worker))
+        .route("/vendor/xterm.js", get(xterm_js))
+        .route("/vendor/xterm.css", get(xterm_css))
+        .route("/vendor/addon-fit.js", get(addon_fit_js))
         .nest("/api", api)
         .with_state(ctx)
 }

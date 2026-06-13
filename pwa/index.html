@@ -11,6 +11,7 @@
     <meta name="theme-color" content="#0b0d10" />
     <title>Flock</title>
     <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/vendor/xterm.css" />
     <style>
       :root {
         --bg: #0b0d10;
@@ -76,6 +77,14 @@
       .token-prompt { padding: 40px 24px; text-align: center; color: var(--fg-muted); }
       .token-prompt input { width: 100%; margin-top: 12px; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--fg); font-family: ui-monospace, monospace; }
       .token-prompt button { margin-top: 12px; padding: 10px 18px; border-radius: 8px; border: none; background: var(--accent); color: #000; font-weight: 600; }
+      .wt { cursor: pointer; }
+      .wt .chev { color: var(--fg-dim); font-size: 18px; }
+      .term-screen { position: fixed; inset: 0; display: flex; flex-direction: column; background: #000; z-index: 10; }
+      .term-header { display: flex; align-items: center; gap: 10px; padding: max(env(safe-area-inset-top), 12px) 14px 10px; background: var(--bg-elev); border-bottom: 1px solid var(--border); }
+      .term-header .back { background: none; border: none; color: var(--accent); font-size: 15px; padding: 4px 6px; }
+      .term-header .t { min-width: 0; font-weight: 600; font-size: 13px; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .term-host { flex: 1; min-height: 0; padding: 6px; overflow: hidden; }
+      .term-note { padding: 7px 14px calc(env(safe-area-inset-bottom) + 7px); font-size: 11px; color: var(--fg-dim); background: var(--bg-elev); border-top: 1px solid var(--border); text-align: center; }
     </style>
   </head>
   <body>
@@ -87,6 +96,8 @@
     <main id="main">
       <div class="empty" id="loading">Connecting…</div>
     </main>
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/addon-fit.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

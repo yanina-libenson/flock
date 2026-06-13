@@ -395,6 +395,23 @@ pub fn tmux_capture_pane(worktree_id: i64) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Like `tmux_capture_pane` but keeps escape sequences (`-e`) so colors and
+/// attributes survive — used to paint the live terminal in the PWA via
+/// xterm.js. The monitor uses the plain (escape-stripped) variant instead,
+/// since its text matching would choke on raw ANSI.
+pub fn tmux_capture_pane_ansi(worktree_id: i64) -> Option<String> {
+    let bin = tmux_bin()?;
+    let name = tmux_session_name(worktree_id);
+    let out = std::process::Command::new(bin)
+        .args(["-L", TMUX_SOCKET, "capture-pane", "-t", &name, "-e", "-p"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Does `tmux` exist on the user's PATH? We invoke via the login shell
 /// because macOS launches GUI apps with a minimal PATH that doesn't include
 /// `/opt/homebrew/bin`; the user's shell rc fixes that.
