@@ -107,8 +107,22 @@ export interface PtyExit {
   worktree_id: number;
 }
 
+/// Agent activity for a worktree, derived by the backend monitor from the
+/// session's rendered tmux screen. `needs_input` is the one that pulls you in.
+export type WorktreeStatus = "working" | "idle" | "needs_input";
+
+export interface WorktreeStatusEvent {
+  worktree_id: number;
+  status: WorktreeStatus;
+}
+
 export const onPtyOutput = (cb: (e: PtyOutput) => void): Promise<UnlistenFn> =>
   listen<PtyOutput>("pty:output", (e) => cb(e.payload));
 
 export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
   listen<PtyExit>("pty:exit", (e) => cb(e.payload));
+
+export const onWorktreeStatus = (
+  cb: (e: WorktreeStatusEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<WorktreeStatusEvent>("worktree:status", (e) => cb(e.payload));

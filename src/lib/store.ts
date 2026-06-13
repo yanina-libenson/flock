@@ -1,12 +1,15 @@
 import { createStore } from "solid-js/store";
 import { createEffect } from "solid-js";
-import type { Repo, Worktree } from "./ipc";
+import type { Repo, Worktree, WorktreeStatus } from "./ipc";
 
 export interface AppStoreState {
   repos: Repo[];
   worktreesByRepo: Record<number, Worktree[]>;
   openPaneIds: number[];
   activePaneId: number | null;
+  /// Live agent status per worktree id, pushed from the backend monitor.
+  /// Absent = no live session (never opened, or exited).
+  statusByWorktree: Record<number, WorktreeStatus>;
 }
 
 const PERSIST_KEY = "flock.panes.v1";
@@ -33,6 +36,7 @@ const [store, setStore] = createStore<AppStoreState>({
   worktreesByRepo: {},
   openPaneIds: persisted.openPaneIds,
   activePaneId: persisted.activePaneId,
+  statusByWorktree: {},
 });
 
 // Persist on any change to pane state.
@@ -77,6 +81,21 @@ export function closePane(worktreeId: number) {
 
 export function setActivePane(worktreeId: number | null) {
   setStore("activePaneId", worktreeId);
+}
+
+export function setWorktreeStatus(worktreeId: number, status: WorktreeStatus) {
+  setStore("statusByWorktree", worktreeId, status);
+}
+
+/// Drop a worktree's status (its session exited). Removes the key so the
+/// sidebar indicator disappears rather than freezing on the last value.
+export function clearWorktreeStatus(worktreeId: number) {
+  setStore("statusByWorktree", (prev) => {
+    if (!(worktreeId in prev)) return prev;
+    const next = { ...prev };
+    delete next[worktreeId];
+    return next;
+  });
 }
 
 /// Prune pane ids that no longer reference a real worktree.

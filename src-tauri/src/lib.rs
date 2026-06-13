@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod error;
 mod git;
+mod monitor;
 mod pty;
 mod state;
 
@@ -20,7 +21,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(app_state)
+        .setup(|app| {
+            monitor::spawn(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::repo_add,
             commands::repos_list,

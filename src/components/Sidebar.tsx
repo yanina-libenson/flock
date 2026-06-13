@@ -12,6 +12,7 @@ import {
   type Repo,
   type Worktree,
   type DirtySummary,
+  type PermissionMode,
 } from "../lib/ipc";
 import {
   appStore,
@@ -121,7 +122,8 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
   }
 
   async function onTogglePermissionMode(w: Worktree) {
-    const next = w.permission_mode === "bypassPermissions" ? "default" : "bypassPermissions";
+    const next: PermissionMode =
+      w.permission_mode === "bypassPermissions" ? "default" : "bypassPermissions";
     const isOpen = appStore.openPaneIds.includes(w.id);
     const verb = next === "bypassPermissions" ? "auto-approve" : "prompt for";
     const msg =
@@ -260,6 +262,7 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                         const isActive = () => appStore.activePaneId === w.id;
                         const isOpen = () => appStore.openPaneIds.includes(w.id);
                         const dotColor = () => dirtyDotColor(dirty()[w.id]);
+                        const status = () => appStore.statusByWorktree[w.id];
                         return (
                           <div
                             class="group flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md cursor-pointer text-[12px] transition"
@@ -267,10 +270,35 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                               "bg-[var(--color-accent)]/15 text-[var(--color-fg)]":
                                 isActive(),
                               "hover:bg-[var(--color-bg-hover)]": !isActive(),
-                              "text-[var(--color-fg-muted)]": !isActive(),
+                              "text-[var(--color-fg-muted)]":
+                                !isActive() && status() !== "needs_input",
+                              "text-[var(--color-fg)] font-medium":
+                                !isActive() && status() === "needs_input",
                             }}
                             onClick={() => openPane(w.id)}
                           >
+                            <span class="w-1.5 shrink-0 flex justify-center">
+                              <Show when={status()}>
+                                <span
+                                  class="w-1.5 h-1.5 rounded-full"
+                                  classList={{
+                                    "bg-[var(--color-warn)] animate-pulse":
+                                      status() === "needs_input",
+                                    "bg-[var(--color-accent)]":
+                                      status() === "working",
+                                    "bg-[var(--color-fg-dim)] opacity-50":
+                                      status() === "idle",
+                                  }}
+                                  title={
+                                    status() === "needs_input"
+                                      ? "Waiting for your input"
+                                      : status() === "working"
+                                        ? "Working…"
+                                        : "Idle"
+                                  }
+                                />
+                              </Show>
+                            </span>
                             <GitBranch size={11} class="shrink-0 opacity-70" />
                             <span class="truncate flex-1">{w.branch}</span>
                             <Show when={dotColor()}>

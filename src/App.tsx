@@ -11,8 +11,25 @@ import { Sidebar } from "./components/Sidebar";
 import { TabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/TerminalPane";
 import { NewWorktreeModal } from "./components/NewWorktreeModal";
-import { appStore, closePane, setActivePane } from "./lib/store";
-import { tmuxCheck, type Repo, type Worktree } from "./lib/ipc";
+import {
+  appStore,
+  closePane,
+  setActivePane,
+  setWorktreeStatus,
+  clearWorktreeStatus,
+} from "./lib/store";
+import {
+  tmuxCheck,
+  onWorktreeStatus,
+  onPtyExit,
+  type Repo,
+  type Worktree,
+} from "./lib/ipc";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { GitBranch } from "lucide-solid";
 
 function App() {
@@ -33,6 +50,46 @@ function App() {
     tmuxCheck()
       .then(setTmuxOk)
       .catch(() => setTmuxOk(false));
+
+    // Ask for notification permission once, up front, so the first
+    // needs-input event can actually surface a banner.
+    (async () => {
+      try {
+        if (!(await isPermissionGranted())) {
+          await requestPermission();
+        }
+      } catch {
+        /* notifications unavailable — degrade silently */
+      }
+    })();
+
+    // Backend monitor pushes one event per status change. needs_input is the
+    // attention signal: notify unless you're already looking at that pane.
+    const statusUnlisten = onWorktreeStatus((e) => {
+      const prev = appStore.statusByWorktree[e.worktree_id];
+      setWorktreeStatus(e.worktree_id, e.status);
+      if (e.status !== "needs_input" || prev === "needs_input") return;
+      const lookingHere =
+        appStore.activePaneId === e.worktree_id && document.hasFocus();
+      if (lookingHere) return;
+      const w = worktreesById().get(e.worktree_id);
+      const repo = w
+        ? appStore.repos.find((r) => r.id === w.repo_id)
+        : undefined;
+      const label = w
+        ? `${repo?.name ? `${repo.name}/` : ""}${w.branch}`
+        : `worktree ${e.worktree_id}`;
+      try {
+        sendNotification({ title: "Claude needs you", body: label });
+      } catch {
+        /* permission denied or unavailable */
+      }
+    });
+    const exitUnlisten = onPtyExit((e) => clearWorktreeStatus(e.worktree_id));
+    onCleanup(() => {
+      statusUnlisten.then((f) => f());
+      exitUnlisten.then((f) => f());
+    });
 
     const handler = (e: KeyboardEvent) => {
       if (!e.metaKey) return;

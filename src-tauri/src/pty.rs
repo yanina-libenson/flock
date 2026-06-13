@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 /// Dedicated tmux socket name — isolates Flock's sessions from any tmux the
@@ -327,6 +327,72 @@ pub fn tmux_kill_session(worktree_id: i64) {
     let _ = std::process::Command::new(shell)
         .args(["-i", "-l", "-c", &cmd])
         .output();
+}
+
+/// Absolute path to the `tmux` binary, resolved once via the login shell
+/// (macOS GUI apps launch with a minimal PATH that misses `/opt/homebrew/bin`;
+/// the user's shell rc fixes that). Cached so the status monitor — which polls
+/// every couple seconds — can invoke tmux directly without paying the
+/// interactive-shell startup cost on every call. tmux itself needs no special
+/// env to list sessions or capture panes; only spawning `claude` does.
+fn tmux_bin() -> Option<&'static Path> {
+    static BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let out = std::process::Command::new(shell)
+            .args(["-i", "-l", "-c", "command -v tmux"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if p.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(p))
+        }
+    })
+    .as_deref()
+}
+
+/// Worktree ids of every live Flock-owned tmux session on our dedicated socket.
+/// Returns empty when tmux is missing or no server is running.
+pub fn tmux_list_sessions() -> Vec<i64> {
+    let Some(bin) = tmux_bin() else {
+        return Vec::new();
+    };
+    let out = std::process::Command::new(bin)
+        .args(["-L", TMUX_SOCKET, "list-sessions", "-F", "#{session_name}"])
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("flock-"))
+        .filter_map(|s| s.parse::<i64>().ok())
+        .collect()
+}
+
+/// Capture the rendered screen of a worktree's tmux session, or None if the
+/// session is gone. `-p` prints the visible pane as plain text — the actual
+/// rendered cells with no escape sequences — which is exactly what the
+/// needs-input detector parses.
+pub fn tmux_capture_pane(worktree_id: i64) -> Option<String> {
+    let bin = tmux_bin()?;
+    let name = tmux_session_name(worktree_id);
+    let out = std::process::Command::new(bin)
+        .args(["-L", TMUX_SOCKET, "capture-pane", "-t", &name, "-p"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Does `tmux` exist on the user's PATH? We invoke via the login shell
