@@ -1,4 +1,4 @@
-use crate::db::{Repo, Worktree};
+use crate::db::{Repo, Worktree, DEFAULT_PERMISSION_MODE};
 use crate::error::{AppError, AppResult};
 use crate::git;
 use crate::pty;
@@ -27,7 +27,13 @@ pub fn repo_add(state: State<'_, AppState>, path: String) -> AppResult<Repo> {
     let entries = git::list_worktrees(&root).unwrap_or_default();
     for e in entries {
         if let Some(branch) = e.branch.clone() {
-            let _ = state.db.insert_worktree(repo.id, &branch, &e.path, None);
+            let _ = state.db.insert_worktree(
+                repo.id,
+                &branch,
+                &e.path,
+                None,
+                DEFAULT_PERMISSION_MODE,
+            );
         }
     }
     Ok(repo)
@@ -80,6 +86,32 @@ pub struct CreateWorktreeArgs {
     pub title: Option<String>,
     pub new_branch: bool,
     pub path: Option<String>,
+    /// Per-worktree Claude permission mode. Omit / None falls back to
+    /// `DEFAULT_PERMISSION_MODE` ("bypassPermissions"). Validated server-side
+    /// against the same whitelist as `worktree_set_permission_mode`.
+    pub permission_mode: Option<String>,
+}
+
+/// Permission-mode values forwarded to `claude --permission-mode`.
+/// Whitelisted in the backend because the value goes onto a shell command
+/// line; anything outside this list is rejected.
+const ALLOWED_PERMISSION_MODES: &[&str] = &[
+    "default",
+    "bypassPermissions",
+    "acceptEdits",
+    "auto",
+    "dontAsk",
+    "plan",
+];
+
+fn validate_permission_mode(mode: &str) -> AppResult<()> {
+    if ALLOWED_PERMISSION_MODES.contains(&mode) {
+        Ok(())
+    } else {
+        Err(AppError::msg(format!(
+            "invalid permission_mode {mode:?}; must be one of {ALLOWED_PERMISSION_MODES:?}"
+        )))
+    }
 }
 
 #[tauri::command]
@@ -108,24 +140,50 @@ pub fn worktree_create(
             Some("HEAD") | Some("") => None,
             Some(other) => Some(other.to_string()),
         };
-        git::add_worktree(
+        if let Err(e) = git::add_worktree(
             &repo_path,
             &path,
             &args.branch,
             effective_base.as_deref(),
             true,
-        )?;
+        ) {
+            eprintln!(
+                "flock: worktree_create new_branch failed: repo={} branch={:?} base={:?} path={} err={}",
+                repo_path.display(),
+                args.branch,
+                effective_base,
+                path.display(),
+                e
+            );
+            return Err(e);
+        }
     } else {
         let _ = git::fetch_branch(&repo_path, "origin", &args.branch);
-        git::add_worktree(&repo_path, &path, &args.branch, None, false)?;
+        if let Err(e) = git::add_worktree(&repo_path, &path, &args.branch, None, false) {
+            eprintln!(
+                "flock: worktree_create existing_branch failed: repo={} branch={:?} path={} err={}",
+                repo_path.display(),
+                args.branch,
+                path.display(),
+                e
+            );
+            return Err(e);
+        }
     }
     bootstrap_claude_settings(&repo_path, &path);
+
+    let permission_mode = args
+        .permission_mode
+        .as_deref()
+        .unwrap_or(DEFAULT_PERMISSION_MODE);
+    validate_permission_mode(permission_mode)?;
 
     let w = state.db.insert_worktree(
         repo.id,
         &args.branch,
         path.to_string_lossy().as_ref(),
         args.title.as_deref(),
+        permission_mode,
     )?;
     Ok(w)
 }
@@ -232,8 +290,29 @@ pub fn session_open(
         Path::new(&w.path),
         args.cols,
         args.rows,
+        &w.permission_mode,
     )?;
     state.db.touch_worktree(args.worktree_id)?;
+    Ok(())
+}
+
+/// Update the persisted permission mode for a worktree. Tears down the live
+/// tmux session so the next `session_open` restarts `claude` with the new
+/// flag — without this the old `claude` keeps running with the old mode
+/// (tmux `new-session -A` attaches to existing sessions verbatim).
+///
+/// Callers should warn the user that this discards the current Claude
+/// conversation in that workspace.
+#[tauri::command]
+pub fn worktree_set_permission_mode(
+    state: State<'_, AppState>,
+    id: i64,
+    mode: String,
+) -> AppResult<()> {
+    validate_permission_mode(&mode)?;
+    state.db.update_worktree_permission_mode(id, &mode)?;
+    state.pty.kill(id).ok();
+    pty::tmux_kill_session(id);
     Ok(())
 }
 

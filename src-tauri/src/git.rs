@@ -8,6 +8,12 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
+    // Materialize args once so we can log them on failure without consuming
+    // the iterator before spawn.
+    let args: Vec<std::ffi::OsString> = args
+        .into_iter()
+        .map(|s| s.as_ref().to_os_string())
+        .collect();
     // Prevent git from hanging on a credential or passphrase prompt when the
     // GUI can't forward stdin. If auth is needed, git will fail fast instead.
     let out = Command::new("git")
@@ -15,12 +21,21 @@ where
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "")
         .env("SSH_ASKPASS", "")
-        .args(args)
+        .args(&args)
         .output()?;
     if !out.status.success() {
-        return Err(AppError::Git(
-            String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        ));
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let argv: Vec<String> = args
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        eprintln!(
+            "flock: git failed (cwd={cwd}) git {argv} → exit={code:?} stderr={stderr:?}",
+            cwd = cwd.display(),
+            argv = argv.join(" "),
+            code = out.status.code(),
+        );
+        return Err(AppError::Git(stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }

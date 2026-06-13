@@ -8,6 +8,7 @@ import {
   worktreesList,
   worktreeRemove,
   worktreeDirty,
+  worktreeSetPermissionMode,
   type Repo,
   type Worktree,
   type DirtySummary,
@@ -26,6 +27,8 @@ import {
   X,
   FolderPlus,
   FolderOpen,
+  Shield,
+  ShieldOff,
 } from "lucide-solid";
 
 export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
@@ -115,6 +118,33 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
     }
     await repoRemove(r.id);
     await refresh();
+  }
+
+  async function onTogglePermissionMode(w: Worktree) {
+    const next = w.permission_mode === "bypassPermissions" ? "default" : "bypassPermissions";
+    const isOpen = appStore.openPaneIds.includes(w.id);
+    const verb = next === "bypassPermissions" ? "auto-approve" : "prompt for";
+    const msg =
+      `Switch "${w.branch}" to ${verb} permissions?\n\n` +
+      (isOpen
+        ? `The current Claude session in this workspace will be killed; reopening the pane starts a fresh session with the new mode.`
+        : `Next time you open this workspace, Claude will start with the new mode.`);
+    if (!confirm(msg)) return;
+    try {
+      await worktreeSetPermissionMode(w.id, next);
+      // Tear down the local pane state too so the next open re-runs session_open.
+      if (isOpen) closePane(w.id);
+      // Optimistically reflect the new mode in the sidebar.
+      const list = appStore.worktreesByRepo[w.repo_id] ?? [];
+      setAppStore(
+        "worktreesByRepo",
+        w.repo_id,
+        list.map((x) => (x.id === w.id ? { ...x, permission_mode: next } : x)),
+      );
+    } catch (e) {
+      console.error("worktreeSetPermissionMode failed", e);
+      alert(`Couldn't change permission mode:\n${String(e)}`);
+    }
   }
 
   async function onRemoveWorktree(w: Worktree) {
@@ -256,6 +286,30 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                                 title="open in another pane"
                               />
                             </Show>
+                            <button
+                              class="p-0.5 rounded hover:bg-[var(--color-bg)] transition"
+                              classList={{
+                                "text-[var(--color-warn)] opacity-90":
+                                  w.permission_mode === "bypassPermissions",
+                                "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] opacity-0 group-hover:opacity-100":
+                                  w.permission_mode !== "bypassPermissions",
+                              }}
+                              title={
+                                w.permission_mode === "bypassPermissions"
+                                  ? "Auto-approving permissions. Click to require prompts."
+                                  : "Prompting for permissions. Click to auto-approve."
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onTogglePermissionMode(w);
+                              }}
+                            >
+                              {w.permission_mode === "bypassPermissions" ? (
+                                <ShieldOff size={11} />
+                              ) : (
+                                <Shield size={11} />
+                              )}
+                            </button>
                             <button
                               class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
                               title="Reveal in Finder"

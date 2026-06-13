@@ -25,7 +25,14 @@ pub struct Worktree {
     pub title: Option<String>,
     pub created_at: i64,
     pub last_used: Option<i64>,
+    /// Claude `--permission-mode` value passed at session start.
+    /// `"bypassPermissions"` (default) → auto-approve everything;
+    /// `"default"` → Claude prompts as usual. Any other value Claude accepts
+    /// (acceptEdits, plan, …) is also stored verbatim and forwarded.
+    pub permission_mode: String,
 }
+
+pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
 fn now() -> i64 {
     SystemTime::now()
@@ -55,13 +62,14 @@ impl Db {
             );
 
             CREATE TABLE IF NOT EXISTS worktrees (
-              id         INTEGER PRIMARY KEY,
-              repo_id    INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
-              branch     TEXT NOT NULL,
-              path       TEXT NOT NULL UNIQUE,
-              title      TEXT,
-              created_at INTEGER NOT NULL,
-              last_used  INTEGER
+              id              INTEGER PRIMARY KEY,
+              repo_id         INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+              branch          TEXT NOT NULL,
+              path            TEXT NOT NULL UNIQUE,
+              title           TEXT,
+              created_at      INTEGER NOT NULL,
+              last_used       INTEGER,
+              permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions'
             );
 
             CREATE INDEX IF NOT EXISTS idx_worktrees_repo ON worktrees(repo_id);
@@ -71,6 +79,13 @@ impl Db {
             DROP TABLE IF EXISTS sessions;
             "#,
         )?;
+        // Defensive ALTER for DBs that predate the permission_mode column.
+        // SQLite has no IF NOT EXISTS for ADD COLUMN; the error is fine to
+        // swallow — it only fires when the column is already there.
+        let _ = conn.execute(
+            "ALTER TABLE worktrees ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions'",
+            [],
+        );
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -149,13 +164,14 @@ impl Db {
         branch: &str,
         path: &str,
         title: Option<&str>,
+        permission_mode: &str,
     ) -> AppResult<Worktree> {
         let c = self.c()?;
         c.execute(
-            "INSERT INTO worktrees (repo_id, branch, path, title, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO worktrees (repo_id, branch, path, title, created_at, permission_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(path) DO UPDATE SET branch=excluded.branch, title=excluded.title",
-            params![repo_id, branch, path, title, now()],
+            params![repo_id, branch, path, title, now(), permission_mode],
         )?;
         let id = c.query_row(
             "SELECT id FROM worktrees WHERE path = ?1",
@@ -169,7 +185,7 @@ impl Db {
     pub fn get_worktree(&self, id: i64) -> AppResult<Worktree> {
         let c = self.c()?;
         let w = c.query_row(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode
              FROM worktrees WHERE id = ?1",
             params![id],
             |row| {
@@ -181,6 +197,7 @@ impl Db {
                     title: row.get(4)?,
                     created_at: row.get(5)?,
                     last_used: row.get(6)?,
+                    permission_mode: row.get(7)?,
                 })
             },
         )?;
@@ -190,7 +207,7 @@ impl Db {
     pub fn list_worktrees(&self, repo_id: i64) -> AppResult<Vec<Worktree>> {
         let c = self.c()?;
         let mut stmt = c.prepare(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode
              FROM worktrees WHERE repo_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![repo_id], |row| {
@@ -202,6 +219,7 @@ impl Db {
                 title: row.get(4)?,
                 created_at: row.get(5)?,
                 last_used: row.get(6)?,
+                permission_mode: row.get(7)?,
             })
         })?;
         let mut out = Vec::new();
@@ -209,6 +227,14 @@ impl Db {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    pub fn update_worktree_permission_mode(&self, id: i64, mode: &str) -> AppResult<()> {
+        self.c()?.execute(
+            "UPDATE worktrees SET permission_mode = ?1 WHERE id = ?2",
+            params![mode, id],
+        )?;
+        Ok(())
     }
 
     pub fn delete_worktree(&self, id: i64) -> AppResult<()> {

@@ -18,7 +18,18 @@ export interface Worktree {
   title: string | null;
   created_at: number;
   last_used: number | null;
+  permission_mode: PermissionMode;
 }
+
+export type PermissionMode =
+  | "default"
+  | "bypassPermissions"
+  | "acceptEdits"
+  | "auto"
+  | "dontAsk"
+  | "plan";
+
+export const DEFAULT_PERMISSION_MODE: PermissionMode = "bypassPermissions";
 
 export interface DirtySummary {
   staged: number;
@@ -33,6 +44,7 @@ export interface CreateWorktreeArgs {
   title: string | null;
   new_branch: boolean;
   path: string | null;
+  permission_mode: PermissionMode | null;
 }
 
 export interface OpenSessionArgs {
@@ -65,6 +77,8 @@ export const worktreeDirty = (id: number) =>
   invoke<DirtySummary>("worktree_dirty", { id });
 export const worktreeCurrentBranch = (id: number) =>
   invoke<string>("worktree_current_branch", { id });
+export const worktreeSetPermissionMode = (id: number, mode: PermissionMode) =>
+  invoke<void>("worktree_set_permission_mode", { id, mode });
 
 // ---------- Session / PTY ----------
 //

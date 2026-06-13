@@ -121,6 +121,7 @@ impl PtyManager {
         cwd: &Path,
         cols: u16,
         rows: u16,
+        permission_mode: &str,
     ) -> AppResult<()> {
         // Evict any prior attach for this worktree. `kill()` marks the old
         // attach silent so its reader thread's tail `pty:exit` emit is
@@ -146,12 +147,27 @@ impl PtyManager {
 
         // Run through the user's interactive login shell so ~/.zshrc runs
         // and PATH picks up brew-installed tmux plus the user's `claude`.
+        //
+        // `--permission-mode` is appended only when not "default" — passing
+        // the literal string `default` is equivalent but noisier in `ps`.
+        // tmux `new-session -A` is sticky: the flag we choose now is the
+        // flag claude lives with until the session is killed. The frontend
+        // toggle handles that by calling kill() before re-attaching.
+        let claude_cmd = if permission_mode == "default" || permission_mode.is_empty() {
+            "claude".to_string()
+        } else {
+            format!(
+                "claude --permission-mode {}",
+                shell_escape(permission_mode)
+            )
+        };
         let tmux_cmd = format!(
-            "exec tmux -L {socket} -f {conf} new-session -A -D -s {name} -c {cwd} claude",
+            "exec tmux -L {socket} -f {conf} new-session -A -D -s {name} -c {cwd} {claude}",
             socket = shell_escape(TMUX_SOCKET),
             conf = shell_escape(&conf_path.to_string_lossy()),
             name = shell_escape(&session_name),
             cwd = shell_escape(&cwd_str),
+            claude = claude_cmd,
         );
 
         let mut cmd = CommandBuilder::new(&shell);
