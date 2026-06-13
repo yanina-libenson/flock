@@ -9,6 +9,7 @@ import {
   worktreeRemove,
   worktreeDirty,
   worktreeSetPermissionMode,
+  worktreeSetTitle,
   worktreeLabel,
   type Repo,
   type Worktree,
@@ -21,6 +22,7 @@ import {
   openPane,
   closePane,
   prunePanes,
+  applyWorktreeTitle,
 } from "../lib/store";
 import {
   FolderGit2,
@@ -31,11 +33,36 @@ import {
   FolderOpen,
   Shield,
   ShieldOff,
+  Pencil,
 } from "lucide-solid";
 
 export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
   const [expanded, setExpanded] = createSignal<Record<number, boolean>>({});
   const [dirty, setDirty] = createSignal<Record<number, DirtySummary>>({});
+  // Worktree id whose title is being edited inline, plus the draft text.
+  const [editingId, setEditingId] = createSignal<number | null>(null);
+  const [editDraft, setEditDraft] = createSignal("");
+
+  function startEditTitle(w: Worktree) {
+    setEditDraft((w.title ?? "").trim());
+    setEditingId(w.id);
+  }
+
+  /// Persist the edited title. Guarded on editingId so the input's blur (which
+  /// also fires on Enter-save and on Escape-cancel) can't double-write or undo
+  /// a cancel — Escape clears editingId first, so this becomes a no-op.
+  async function saveTitle(w: Worktree) {
+    if (editingId() !== w.id) return;
+    const next = editDraft().trim();
+    setEditingId(null);
+    if (next === (w.title ?? "").trim()) return;
+    try {
+      await worktreeSetTitle(w.id, next);
+      applyWorktreeTitle(w.id, next);
+    } catch (e) {
+      console.error("worktreeSetTitle failed", e);
+    }
+  }
 
   onMount(async () => {
     await refresh();
@@ -302,13 +329,47 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                             </span>
                             <GitBranch size={11} class="shrink-0 opacity-70" />
                             <div class="flex flex-col min-w-0 flex-1">
-                              <span class="truncate leading-tight">
-                                {worktreeLabel(w)}
-                              </span>
-                              <Show when={w.title && w.title.trim()}>
-                                <span class="truncate text-[10px] font-mono text-[var(--color-fg-dim)] leading-tight">
-                                  {w.branch}
-                                </span>
+                              <Show
+                                when={editingId() === w.id}
+                                fallback={
+                                  <>
+                                    <span class="truncate leading-tight">
+                                      {worktreeLabel(w)}
+                                    </span>
+                                    <Show when={w.title && w.title.trim()}>
+                                      <span class="truncate text-[10px] font-mono text-[var(--color-fg-dim)] leading-tight">
+                                        {w.branch}
+                                      </span>
+                                    </Show>
+                                  </>
+                                }
+                              >
+                                <input
+                                  ref={(el) =>
+                                    queueMicrotask(() => {
+                                      el.focus();
+                                      el.select();
+                                    })
+                                  }
+                                  class="w-full bg-[var(--color-bg)] border border-[var(--color-border-strong)] rounded px-1 py-0.5 text-[12px] text-[var(--color-fg)] outline-none"
+                                  value={editDraft()}
+                                  placeholder={w.branch}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onInput={(e) =>
+                                    setEditDraft(e.currentTarget.value)
+                                  }
+                                  onKeyDown={(e) => {
+                                    e.stopPropagation();
+                                    if (e.key === "Enter") {
+                                      e.preventDefault();
+                                      saveTitle(w);
+                                    } else if (e.key === "Escape") {
+                                      e.preventDefault();
+                                      setEditingId(null);
+                                    }
+                                  }}
+                                  onBlur={() => saveTitle(w)}
+                                />
                               </Show>
                             </div>
                             <Show when={dotColor()}>
@@ -347,6 +408,16 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                               ) : (
                                 <Shield size={11} />
                               )}
+                            </button>
+                            <button
+                              class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+                              title="Rename (edit title)"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                startEditTitle(w);
+                              }}
+                            >
+                              <Pencil size={11} />
                             </button>
                             <button
                               class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
