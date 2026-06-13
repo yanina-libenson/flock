@@ -98,6 +98,34 @@ export function clearWorktreeStatus(worktreeId: number) {
   });
 }
 
+/// All worktree ids in sidebar order (repos, then worktrees within each).
+function orderedWorktreeIds(): number[] {
+  const ids: number[] = [];
+  for (const r of store.repos) {
+    for (const w of store.worktreesByRepo[r.id] ?? []) ids.push(w.id);
+  }
+  return ids;
+}
+
+/// Worktree ids currently waiting on you, in sidebar order. Reactive — reads
+/// the store, so callers inside a tracking scope re-run on status changes.
+export function worktreesNeedingInput(): number[] {
+  return orderedWorktreeIds().filter(
+    (id) => store.statusByWorktree[id] === "needs_input",
+  );
+}
+
+/// Jump to the next agent waiting for input, cycling through them in sidebar
+/// order starting after the active pane. Opens the pane if it isn't already.
+/// No-op when nothing needs input.
+export function jumpToNextNeedingInput() {
+  const needing = worktreesNeedingInput();
+  if (needing.length === 0) return;
+  const cur = store.activePaneId;
+  const idx = cur === null ? -1 : needing.indexOf(cur);
+  openPane(needing[(idx + 1) % needing.length]);
+}
+
 /// Prune pane ids that no longer reference a real worktree.
 /// Called after initial repo/worktree load on app boot.
 export function prunePanes() {

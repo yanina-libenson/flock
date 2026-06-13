@@ -17,6 +17,8 @@ import {
   setActivePane,
   setWorktreeStatus,
   clearWorktreeStatus,
+  jumpToNextNeedingInput,
+  worktreesNeedingInput,
 } from "./lib/store";
 import {
   tmuxCheck,
@@ -93,6 +95,11 @@ function App() {
 
     const handler = (e: KeyboardEvent) => {
       if (!e.metaKey) return;
+      if (e.key === "j" || e.key === "J") {
+        e.preventDefault();
+        jumpToNextNeedingInput();
+        return;
+      }
       if (e.key === "w") {
         if (appStore.activePaneId !== null) {
           e.preventDefault();
@@ -126,7 +133,9 @@ function App() {
 
   return (
     <div class="flex flex-col h-screen w-screen overflow-hidden bg-[var(--color-bg)] text-[var(--color-fg)]">
-      <TitleBar />
+      <TitleBar>
+        <WaitingIndicator />
+      </TitleBar>
       <div class="flex flex-1 min-h-0">
         <Sidebar onCreateWorktree={(r) => setModalRepo(r)} />
         <main class="flex-1 flex flex-col min-w-0">
@@ -163,6 +172,24 @@ function App() {
         <TmuxMissingModal />
       </Show>
     </div>
+  );
+}
+
+/// Title-bar pill showing how many agents are waiting on you. Click (or Cmd+J)
+/// cycles to the next one. Hidden when nobody needs input.
+function WaitingIndicator() {
+  const count = createMemo(() => worktreesNeedingInput().length);
+  return (
+    <Show when={count() > 0}>
+      <button
+        class="no-drag flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium text-[var(--color-warn)] bg-[var(--color-warn)]/12 hover:bg-[var(--color-warn)]/20 transition"
+        title="Jump to the next agent waiting for you (⌘J)"
+        onClick={() => jumpToNextNeedingInput()}
+      >
+        <span class="w-1.5 h-1.5 rounded-full bg-[var(--color-warn)] animate-pulse" />
+        {count()} waiting
+      </button>
+    </Show>
   );
 }
 
