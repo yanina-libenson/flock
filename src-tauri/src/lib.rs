@@ -40,6 +40,7 @@ pub fn run() {
             commands::worktree_dirty,
             commands::worktree_current_branch,
             commands::worktree_set_permission_mode,
+            commands::worktree_set_title,
             commands::session_open,
             commands::session_write,
             commands::session_resize,

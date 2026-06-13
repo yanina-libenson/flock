@@ -98,6 +98,21 @@ export function clearWorktreeStatus(worktreeId: number) {
   });
 }
 
+/// Apply a title pushed from the backend monitor to the matching worktree,
+/// wherever it lives in the repo map.
+export function applyWorktreeTitle(worktreeId: number, title: string) {
+  for (const repoId of Object.keys(store.worktreesByRepo)) {
+    const rid = Number(repoId);
+    const idx = (store.worktreesByRepo[rid] ?? []).findIndex(
+      (w) => w.id === worktreeId,
+    );
+    if (idx >= 0) {
+      setStore("worktreesByRepo", rid, idx, "title", title);
+      return;
+    }
+  }
+}
+
 /// All worktree ids in sidebar order (repos, then worktrees within each).
 function orderedWorktreeIds(): number[] {
   const ids: number[] = [];

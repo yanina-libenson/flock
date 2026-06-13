@@ -17,12 +17,14 @@ import {
   setActivePane,
   setWorktreeStatus,
   clearWorktreeStatus,
+  applyWorktreeTitle,
   jumpToNextNeedingInput,
   worktreesNeedingInput,
 } from "./lib/store";
 import {
   tmuxCheck,
   onWorktreeStatus,
+  onWorktreeTitle,
   onPtyExit,
   type Repo,
   type Worktree,
@@ -87,9 +89,13 @@ function App() {
         /* permission denied or unavailable */
       }
     });
+    const titleUnlisten = onWorktreeTitle((e) =>
+      applyWorktreeTitle(e.worktree_id, e.title),
+    );
     const exitUnlisten = onPtyExit((e) => clearWorktreeStatus(e.worktree_id));
     onCleanup(() => {
       statusUnlisten.then((f) => f());
+      titleUnlisten.then((f) => f());
       exitUnlisten.then((f) => f());
     });
 

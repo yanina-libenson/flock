@@ -79,6 +79,8 @@ export const worktreeCurrentBranch = (id: number) =>
   invoke<string>("worktree_current_branch", { id });
 export const worktreeSetPermissionMode = (id: number, mode: PermissionMode) =>
   invoke<void>("worktree_set_permission_mode", { id, mode });
+export const worktreeSetTitle = (id: number, title: string) =>
+  invoke<void>("worktree_set_title", { id, title });
 
 // ---------- Session / PTY ----------
 //
@@ -116,6 +118,17 @@ export interface WorktreeStatusEvent {
   status: WorktreeStatus;
 }
 
+export interface WorktreeTitleEvent {
+  worktree_id: number;
+  title: string;
+}
+
+/// What to show for a worktree: its auto-generated title when present, else
+/// the branch name (the place slug).
+export function worktreeLabel(w: Worktree): string {
+  return w.title && w.title.trim() ? w.title.trim() : w.branch;
+}
+
 export const onPtyOutput = (cb: (e: PtyOutput) => void): Promise<UnlistenFn> =>
   listen<PtyOutput>("pty:output", (e) => cb(e.payload));
 
@@ -126,3 +139,8 @@ export const onWorktreeStatus = (
   cb: (e: WorktreeStatusEvent) => void,
 ): Promise<UnlistenFn> =>
   listen<WorktreeStatusEvent>("worktree:status", (e) => cb(e.payload));
+
+export const onWorktreeTitle = (
+  cb: (e: WorktreeTitleEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<WorktreeTitleEvent>("worktree:title", (e) => cb(e.payload));

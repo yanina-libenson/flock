@@ -5,7 +5,7 @@ import {
   closePane,
   setActivePane,
 } from "../lib/store";
-import type { Worktree } from "../lib/ipc";
+import { worktreeLabel, type Worktree } from "../lib/ipc";
 
 export function TabBar(props: {
   worktreesById: Accessor<Map<number, Worktree>>;
@@ -29,7 +29,7 @@ export function TabBar(props: {
                 onClick={() => setActivePane(id)}
               >
                 <GitBranch size={11} class="shrink-0 opacity-70" />
-                <span class="max-w-[240px] truncate">{w()!.branch}</span>
+                <span class="max-w-[240px] truncate">{worktreeLabel(w()!)}</span>
                 <button
                   class="opacity-40 hover:opacity-100 hover:text-[var(--color-danger)] transition"
                   onClick={(e) => {

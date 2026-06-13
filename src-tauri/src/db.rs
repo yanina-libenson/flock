@@ -237,6 +237,14 @@ impl Db {
         Ok(())
     }
 
+    pub fn update_worktree_title(&self, id: i64, title: &str) -> AppResult<()> {
+        self.c()?.execute(
+            "UPDATE worktrees SET title = ?1 WHERE id = ?2",
+            params![title, id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_worktree(&self, id: i64) -> AppResult<()> {
         self.c()?
             .execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;

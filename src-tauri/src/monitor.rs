@@ -15,10 +15,15 @@
 //!   - **idle** — stable, but no prompt and no trailing question.
 
 use crate::pty;
+use crate::state::AppState;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// How often we capture every session. Doubles as the idle debounce: a screen
 /// must stay unchanged across one full tick before it reads as idle /
@@ -39,6 +44,17 @@ pub struct WorktreeStatusEvent {
     pub status: WorktreeStatus,
 }
 
+#[derive(Serialize, Clone)]
+pub struct WorktreeTitleEvent {
+    pub worktree_id: i64,
+    pub title: String,
+}
+
+/// How long to wait for the one-shot `claude -p` title summarizer before
+/// giving up and killing it. Generous — a cold `claude` start loads global
+/// config; the call runs off the poll thread so latency only delays the title.
+const TITLE_GEN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Spawn iOS-style focusless monitoring. Runs for the life of the app on its
 /// own thread; if tmux is absent every poll is a cheap no-op.
 pub fn spawn(app: AppHandle) {
@@ -47,6 +63,10 @@ pub fn spawn(app: AppHandle) {
         let mut prev: HashMap<i64, String> = HashMap::new();
         // Last emitted status per worktree — so we only emit on change.
         let mut last_status: HashMap<i64, WorktreeStatus> = HashMap::new();
+        // Worktrees we've already resolved a title for (or attempted) this run.
+        // Prevents re-firing the summarizer; persistence across restarts is via
+        // the DB title column (checked before generating).
+        let mut titled: HashSet<i64> = HashSet::new();
 
         loop {
             std::thread::sleep(POLL_INTERVAL);
@@ -57,13 +77,13 @@ pub fn spawn(app: AppHandle) {
             // tracking. The frontend clears its dot off the `pty:exit` event.
             prev.retain(|k, _| live.contains(k));
             last_status.retain(|k, _| live.contains(k));
+            titled.retain(|k| live.contains(k));
 
             for id in ids {
                 let Some(captured) = pty::tmux_capture_pane(id) else {
                     continue;
                 };
                 let status = detect_status(&captured, prev.get(&id).map(String::as_str));
-                prev.insert(id, captured);
 
                 if last_status.get(&id) != Some(&status) {
                     last_status.insert(id, status);
@@ -75,6 +95,9 @@ pub fn spawn(app: AppHandle) {
                         },
                     );
                 }
+
+                maybe_generate_title(&app, &mut titled, id, &captured);
+                prev.insert(id, captured);
             }
         }
     });
@@ -164,6 +187,148 @@ fn decoration_line(line: &str) -> bool {
     }
 }
 
+/// Once per worktree, after the agent has actually responded, kick off a
+/// background title summary. Gated so it fires exactly once: the `⏺` bullet
+/// only appears after Claude produces a response (so we never summarize an
+/// empty welcome screen), and an existing DB title short-circuits it on
+/// restart. The generation itself runs on its own thread — a cold `claude -p`
+/// can take seconds, and the 2s poll loop must not block on it.
+fn maybe_generate_title(app: &AppHandle, titled: &mut HashSet<i64>, id: i64, screen: &str) {
+    if titled.contains(&id) {
+        return;
+    }
+    // No response yet → no task to title. Cheap gate before any DB/LLM work.
+    if !screen.contains('⏺') {
+        return;
+    }
+    let state = app.state::<AppState>();
+    match state.db.get_worktree(id) {
+        Ok(w) => {
+            if w.title.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+                titled.insert(id); // already titled (e.g. set last run) — leave it
+                return;
+            }
+        }
+        // Session with no DB row (stale tmux session) — not ours to title.
+        Err(_) => return,
+    }
+
+    // Mark attempted up front so subsequent polls don't spawn a second one
+    // while this generation is in flight.
+    titled.insert(id);
+    let app = app.clone();
+    let screen = screen.to_string();
+    std::thread::spawn(move || {
+        let Some(title) = generate_title(&screen) else {
+            return;
+        };
+        let state = app.state::<AppState>();
+        if state.db.update_worktree_title(id, &title).is_ok() {
+            let _ = app.emit(
+                "worktree:title",
+                WorktreeTitleEvent {
+                    worktree_id: id,
+                    title,
+                },
+            );
+        }
+    });
+}
+
+/// Absolute path to the `claude` binary, resolved once via the login shell
+/// (same PATH reasoning as `pty::tmux_bin`). None when claude isn't installed,
+/// in which case titles simply never generate and worktrees keep showing the
+/// branch name.
+fn claude_bin() -> Option<&'static Path> {
+    static BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let out = std::process::Command::new(shell)
+            .args(["-i", "-l", "-c", "command -v claude"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if p.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(p))
+        }
+    })
+    .as_deref()
+}
+
+/// Summarize a captured terminal screen into a short worktree title via a
+/// one-shot headless `claude -p` call on the fast (haiku) model. Returns None
+/// on any failure (claude missing, timeout, non-zero exit, empty reply) — the
+/// caller just leaves the worktree untitled.
+fn generate_title(screen: &str) -> Option<String> {
+    let bin = claude_bin()?;
+    let prompt = format!(
+        "Below is a snapshot of a coding agent's terminal session. In 3 to 6 words, \
+         write a short title describing what is being worked on. Reply with ONLY the \
+         title — no quotes, no trailing punctuation, no preamble.\n\n---\n{screen}\n---"
+    );
+
+    // Run in a neutral dir so we don't load the target project's CLAUDE.md /
+    // .mcp.json (slower, and irrelevant to a summary).
+    let mut child = std::process::Command::new(bin)
+        .args(["-p", "--model", "haiku"])
+        .arg(&prompt)
+        .current_dir(std::env::temp_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    // Drain stdout on a side thread so a large reply can't deadlock the pipe
+    // while we poll for exit.
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    let deadline = Instant::now() + TITLE_GEN_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let raw = rx.recv_timeout(Duration::from_secs(2)).ok()?;
+                return sanitize_title(&raw);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Clean a raw model reply into a title: first non-empty line, surrounding
+/// quotes/backticks stripped, capped to 60 chars. None when nothing usable.
+fn sanitize_title(raw: &str) -> Option<String> {
+    let line = raw.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = line
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+        .trim();
+    if line.is_empty() {
+        return None;
+    }
+    Some(line.chars().take(60).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +385,26 @@ mod tests {
     fn no_prompt_anchor_means_no_question() {
         // A `?` in plain output with no input-prompt anchor must not fire.
         assert!(!ends_in_question("some log line ending in?\nmore output\n"));
+    }
+
+    #[test]
+    fn sanitize_title_strips_quotes_and_picks_first_line() {
+        assert_eq!(
+            sanitize_title("\"Fix the checkout race\"\n").as_deref(),
+            Some("Fix the checkout race")
+        );
+        assert_eq!(
+            sanitize_title("\n\n  Migrate auth to OAuth  \n").as_deref(),
+            Some("Migrate auth to OAuth")
+        );
+        assert_eq!(sanitize_title("   \n  ").as_deref(), None);
+        assert_eq!(sanitize_title("").as_deref(), None);
+    }
+
+    #[test]
+    fn sanitize_title_caps_length() {
+        let long = "a".repeat(200);
+        assert_eq!(sanitize_title(&long).unwrap().chars().count(), 60);
     }
 
     #[test]

@@ -316,6 +316,15 @@ pub fn worktree_set_permission_mode(
     Ok(())
 }
 
+/// Set a worktree's display title. Used to correct or override the title the
+/// monitor auto-generates from the session. Display-only — branch and worktree
+/// path stay locked to the original slug.
+#[tauri::command]
+pub fn worktree_set_title(state: State<'_, AppState>, id: i64, title: String) -> AppResult<()> {
+    state.db.update_worktree_title(id, &title)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn session_write(
     state: State<'_, AppState>,

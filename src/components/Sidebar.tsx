@@ -9,6 +9,7 @@ import {
   worktreeRemove,
   worktreeDirty,
   worktreeSetPermissionMode,
+  worktreeLabel,
   type Repo,
   type Worktree,
   type DirtySummary,
@@ -300,7 +301,16 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                               </Show>
                             </span>
                             <GitBranch size={11} class="shrink-0 opacity-70" />
-                            <span class="truncate flex-1">{w.branch}</span>
+                            <div class="flex flex-col min-w-0 flex-1">
+                              <span class="truncate leading-tight">
+                                {worktreeLabel(w)}
+                              </span>
+                              <Show when={w.title && w.title.trim()}>
+                                <span class="truncate text-[10px] font-mono text-[var(--color-fg-dim)] leading-tight">
+                                  {w.branch}
+                                </span>
+                              </Show>
+                            </div>
                             <Show when={dotColor()}>
                               <span
                                 class="w-1.5 h-1.5 rounded-full"
