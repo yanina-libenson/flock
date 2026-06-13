@@ -114,6 +114,32 @@ function b64ToBytes(b64) {
   return bytes;
 }
 
+async function sendInput(id, body) {
+  try {
+    await fetch(`/api/worktrees/${id}/input`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    console.error("sendInput failed", e);
+  }
+}
+
+const VKEYS = [
+  ["Esc", "escape"],
+  ["Tab", "tab"],
+  ["⇧Tab", "shift-tab"],
+  ["↑", "up"],
+  ["↓", "down"],
+  ["←", "left"],
+  ["→", "right"],
+  ["Ctrl-C", "ctrl-c"],
+];
+
 function openTerm(w) {
   clearInterval(timer); // pause the list poll while viewing
   const title = w.title && w.title.trim() ? w.title : w.branch;
@@ -126,9 +152,38 @@ function openTerm(w) {
       <div class="t">${esc(title)}</div>
     </div>
     <div class="term-host" id="term-host"></div>
-    <div class="term-note" id="term-note">Read-only — typing comes next</div>`;
+    <div class="term-keys" id="term-keys"></div>
+    <div class="term-compose">
+      <input id="term-input" type="text" placeholder="Message…  (Send to submit)"
+             autocomplete="off" autocapitalize="off" autocorrect="off" />
+      <button id="term-send">Send</button>
+    </div>`;
   document.body.appendChild(overlay);
   overlay.querySelector(".back").onclick = closeTerm;
+
+  const keysEl = overlay.querySelector("#term-keys");
+  for (const [label, key] of VKEYS) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.onclick = () => sendInput(w.id, { key });
+    keysEl.appendChild(b);
+  }
+
+  const inputEl = overlay.querySelector("#term-input");
+  const submit = async () => {
+    const v = inputEl.value;
+    if (!v) return;
+    inputEl.value = "";
+    await sendInput(w.id, { text: v });
+    await sendInput(w.id, { key: "enter" });
+  };
+  overlay.querySelector("#term-send").onclick = submit;
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submit();
+    }
+  });
 
   term = new Terminal({
     fontSize: 12,

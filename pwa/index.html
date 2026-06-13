@@ -84,7 +84,12 @@
       .term-header .back { background: none; border: none; color: var(--accent); font-size: 15px; padding: 4px 6px; }
       .term-header .t { min-width: 0; font-weight: 600; font-size: 13px; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .term-host { flex: 1; min-height: 0; padding: 6px; overflow: hidden; }
-      .term-note { padding: 7px 14px calc(env(safe-area-inset-bottom) + 7px); font-size: 11px; color: var(--fg-dim); background: var(--bg-elev); border-top: 1px solid var(--border); text-align: center; }
+      .term-keys { display: flex; gap: 6px; padding: 6px 10px; background: var(--bg-elev); border-top: 1px solid var(--border); overflow-x: auto; }
+      .term-keys button { flex: none; min-width: 40px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg-muted); font-size: 13px; }
+      .term-keys button:active { background: var(--accent); color: #000; }
+      .term-compose { display: flex; gap: 8px; padding: 8px 10px calc(env(safe-area-inset-bottom) + 8px); background: var(--bg-elev); border-top: 1px solid var(--border); }
+      .term-compose input { flex: 1; min-width: 0; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 15px; }
+      .term-compose button { flex: none; padding: 10px 16px; border-radius: 8px; border: none; background: var(--accent); color: #000; font-weight: 600; }
     </style>
   </head>
   <body>

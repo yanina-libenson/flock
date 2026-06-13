@@ -412,6 +412,29 @@ pub fn tmux_capture_pane_ansi(worktree_id: i64) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Send input to a worktree's tmux session. Literal text goes through
+/// `send-keys -l` (typed verbatim); otherwise `payload` is a tmux key name
+/// (`Enter`, `Escape`, `C-c`, …). Goes straight to tmux (args, no shell) so
+/// the text is never interpreted as a command. Returns false if tmux or the
+/// session is unavailable.
+pub fn tmux_send(worktree_id: i64, literal: bool, payload: &str) -> bool {
+    let Some(bin) = tmux_bin() else {
+        return false;
+    };
+    let name = tmux_session_name(worktree_id);
+    let mut args: Vec<&str> = vec!["-L", TMUX_SOCKET, "send-keys", "-t", name.as_str()];
+    if literal {
+        args.push("-l");
+        args.push("--");
+    }
+    args.push(payload);
+    std::process::Command::new(bin)
+        .args(&args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Does `tmux` exist on the user's PATH? We invoke via the login shell
 /// because macOS launches GUI apps with a minimal PATH that doesn't include
 /// `/opt/homebrew/bin`; the user's shell rc fixes that.

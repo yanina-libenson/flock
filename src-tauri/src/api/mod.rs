@@ -14,10 +14,10 @@ use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -249,6 +249,55 @@ async fn stream(Path(id): Path<i64>) -> impl IntoResponse {
     Sse::new(body).keep_alive(KeepAlive::default())
 }
 
+#[derive(Deserialize)]
+struct InputBody {
+    text: Option<String>,
+    key: Option<String>,
+}
+
+/// Map a frontend key name to a tmux key token. Allowlisted — an unknown key
+/// is rejected rather than forwarded.
+fn map_key(key: &str) -> Option<&'static str> {
+    Some(match key.to_ascii_lowercase().as_str() {
+        "enter" => "Enter",
+        "escape" | "esc" => "Escape",
+        "tab" => "Tab",
+        "shift-tab" | "btab" => "BTab",
+        "up" => "Up",
+        "down" => "Down",
+        "left" => "Left",
+        "right" => "Right",
+        "backspace" => "BSpace",
+        "ctrl-c" => "C-c",
+        "ctrl-d" => "C-d",
+        "ctrl-u" => "C-u",
+        _ => return None,
+    })
+}
+
+/// Send input to a session: `{"text": "..."}` types literally, `{"key":"esc"}`
+/// sends a special key. The agent's reply shows up on the SSE stream.
+async fn input(Path(id): Path<i64>, Json(body): Json<InputBody>) -> StatusCode {
+    let (literal, payload) = if let Some(text) = body.text {
+        (true, text)
+    } else if let Some(key) = body.key {
+        match map_key(&key) {
+            Some(tok) => (false, tok.to_string()),
+            None => return StatusCode::BAD_REQUEST,
+        }
+    } else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let ok = tokio::task::spawn_blocking(move || crate::pty::tmux_send(id, literal, &payload))
+        .await
+        .unwrap_or(false);
+    if ok {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::BAD_GATEWAY
+    }
+}
+
 async fn index() -> impl IntoResponse {
     Html(INDEX_HTML)
 }
@@ -278,6 +327,7 @@ fn build_router(ctx: ApiCtx) -> Router {
     let api = Router::new()
         .route("/worktrees", get(worktrees))
         .route("/worktrees/:id/stream", get(stream))
+        .route("/worktrees/:id/input", post(input))
         .route("/status", get(status_counts))
         .route_layer(middleware::from_fn_with_state(ctx.clone(), require_auth));
     Router::new()
@@ -384,6 +434,16 @@ mod tests {
         assert!(t
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn map_key_allowlist() {
+        assert_eq!(map_key("enter"), Some("Enter"));
+        assert_eq!(map_key("Esc"), Some("Escape"));
+        assert_eq!(map_key("shift-tab"), Some("BTab"));
+        assert_eq!(map_key("ctrl-c"), Some("C-c"));
+        assert_eq!(map_key("rm -rf"), None);
+        assert_eq!(map_key(""), None);
     }
 
     #[test]
