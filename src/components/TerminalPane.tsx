@@ -1,7 +1,6 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -111,11 +110,11 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
         });
       }),
     );
-    try {
-      term.loadAddon(new WebglAddon());
-    } catch {
-      // WebGL optional — falls back to canvas renderer.
-    }
+    // No WebGL addon: xterm's default DOM renderer. The WebGL renderer
+    // corrupts on every write inside the Tauri webview (stale/overlapping
+    // glyphs, mis-positioned with non-integer lineHeight) — a fresh GL context
+    // from a reload renders once then re-breaks. The DOM renderer is rock-solid
+    // and plenty fast for a terminal pane.
 
     term.open(containerRef);
     fit.fit();

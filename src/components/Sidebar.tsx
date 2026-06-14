@@ -27,7 +27,6 @@ import {
 import {
   FolderGit2,
   Plus,
-  GitBranch,
   X,
   FolderPlus,
   FolderOpen,
@@ -277,7 +276,7 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                   </button>
                 </div>
                 <Show when={expanded()[r.id]}>
-                  <div class="ml-3 border-l border-[var(--color-border)] pl-1">
+                  <div class="ml-1.5 border-l border-[var(--color-border)] pl-1">
                     <For
                       each={appStore.worktreesByRepo[r.id] ?? []}
                       fallback={
@@ -327,13 +326,15 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                                 />
                               </Show>
                             </span>
-                            <GitBranch size={11} class="shrink-0 opacity-70" />
                             <div class="flex flex-col min-w-0 flex-1">
                               <Show
                                 when={editingId() === w.id}
                                 fallback={
                                   <>
-                                    <span class="truncate leading-tight">
+                                    <span
+                                      class="truncate text-[13px] font-medium text-[var(--color-fg)] leading-snug"
+                                      title={worktreeLabel(w)}
+                                    >
                                       {worktreeLabel(w)}
                                     </span>
                                     <Show when={w.title && w.title.trim()}>
@@ -386,11 +387,11 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                               />
                             </Show>
                             <button
-                              class="p-0.5 rounded hover:bg-[var(--color-bg)] transition"
+                              class="p-0.5 rounded hover:bg-[var(--color-bg)] transition shrink-0"
                               classList={{
-                                "text-[var(--color-warn)] opacity-90":
+                                "text-[var(--color-warn)] opacity-90 inline-flex":
                                   w.permission_mode === "bypassPermissions",
-                                "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] opacity-0 group-hover:opacity-100":
+                                "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] hidden group-hover:inline-flex":
                                   w.permission_mode !== "bypassPermissions",
                               }}
                               title={
@@ -409,36 +410,38 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                                 <Shield size={11} />
                               )}
                             </button>
-                            <button
-                              class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
-                              title="Rename (edit title)"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                startEditTitle(w);
-                              }}
-                            >
-                              <Pencil size={11} />
-                            </button>
-                            <button
-                              class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
-                              title="Reveal in Finder"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openInFinder(w.path);
-                              }}
-                            >
-                              <FolderOpen size={11} />
-                            </button>
-                            <button
-                              class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
-                              title="Remove worktree"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onRemoveWorktree(w);
-                              }}
-                            >
-                              <X size={11} />
-                            </button>
+                            <div class="hidden group-hover:flex items-center gap-0.5 shrink-0">
+                              <button
+                                class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+                                title="Rename (edit title)"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startEditTitle(w);
+                                }}
+                              >
+                                <Pencil size={11} />
+                              </button>
+                              <button
+                                class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+                                title="Reveal in Finder"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openInFinder(w.path);
+                                }}
+                              >
+                                <FolderOpen size={11} />
+                              </button>
+                              <button
+                                class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
+                                title="Remove worktree"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onRemoveWorktree(w);
+                                }}
+                              >
+                                <X size={11} />
+                              </button>
+                            </div>
                           </div>
                         );
                       }}
