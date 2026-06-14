@@ -18,10 +18,8 @@ use crate::pty;
 use crate::state::AppState;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::io::{Read, Write};
 use std::sync::mpsc;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -274,54 +272,36 @@ fn maybe_generate_title(app: &AppHandle, titled: &mut HashSet<i64>, id: i64, scr
     });
 }
 
-/// Absolute path to the `claude` binary, resolved once via the login shell
-/// (same PATH reasoning as `pty::tmux_bin`). None when claude isn't installed,
-/// in which case titles simply never generate and worktrees keep showing the
-/// branch name.
-fn claude_bin() -> Option<&'static Path> {
-    static BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let out = std::process::Command::new(shell)
-            .args(["-i", "-l", "-c", "command -v claude"])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if p.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(p))
-        }
-    })
-    .as_deref()
-}
-
 /// Summarize a captured terminal screen into a short worktree title via a
 /// one-shot headless `claude -p` call on the fast (haiku) model. Returns None
 /// on any failure (claude missing, timeout, non-zero exit, empty reply) — the
 /// caller just leaves the worktree untitled.
+///
+/// Runs through the user's interactive login shell — macOS launches the GUI
+/// app with a minimal PATH, and `claude` needs the full PATH to find its
+/// runtime. The prompt is piped via stdin (not an argv blob), so a multi-KB
+/// screen needs no shell-escaping. cwd is a neutral temp dir so we don't load
+/// the target project's CLAUDE.md / .mcp.json.
 fn generate_title(screen: &str) -> Option<String> {
-    let bin = claude_bin()?;
     let prompt = format!(
         "Below is a snapshot of a coding agent's terminal session. In 3 to 6 words, \
          write a short title describing what is being worked on. Reply with ONLY the \
          title — no quotes, no trailing punctuation, no preamble.\n\n---\n{screen}\n---"
     );
-
-    // Run in a neutral dir so we don't load the target project's CLAUDE.md /
-    // .mcp.json (slower, and irrelevant to a summary).
-    let mut child = std::process::Command::new(bin)
-        .args(["-p", "--model", "haiku"])
-        .arg(&prompt)
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let mut child = std::process::Command::new(shell)
+        .args(["-i", "-l", "-c", "claude -p --model haiku"])
         .current_dir(std::env::temp_dir())
-        .stdin(std::process::Stdio::null())
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
+
+    // Feed the prompt, then close stdin so `claude -p` knows input is done.
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(prompt.as_bytes());
+    }
 
     // Drain stdout on a side thread so a large reply can't deadlock the pipe
     // while we poll for exit.
