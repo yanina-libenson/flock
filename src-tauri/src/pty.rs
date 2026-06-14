@@ -122,6 +122,7 @@ impl PtyManager {
         cols: u16,
         rows: u16,
         permission_mode: &str,
+        env_vars: &[(String, String)],
     ) -> AppResult<()> {
         // Evict any prior attach for this worktree. `kill()` marks the old
         // attach silent so its reader thread's tail `pty:exit` emit is
@@ -161,8 +162,16 @@ impl PtyManager {
                 shell_escape(permission_mode)
             )
         };
+        // Per-environment vars injected into the tmux session via `-e KEY=VAL`.
+        // Like the permission mode, these are sticky: tmux captures them at
+        // session creation, so changing an environment only takes effect after
+        // the session is killed and reopened.
+        let env_flags: String = env_vars
+            .iter()
+            .map(|(k, v)| format!(" -e {}", shell_escape(&format!("{k}={v}"))))
+            .collect();
         let tmux_cmd = format!(
-            "exec tmux -L {socket} -f {conf} new-session -A -D -s {name} -c {cwd} {claude}",
+            "exec tmux -L {socket} -f {conf} new-session -A -D{env_flags} -s {name} -c {cwd} {claude}",
             socket = shell_escape(TMUX_SOCKET),
             conf = shell_escape(&conf_path.to_string_lossy()),
             name = shell_escape(&session_name),

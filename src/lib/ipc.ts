@@ -110,6 +110,27 @@ export const remoteStart = () => invoke<RemoteInfo>("remote_start");
 export const remoteStop = () => invoke<RemoteInfo>("remote_stop");
 export const remoteInfo = () => invoke<RemoteInfo>("remote_info");
 
+// ---------- Environments (per-folder env vars) ----------
+
+export interface FlockEnvironment {
+  name: string;
+  vars: Record<string, string>;
+}
+
+export interface EnvBinding {
+  path: string;
+  env: string;
+}
+
+export interface EnvConfig {
+  environments: FlockEnvironment[];
+  bindings: EnvBinding[];
+}
+
+export const envConfigGet = () => invoke<EnvConfig>("env_config_get");
+export const envConfigSet = (config: EnvConfig) =>
+  invoke<void>("env_config_set", { config });
+
 // ---------- Events ----------
 
 export interface PtyOutput {

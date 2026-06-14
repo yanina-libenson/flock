@@ -1,6 +1,7 @@
 mod api;
 mod commands;
 mod db;
+mod env_profiles;
 mod error;
 mod git;
 mod monitor;
@@ -42,6 +43,8 @@ pub fn run() {
             commands::worktree_current_branch,
             commands::worktree_set_permission_mode,
             commands::worktree_set_title,
+            commands::env_config_get,
+            commands::env_config_set,
             commands::session_open,
             commands::session_write,
             commands::session_resize,

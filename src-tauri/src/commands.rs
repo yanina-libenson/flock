@@ -1,4 +1,5 @@
 use crate::db::{Repo, Worktree, DEFAULT_PERMISSION_MODE};
+use crate::env_profiles;
 use crate::error::{AppError, AppResult};
 use crate::git;
 use crate::pty;
@@ -284,6 +285,12 @@ pub fn session_open(
     args: OpenSessionArgs,
 ) -> AppResult<()> {
     let w = state.db.get_worktree(args.worktree_id)?;
+    // Resolve per-environment vars by the *repo's* registered path (worktrees
+    // live elsewhere, so folder bindings must key off the repo's location).
+    let env_vars = match state.db.get_repo(w.repo_id) {
+        Ok(repo) => env_profiles::resolve_vars(&env_profiles::load(), &repo.path),
+        Err(_) => Vec::new(),
+    };
     state.pty.attach(
         &app,
         args.worktree_id,
@@ -291,8 +298,23 @@ pub fn session_open(
         args.cols,
         args.rows,
         &w.permission_mode,
+        &env_vars,
     )?;
     state.db.touch_worktree(args.worktree_id)?;
+    Ok(())
+}
+
+/// Read the full environments + folder-bindings config (tokens included; this
+/// is the user's own machine and the desktop UI).
+#[tauri::command]
+pub fn env_config_get() -> env_profiles::EnvConfig {
+    env_profiles::load()
+}
+
+/// Persist the environments + folder-bindings config (0600 in the data dir).
+#[tauri::command]
+pub fn env_config_set(config: env_profiles::EnvConfig) -> AppResult<()> {
+    env_profiles::save(&config).map_err(|e| AppError::msg(e.to_string()))?;
     Ok(())
 }
 
