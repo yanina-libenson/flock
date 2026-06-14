@@ -1,6 +1,6 @@
 // Bump this whenever any shell asset (index.html, app.js, manifest) changes,
 // or installed PWAs keep serving the stale shell forever.
-const SW_VERSION = "flock-shell-v4";
+const SW_VERSION = "flock-shell-v5";
 const SHELL = ["/", "/app.js", "/manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {

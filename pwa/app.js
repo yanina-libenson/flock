@@ -161,6 +161,70 @@ document.getElementById("main").addEventListener("click", (e) => {
   if (w) openTerm(w);
 });
 
+// ---------- new task ----------
+
+document.getElementById("new-task-btn").onclick = openNewTask;
+
+async function openNewTask() {
+  let repos = [];
+  try {
+    repos = await api("/api/repos");
+  } catch (e) {
+    console.error("repos fetch failed", e);
+  }
+  const overlay = document.createElement("div");
+  overlay.className = "form-screen";
+  overlay.innerHTML = `
+    <div class="term-header">
+      <button class="back">‹ Cancel</button>
+      <div class="t">New task</div>
+    </div>
+    <div class="form-body">
+      <div>
+        <label>Repo</label>
+        <select id="nt-repo">${repos.map((r) => `<option>${esc(r)}</option>`).join("")}</select>
+      </div>
+      <div>
+        <label>Prompt</label>
+        <textarea id="nt-prompt" placeholder="What should the agent do?" autofocus></textarea>
+      </div>
+      <div class="actions">
+        <button class="cancel">Cancel</button>
+        <button class="create">Create task</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector(".back").onclick = close;
+  overlay.querySelector(".cancel").onclick = close;
+  overlay.querySelector(".create").onclick = async () => {
+    const repo = overlay.querySelector("#nt-repo").value;
+    const prompt = overlay.querySelector("#nt-prompt").value.trim();
+    if (!repo || !prompt) return;
+    const btn = overlay.querySelector(".create");
+    btn.textContent = "Creating…";
+    btn.disabled = true;
+    try {
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ repo, prompt }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      close();
+      tick();
+    } catch (e) {
+      console.error("create task failed", e);
+      alert(`Couldn't create task:\n${e}`);
+      btn.textContent = "Create task";
+      btn.disabled = false;
+    }
+  };
+}
+
 // ---------- terminal view (read-only) ----------
 
 let term = null;
@@ -330,10 +394,13 @@ function showTokenPrompt() {
 
 let timer = null;
 async function tick() {
+  const newTaskBtn = document.getElementById("new-task-btn");
   if (!token) {
+    if (newTaskBtn) newTaskBtn.hidden = true;
     showTokenPrompt();
     return;
   }
+  if (newTaskBtn) newTaskBtn.hidden = false;
   try {
     const data = await api("/api/worktrees");
     render(data);

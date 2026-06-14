@@ -211,6 +211,16 @@ async fn worktrees(State(ctx): State<ApiCtx>) -> Json<Vec<WorktreeRow>> {
     Json(out)
 }
 
+async fn repos(State(ctx): State<ApiCtx>) -> Json<Vec<String>> {
+    let st = ctx.app.state::<AppState>();
+    let names = st
+        .db
+        .list_repos()
+        .map(|rs| rs.into_iter().map(|r| r.name).collect())
+        .unwrap_or_default();
+    Json(names)
+}
+
 async fn status_counts(State(ctx): State<ApiCtx>) -> Json<StatusCounts> {
     let st = ctx.app.state::<AppState>();
     let mut c = StatusCounts::default();
@@ -523,6 +533,7 @@ fn build_router(ctx: ApiCtx) -> Router {
         .route("/worktrees/:id/stream", get(stream))
         .route("/worktrees/:id/input", post(input))
         .route("/tasks", post(create_task))
+        .route("/repos", get(repos))
         .route("/status", get(status_counts))
         .route("/push/vapid-public-key", get(vapid_public_key))
         .route("/push/subscribe", post(push_subscribe))

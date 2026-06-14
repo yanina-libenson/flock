@@ -50,6 +50,18 @@
       }
       header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
       header .count { margin-left: auto; text-transform: none; color: var(--warn); font-weight: 600; }
+      header .new-task { margin-left: 10px; width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--accent); font-size: 18px; line-height: 1; }
+      header .count:not(:empty) + .new-task { margin-left: 10px; }
+      header .new-task:only-of-type { margin-left: auto; }
+      .form-screen { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; background: var(--bg); }
+      .form-screen .form-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+      .form-screen label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-dim); }
+      .form-screen select, .form-screen textarea { width: 100%; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 10px; color: var(--fg); font-size: 15px; }
+      .form-screen textarea { min-height: 120px; resize: vertical; font-family: inherit; }
+      .form-screen .actions { display: flex; gap: 8px; padding-top: 4px; }
+      .form-screen .actions button { flex: 1; padding: 12px; border-radius: 8px; border: none; font-weight: 600; font-size: 14px; }
+      .form-screen .actions .create { background: var(--accent); color: #000; }
+      .form-screen .actions .cancel { background: var(--bg-elev); color: var(--fg-muted); border: 1px solid var(--border); }
       main { padding: 8px 12px 40px; }
       .repo { margin: 14px 4px 6px; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-dim); }
       .wt {
@@ -98,6 +110,7 @@
       <span class="dot"></span>
       <span>Flock</span>
       <span class="count" id="count"></span>
+      <button class="new-task" id="new-task-btn" title="New task" hidden>＋</button>
     </header>
     <main id="main">
       <div class="empty" id="loading">Connecting…</div>
