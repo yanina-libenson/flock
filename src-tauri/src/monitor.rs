@@ -30,6 +30,9 @@ use tauri::{AppHandle, Emitter, Manager};
 /// needs_input, which keeps us from flagging an agent mid-render.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Minimum gap between phone push notifications for the same worktree.
+const PUSH_COOLDOWN: Duration = Duration::from_secs(300);
+
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeStatus {
@@ -67,6 +70,9 @@ pub fn spawn(app: AppHandle) {
         // Prevents re-firing the summarizer; persistence across restarts is via
         // the DB title column (checked before generating).
         let mut titled: HashSet<i64> = HashSet::new();
+        // Last push-notification time per worktree — caps phone pushes to one
+        // per PUSH_COOLDOWN even if an agent flaps in/out of needs_input.
+        let mut last_push: HashMap<i64, Instant> = HashMap::new();
 
         loop {
             std::thread::sleep(POLL_INTERVAL);
@@ -78,6 +84,7 @@ pub fn spawn(app: AppHandle) {
             prev.retain(|k, _| live.contains(k));
             last_status.retain(|k, _| live.contains(k));
             titled.retain(|k| live.contains(k));
+            last_push.retain(|k, _| live.contains(k));
             // Mirror the live set into the shared status map the REST API reads.
             if let Some(state) = app.try_state::<AppState>() {
                 state.statuses.lock().unwrap().retain(|k, _| live.contains(k));
@@ -101,6 +108,18 @@ pub fn spawn(app: AppHandle) {
                             status,
                         },
                     );
+                    // Push to the phone on entering needs_input, cooldown-gated.
+                    if status == WorktreeStatus::NeedsInput {
+                        let now = Instant::now();
+                        let fresh = last_push
+                            .get(&id)
+                            .map(|t| now.duration_since(*t) >= PUSH_COOLDOWN)
+                            .unwrap_or(true);
+                        if fresh {
+                            last_push.insert(id, now);
+                            crate::api::notify_needs_input("Claude needs you".into(), worktree_label(&app, id));
+                        }
+                    }
                 }
 
                 maybe_generate_title(&app, &mut titled, id, &captured);
@@ -192,6 +211,19 @@ fn decoration_line(line: &str) -> bool {
         Some(_) => line.chars().all(|c| c == '─' || c == '━' || c == '═'),
         None => false,
     }
+}
+
+/// Human label for a worktree's push body: its title if set, else the branch.
+fn worktree_label(app: &AppHandle, id: i64) -> String {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(w) = state.db.get_worktree(id) {
+            return w
+                .title
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or(w.branch);
+        }
+    }
+    format!("worktree {id}")
 }
 
 /// Once per worktree, after the agent has actually responded, kick off a

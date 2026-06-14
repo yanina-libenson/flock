@@ -17,10 +17,17 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
+use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+use p256::SecretKey;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use web_push::{
+    ContentEncoding, IsahcWebPushClient, SubscriptionInfo, VapidSignatureBuilder, WebPushClient,
+    WebPushMessageBuilder,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -72,12 +79,16 @@ struct StatusCounts {
 
 // ---------- token ----------
 
-fn token_path() -> std::io::Result<PathBuf> {
+fn flock_dir() -> std::io::Result<PathBuf> {
     let dir = dirs::data_local_dir()
         .ok_or_else(|| std::io::Error::other("no data local dir"))?
         .join("Flock");
     std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("api-token"))
+    Ok(dir)
+}
+
+fn token_path() -> std::io::Result<PathBuf> {
+    Ok(flock_dir()?.join("api-token"))
 }
 
 /// Read the master token, generating + persisting one (0600) on first use.
@@ -323,12 +334,136 @@ async fn addon_fit_js() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "application/javascript")], ADDON_FIT_JS)
 }
 
+// ---------- web push (VAPID) ----------
+
+#[derive(Serialize, Deserialize, Clone)]
+struct PushSub {
+    endpoint: String,
+    keys: PushKeys,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct PushKeys {
+    p256dh: String,
+    auth: String,
+}
+
+fn vapid_path() -> std::io::Result<PathBuf> {
+    Ok(flock_dir()?.join("vapid.pem"))
+}
+
+fn subs_path() -> std::io::Result<PathBuf> {
+    Ok(flock_dir()?.join("push-subs.json"))
+}
+
+/// Read the VAPID private key PEM, generating + persisting (0600) a fresh
+/// P-256 keypair on first use.
+fn load_or_create_vapid() -> std::io::Result<String> {
+    let path = vapid_path()?;
+    if let Ok(pem) = std::fs::read_to_string(&path) {
+        if !pem.trim().is_empty() {
+            return Ok(pem);
+        }
+    }
+    let mut rng = rand::rngs::OsRng;
+    let sk = SecretKey::random(&mut rng);
+    let pem = sk
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(std::io::Error::other)?
+        .to_string();
+    std::fs::write(&path, &pem)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(pem)
+}
+
+/// The VAPID public key as a base64url-no-pad uncompressed point — the
+/// `applicationServerKey` the browser's `pushManager.subscribe` needs.
+fn vapid_public_key_b64() -> Option<String> {
+    let pem = load_or_create_vapid().ok()?;
+    let sk = SecretKey::from_pkcs8_pem(&pem).ok()?;
+    let point = sk.public_key().to_encoded_point(false);
+    Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(point.as_bytes()))
+}
+
+fn load_subs() -> Vec<PushSub> {
+    subs_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_subs(subs: &[PushSub]) -> std::io::Result<()> {
+    let path = subs_path()?;
+    std::fs::write(path, serde_json::to_string(subs).unwrap_or_else(|_| "[]".into()))
+}
+
+/// Fan a "needs input" notification out to every subscribed device. Best
+/// effort: missing key / no subscriptions / send errors are swallowed. Called
+/// by the monitor on the busy→needs_input transition (cooldown-gated there).
+pub fn notify_needs_input(title: String, body: String) {
+    let subs = load_subs();
+    if subs.is_empty() {
+        return;
+    }
+    let Ok(pem) = load_or_create_vapid() else {
+        return;
+    };
+    let payload = serde_json::json!({ "title": title, "body": body }).to_string();
+    tauri::async_runtime::spawn(async move {
+        let Ok(client) = IsahcWebPushClient::new() else {
+            return;
+        };
+        for sub in subs {
+            let info = SubscriptionInfo::new(sub.endpoint, sub.keys.p256dh, sub.keys.auth);
+            let sig = match VapidSignatureBuilder::from_pem(pem.as_bytes(), &info) {
+                Ok(mut b) => {
+                    b.add_claim("sub", "mailto:flock@localhost");
+                    match b.build() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    }
+                }
+                Err(_) => continue,
+            };
+            let mut mb = WebPushMessageBuilder::new(&info);
+            mb.set_payload(ContentEncoding::Aes128Gcm, payload.as_bytes());
+            mb.set_vapid_signature(sig);
+            if let Ok(msg) = mb.build() {
+                let _ = client.send(msg).await;
+            }
+        }
+    });
+}
+
+async fn vapid_public_key() -> impl IntoResponse {
+    match vapid_public_key_b64() {
+        Some(k) => (StatusCode::OK, k).into_response(),
+        None => (StatusCode::INTERNAL_SERVER_ERROR, "no vapid key").into_response(),
+    }
+}
+
+async fn push_subscribe(Json(sub): Json<PushSub>) -> StatusCode {
+    let mut subs = load_subs();
+    if !subs.iter().any(|s| s.endpoint == sub.endpoint) {
+        subs.push(sub);
+        let _ = save_subs(&subs);
+    }
+    StatusCode::NO_CONTENT
+}
+
 fn build_router(ctx: ApiCtx) -> Router {
     let api = Router::new()
         .route("/worktrees", get(worktrees))
         .route("/worktrees/:id/stream", get(stream))
         .route("/worktrees/:id/input", post(input))
         .route("/status", get(status_counts))
+        .route("/push/vapid-public-key", get(vapid_public_key))
+        .route("/push/subscribe", post(push_subscribe))
         .route_layer(middleware::from_fn_with_state(ctx.clone(), require_auth));
     Router::new()
         .route("/", get(index))

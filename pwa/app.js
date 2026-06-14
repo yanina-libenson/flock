@@ -44,6 +44,63 @@ const esc = (s) =>
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
   );
 
+// ---------- push notifications ----------
+
+function pushSupported() {
+  return (
+    "serviceWorker" in navigator &&
+    "PushManager" in window &&
+    "Notification" in window
+  );
+}
+
+function urlB64ToUint8Array(b64) {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const base64 = (b64 + pad).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+async function enablePush() {
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") return;
+    const reg = await navigator.serviceWorker.ready;
+    const keyRes = await fetch("/api/push/vapid-public-key", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const keyB64 = (await keyRes.text()).trim();
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlB64ToUint8Array(keyB64),
+    });
+    await fetch("/api/push/subscribe", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(sub.toJSON()),
+    });
+    tick(); // refresh to drop the enable banner
+  } catch (e) {
+    console.error("enablePush failed", e);
+    alert(`Couldn't enable notifications:\n${e}`);
+  }
+}
+
+function pushBannerHtml() {
+  if (!pushSupported() || Notification.permission === "granted") return "";
+  return `<button id="enable-push" class="push-banner">🔔 Enable notifications on this device</button>`;
+}
+
+function wireBanner() {
+  const eb = document.getElementById("enable-push");
+  if (eb) eb.onclick = enablePush;
+}
+
 function render(worktrees) {
   currentWorktrees = worktrees;
   const main = document.getElementById("main");
@@ -53,7 +110,10 @@ function render(worktrees) {
     : "";
 
   if (worktrees.length === 0) {
-    main.innerHTML = `<div class="empty">No worktrees yet.<br/>Create one in Flock on your Mac.</div>`;
+    main.innerHTML =
+      pushBannerHtml() +
+      `<div class="empty">No worktrees yet.<br/>Create one in Flock on your Mac.</div>`;
+    wireBanner();
     return;
   }
 
@@ -67,7 +127,7 @@ function render(worktrees) {
     byRepo.get(w.repo).push(w);
   }
 
-  main.innerHTML = groups
+  const groupsHtml = groups
     .map((repo) => {
       const rows = byRepo
         .get(repo)
@@ -88,6 +148,8 @@ function render(worktrees) {
       return `<div class="repo">${esc(repo)}</div>${rows}`;
     })
     .join("");
+  main.innerHTML = pushBannerHtml() + groupsHtml;
+  wireBanner();
 }
 
 // Delegated tap → open terminal.
