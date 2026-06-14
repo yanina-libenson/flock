@@ -1,0 +1,11 @@
+{
+  "name": "flock-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server that lets an agent drive Flock (spawn tasks, read status, send input, schedule) via its REST API.",
+  "bin": { "flock-mcp": "flock-mcp.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}
