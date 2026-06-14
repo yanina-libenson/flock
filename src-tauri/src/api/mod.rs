@@ -7,6 +7,7 @@
 //! with the token. All `/api/*` routes require the master token (Bearer header
 //! or `?token=` for EventSource, which can't set headers).
 
+use crate::db::Schedule;
 use crate::monitor::WorktreeStatus;
 use crate::state::AppState;
 use axum::extract::{Path, Request, State};
@@ -14,7 +15,7 @@ use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
@@ -380,6 +381,86 @@ async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>
     }
 }
 
+async fn schedules_list(State(ctx): State<ApiCtx>) -> Json<Vec<Schedule>> {
+    let st = ctx.app.state::<AppState>();
+    Json(st.db.list_schedules().unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+struct CreateScheduleBody {
+    repo: String,
+    prompt: String,
+    spec: String,
+    title: Option<String>,
+}
+
+async fn schedule_create_h(
+    State(ctx): State<ApiCtx>,
+    Json(body): Json<CreateScheduleBody>,
+) -> Response {
+    let st = ctx.app.state::<AppState>();
+    let repo_id = st
+        .db
+        .list_repos()
+        .ok()
+        .and_then(|rs| rs.into_iter().find(|r| r.name == body.repo).map(|r| r.id));
+    let Some(repo_id) = repo_id else {
+        return (StatusCode::BAD_REQUEST, format!("unknown repo {:?}", body.repo)).into_response();
+    };
+    match crate::commands::schedule_create_core(
+        &st.db,
+        repo_id,
+        &body.prompt,
+        &body.spec,
+        body.title.as_deref(),
+    ) {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+async fn schedule_delete_h(State(ctx): State<ApiCtx>, Path(id): Path<i64>) -> StatusCode {
+    let st = ctx.app.state::<AppState>();
+    let _ = st.db.delete_schedule(id);
+    StatusCode::NO_CONTENT
+}
+
+async fn schedule_run_h(State(ctx): State<ApiCtx>, Path(id): Path<i64>) -> Response {
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let s = st.db.get_schedule(id)?;
+        let title = s
+            .title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .or_else(|| Some(format!("scheduled: {}", s.spec)));
+        let w = crate::commands::start_task_core(&st, s.repo_id, &s.prompt, None, None, title, None)?;
+        if let Some(spec) = crate::schedule::parse_spec(&s.spec) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let _ = st
+                .db
+                .mark_schedule_run(id, now, crate::schedule::next_run(&spec, now));
+        }
+        Ok::<_, crate::error::AppError>(w)
+    })
+    .await;
+    match res {
+        Ok(Ok(w)) => Json(CreatedTask {
+            id: w.id,
+            branch: w.branch,
+            title: w.title,
+            path: w.path,
+        })
+        .into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "join failed").into_response(),
+    }
+}
+
 async fn index() -> impl IntoResponse {
     Html(INDEX_HTML)
 }
@@ -534,6 +615,9 @@ fn build_router(ctx: ApiCtx) -> Router {
         .route("/worktrees/:id/input", post(input))
         .route("/tasks", post(create_task))
         .route("/repos", get(repos))
+        .route("/schedules", get(schedules_list).post(schedule_create_h))
+        .route("/schedules/:id", delete(schedule_delete_h))
+        .route("/schedules/:id/run", post(schedule_run_h))
         .route("/status", get(status_counts))
         .route("/push/vapid-public-key", get(vapid_public_key))
         .route("/push/subscribe", post(push_subscribe))

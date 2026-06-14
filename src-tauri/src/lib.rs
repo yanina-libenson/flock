@@ -6,6 +6,7 @@ mod error;
 mod git;
 mod monitor;
 mod pty;
+mod schedule;
 mod state;
 
 use state::AppState;
@@ -27,6 +28,7 @@ pub fn run() {
         .manage(app_state)
         .setup(|app| {
             monitor::spawn(app.handle().clone());
+            schedule::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -46,6 +48,11 @@ pub fn run() {
             commands::env_config_get,
             commands::env_config_set,
             commands::task_create,
+            commands::schedule_create,
+            commands::schedule_list,
+            commands::schedule_set_enabled,
+            commands::schedule_delete,
+            commands::schedule_run_now,
             commands::session_open,
             commands::session_write,
             commands::session_resize,

@@ -131,6 +131,51 @@ export const envConfigGet = () => invoke<EnvConfig>("env_config_get");
 export const envConfigSet = (config: EnvConfig) =>
   invoke<void>("env_config_set", { config });
 
+// ---------- Scheduled tasks ----------
+
+export interface Schedule {
+  id: number;
+  repo_id: number;
+  prompt: string;
+  spec: string;
+  title: string | null;
+  enabled: boolean;
+  last_run: number | null;
+  next_run: number;
+  created_at: number;
+}
+
+export interface CreateScheduleArgs {
+  repo_id: number;
+  prompt: string;
+  spec: string;
+  title: string | null;
+}
+
+export const scheduleList = () => invoke<Schedule[]>("schedule_list");
+export const scheduleCreate = (args: CreateScheduleArgs) =>
+  invoke<Schedule>("schedule_create", { args });
+export const scheduleSetEnabled = (id: number, enabled: boolean) =>
+  invoke<void>("schedule_set_enabled", { id, enabled });
+export const scheduleDelete = (id: number) =>
+  invoke<void>("schedule_delete", { id });
+export const scheduleRunNow = (id: number) =>
+  invoke<Worktree>("schedule_run_now", { id });
+
+// ---------- Task creation (desktop) ----------
+
+export interface CreateTaskArgs {
+  repo_id: number;
+  prompt: string;
+  branch?: string | null;
+  base?: string | null;
+  title?: string | null;
+  permission_mode?: PermissionMode | null;
+}
+
+export const taskCreate = (args: CreateTaskArgs) =>
+  invoke<Worktree>("task_create", { args });
+
 // ---------- Events ----------
 
 export interface PtyOutput {

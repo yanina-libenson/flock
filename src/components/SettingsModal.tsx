@@ -9,6 +9,8 @@ import {
   Trash2,
   FolderPlus,
   Boxes,
+  Clock,
+  Play,
 } from "lucide-solid";
 import {
   remoteInfo,
@@ -16,8 +18,16 @@ import {
   remoteStop,
   envConfigGet,
   envConfigSet,
+  reposList,
+  scheduleList,
+  scheduleCreate,
+  scheduleSetEnabled,
+  scheduleDelete,
+  scheduleRunNow,
   type RemoteInfo,
   type EnvBinding,
+  type Repo,
+  type Schedule,
 } from "../lib/ipc";
 
 /// One environment in the editor: vars are edited as KEY=VALUE text, parsed on
@@ -62,6 +72,61 @@ export function SettingsModal(props: { onClose: () => void }) {
   const [bindings, setBindings] = createSignal<EnvBinding[]>([]);
   const [envSaved, setEnvSaved] = createSignal(false);
 
+  const [repos, setRepos] = createSignal<Repo[]>([]);
+  const [schedules, setSchedules] = createSignal<Schedule[]>([]);
+  const [ntRepo, setNtRepo] = createSignal<number | null>(null);
+  const [ntPrompt, setNtPrompt] = createSignal("");
+  const [ntSpec, setNtSpec] = createSignal("@every 1d");
+
+  async function refreshSchedules() {
+    try {
+      setSchedules(await scheduleList());
+    } catch (e) {
+      console.error("scheduleList failed", e);
+    }
+  }
+  const repoName = (id: number) => repos().find((r) => r.id === id)?.name ?? `#${id}`;
+
+  async function addSchedule() {
+    const repo_id = ntRepo();
+    const prompt = ntPrompt().trim();
+    const spec = ntSpec().trim();
+    if (repo_id == null || !prompt || !spec) return;
+    try {
+      await scheduleCreate({ repo_id, prompt, spec, title: null });
+      setNtPrompt("");
+      await refreshSchedules();
+    } catch (e) {
+      console.error("scheduleCreate failed", e);
+      alert(`Couldn't create schedule:\n${String(e)}`);
+    }
+  }
+  async function toggleSchedule(s: Schedule) {
+    try {
+      await scheduleSetEnabled(s.id, !s.enabled);
+      await refreshSchedules();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  async function runSchedule(s: Schedule) {
+    try {
+      await scheduleRunNow(s.id);
+      await refreshSchedules();
+    } catch (e) {
+      alert(`Couldn't run schedule:\n${String(e)}`);
+    }
+  }
+  async function removeSchedule(s: Schedule) {
+    if (!confirm(`Delete this schedule?`)) return;
+    try {
+      await scheduleDelete(s.id);
+      await refreshSchedules();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   onMount(async () => {
     try {
       setInfo(await remoteInfo());
@@ -80,6 +145,14 @@ export function SettingsModal(props: { onClose: () => void }) {
     } catch (e) {
       console.error("envConfigGet failed", e);
     }
+    try {
+      const rs = await reposList();
+      setRepos(rs);
+      if (rs.length) setNtRepo(rs[0].id);
+    } catch (e) {
+      console.error("reposList failed", e);
+    }
+    refreshSchedules();
   });
 
   function addEnv() {
@@ -377,6 +450,113 @@ export function SettingsModal(props: { onClose: () => void }) {
                 {envSaved() ? "Saved ✓" : "Save environments"}
               </button>
             </div>
+          </div>
+
+          {/* ---------- Scheduled tasks ---------- */}
+          <div class="mt-5 pt-5 border-t border-[var(--color-border)]">
+            <div class="flex items-start gap-3">
+              <Clock size={16} class="mt-0.5 text-[var(--color-accent)] shrink-0" />
+              <div class="flex-1 min-w-0">
+                <div class="text-[13px] font-medium text-[var(--color-fg)]">
+                  Scheduled tasks
+                </div>
+                <div class="mt-1 text-[11px] text-[var(--color-fg-dim)] leading-snug">
+                  Fire a fresh prompted task on a cadence. Spec:{" "}
+                  <code class="font-mono text-[10.5px]">@every 30m</code>,{" "}
+                  <code class="font-mono text-[10.5px]">@every 2h</code>,{" "}
+                  <code class="font-mono text-[10.5px]">@every 1d</code>, or{" "}
+                  <code class="font-mono text-[10.5px]">09:00</code> (daily, local).
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-3 space-y-1.5">
+              <For
+                each={schedules()}
+                fallback={
+                  <div class="text-[11px] text-[var(--color-fg-dim)]">
+                    No schedules yet.
+                  </div>
+                }
+              >
+                {(s) => (
+                  <div class="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/50 px-2.5 py-1.5">
+                    <input
+                      type="checkbox"
+                      class="accent-[var(--color-accent)]"
+                      checked={s.enabled}
+                      title={s.enabled ? "Enabled" : "Disabled"}
+                      onChange={() => toggleSchedule(s)}
+                    />
+                    <div class="flex-1 min-w-0">
+                      <div class="truncate text-[12px] text-[var(--color-fg)]">
+                        {s.prompt}
+                      </div>
+                      <div class="text-[10.5px] font-mono text-[var(--color-fg-dim)]">
+                        {repoName(s.repo_id)} · {s.spec}
+                      </div>
+                    </div>
+                    <button
+                      class="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)] transition"
+                      title="Run now"
+                      onClick={() => runSchedule(s)}
+                    >
+                      <Play size={12} />
+                    </button>
+                    <button
+                      class="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
+                      title="Delete schedule"
+                      onClick={() => removeSchedule(s)}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                )}
+              </For>
+            </div>
+
+            <Show
+              when={repos().length > 0}
+              fallback={
+                <div class="mt-3 text-[11px] text-[var(--color-fg-dim)]">
+                  Add a repository first to schedule tasks.
+                </div>
+              }
+            >
+              <div class="mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/50 p-2.5 space-y-2">
+                <div class="flex gap-2">
+                  <select
+                    class="text-[12px] bg-[var(--color-bg)] border border-[var(--color-border)] rounded px-1.5 py-1.5 text-[var(--color-fg)] outline-none"
+                    value={ntRepo() ?? undefined}
+                    onChange={(e) => setNtRepo(Number(e.currentTarget.value))}
+                  >
+                    <For each={repos()}>
+                      {(r) => <option value={r.id}>{r.name}</option>}
+                    </For>
+                  </select>
+                  <input
+                    class="flex-1 min-w-0 bg-[var(--color-bg)] border border-[var(--color-border)] rounded px-2 py-1 text-[12px] font-mono text-[var(--color-fg)] outline-none"
+                    placeholder="@every 1d"
+                    value={ntSpec()}
+                    onInput={(e) => setNtSpec(e.currentTarget.value)}
+                  />
+                </div>
+                <textarea
+                  class="w-full h-14 bg-[var(--color-bg)] border border-[var(--color-border)] rounded px-2 py-1 text-[12px] text-[var(--color-fg)] outline-none resize-y"
+                  placeholder="Prompt to run on schedule…"
+                  value={ntPrompt()}
+                  onInput={(e) => setNtPrompt(e.currentTarget.value)}
+                />
+                <div class="flex justify-end">
+                  <button
+                    class="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium rounded-md bg-[var(--color-accent)] text-black hover:opacity-90 transition"
+                    onClick={addSchedule}
+                  >
+                    <Plus size={12} /> Add schedule
+                  </button>
+                </div>
+              </div>
+            </Show>
           </div>
         </div>
       </div>

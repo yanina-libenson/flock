@@ -1,12 +1,21 @@
-use crate::db::{Db, Repo, Worktree, DEFAULT_PERMISSION_MODE};
+use crate::db::{Db, Repo, Schedule, Worktree, DEFAULT_PERMISSION_MODE};
 use crate::env_profiles;
 use crate::error::{AppError, AppResult};
 use crate::git;
 use crate::pty;
+use crate::schedule;
 use crate::state::AppState;
 use base64::Engine;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 use tauri::{AppHandle, State};
 
 // ---------- Repo commands ----------
@@ -510,6 +519,75 @@ pub fn session_close(state: State<'_, AppState>, worktree_id: i64) -> AppResult<
 #[tauri::command]
 pub fn tmux_check() -> bool {
     pty::tmux_available()
+}
+
+#[derive(Deserialize)]
+pub struct CreateScheduleArgs {
+    pub repo_id: i64,
+    pub prompt: String,
+    pub spec: String,
+    pub title: Option<String>,
+}
+
+/// Create a scheduled task. Shared validation/insert used by the command and
+/// `POST /api/schedules`.
+pub fn schedule_create_core(
+    db: &Db,
+    repo_id: i64,
+    prompt: &str,
+    spec: &str,
+    title: Option<&str>,
+) -> AppResult<Schedule> {
+    let parsed = schedule::parse_spec(spec)
+        .ok_or_else(|| AppError::msg("invalid spec; use '@every 30m' or 'HH:MM'"))?;
+    let next = schedule::initial_next_run(&parsed, now_unix());
+    db.insert_schedule(repo_id, prompt, spec, title, next)
+}
+
+#[tauri::command]
+pub fn schedule_create(state: State<'_, AppState>, args: CreateScheduleArgs) -> AppResult<Schedule> {
+    schedule_create_core(
+        &state.db,
+        args.repo_id,
+        &args.prompt,
+        &args.spec,
+        args.title.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub fn schedule_list(state: State<'_, AppState>) -> AppResult<Vec<Schedule>> {
+    state.db.list_schedules()
+}
+
+#[tauri::command]
+pub fn schedule_set_enabled(state: State<'_, AppState>, id: i64, enabled: bool) -> AppResult<()> {
+    state.db.set_schedule_enabled(id, enabled)
+}
+
+#[tauri::command]
+pub fn schedule_delete(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    state.db.delete_schedule(id)
+}
+
+/// Fire a schedule immediately, out of cycle, and roll its next_run forward so
+/// the regular tick doesn't double-fire.
+#[tauri::command]
+pub fn schedule_run_now(state: State<'_, AppState>, id: i64) -> AppResult<Worktree> {
+    let s = state.db.get_schedule(id)?;
+    let title = s
+        .title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| Some(format!("scheduled: {}", s.spec)));
+    let w = start_task_core(&state, s.repo_id, &s.prompt, None, None, title, None)?;
+    if let Some(spec) = schedule::parse_spec(&s.spec) {
+        let now = now_unix();
+        let _ = state
+            .db
+            .mark_schedule_run(id, now, schedule::next_run(&spec, now));
+    }
+    Ok(w)
 }
 
 #[cfg(test)]

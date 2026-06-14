@@ -32,6 +32,20 @@ pub struct Worktree {
     pub permission_mode: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Schedule {
+    pub id: i64,
+    pub repo_id: i64,
+    pub prompt: String,
+    /// Schedule spec: `@every <N>{m,h,d}` or `HH:MM` (daily, local time).
+    pub spec: String,
+    pub title: Option<String>,
+    pub enabled: bool,
+    pub last_run: Option<i64>,
+    pub next_run: i64,
+    pub created_at: i64,
+}
+
 pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
 fn now() -> i64 {
@@ -73,6 +87,18 @@ impl Db {
             );
 
             CREATE INDEX IF NOT EXISTS idx_worktrees_repo ON worktrees(repo_id);
+
+            CREATE TABLE IF NOT EXISTS schedules (
+              id         INTEGER PRIMARY KEY,
+              repo_id    INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+              prompt     TEXT NOT NULL,
+              spec       TEXT NOT NULL,
+              title      TEXT,
+              enabled    INTEGER NOT NULL DEFAULT 1,
+              last_run   INTEGER,
+              next_run   INTEGER NOT NULL,
+              created_at INTEGER NOT NULL
+            );
 
             -- Legacy: earlier versions of Flock persisted PTY scrollback blobs
             -- here. Sessions are now owned by tmux, so this table is dead.
@@ -256,6 +282,89 @@ impl Db {
             "UPDATE worktrees SET last_used = ?1 WHERE id = ?2",
             params![now(), id],
         )?;
+        Ok(())
+    }
+
+    // --- Schedules ---
+
+    pub fn insert_schedule(
+        &self,
+        repo_id: i64,
+        prompt: &str,
+        spec: &str,
+        title: Option<&str>,
+        next_run: i64,
+    ) -> AppResult<Schedule> {
+        let c = self.c()?;
+        c.execute(
+            "INSERT INTO schedules (repo_id, prompt, spec, title, enabled, next_run, created_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
+            params![repo_id, prompt, spec, title, next_run, now()],
+        )?;
+        let id = c.last_insert_rowid();
+        drop(c);
+        self.get_schedule(id)
+    }
+
+    fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
+        Ok(Schedule {
+            id: row.get(0)?,
+            repo_id: row.get(1)?,
+            prompt: row.get(2)?,
+            spec: row.get(3)?,
+            title: row.get(4)?,
+            enabled: row.get::<_, i64>(5)? != 0,
+            last_run: row.get(6)?,
+            next_run: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    }
+
+    pub fn get_schedule(&self, id: i64) -> AppResult<Schedule> {
+        let c = self.c()?;
+        let s = c.query_row(
+            "SELECT id, repo_id, prompt, spec, title, enabled, last_run, next_run, created_at
+             FROM schedules WHERE id = ?1",
+            params![id],
+            Self::row_to_schedule,
+        )?;
+        Ok(s)
+    }
+
+    pub fn list_schedules(&self) -> AppResult<Vec<Schedule>> {
+        let c = self.c()?;
+        let mut stmt = c.prepare(
+            "SELECT id, repo_id, prompt, spec, title, enabled, last_run, next_run, created_at
+             FROM schedules ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_schedule)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn set_schedule_enabled(&self, id: i64, enabled: bool) -> AppResult<()> {
+        self.c()?.execute(
+            "UPDATE schedules SET enabled = ?1 WHERE id = ?2",
+            params![enabled as i64, id],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp a fire: record when it ran and when it should next run.
+    pub fn mark_schedule_run(&self, id: i64, last_run: i64, next_run: i64) -> AppResult<()> {
+        self.c()?.execute(
+            "UPDATE schedules SET last_run = ?1, next_run = ?2 WHERE id = ?3",
+            params![last_run, next_run, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_schedule(&self, id: i64) -> AppResult<()> {
+        self.c()?
+            .execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
         Ok(())
     }
 }
