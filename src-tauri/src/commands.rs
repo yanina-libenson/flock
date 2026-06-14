@@ -1,4 +1,4 @@
-use crate::db::{Repo, Worktree, DEFAULT_PERMISSION_MODE};
+use crate::db::{Db, Repo, Worktree, DEFAULT_PERMISSION_MODE};
 use crate::env_profiles;
 use crate::error::{AppError, AppResult};
 use crate::git;
@@ -120,7 +120,14 @@ pub fn worktree_create(
     state: State<'_, AppState>,
     args: CreateWorktreeArgs,
 ) -> AppResult<Worktree> {
-    let repo = state.db.get_repo(args.repo_id)?;
+    create_worktree_core(&state.db, args)
+}
+
+/// Worktree-creation core, callable without a Tauri `State` wrapper so both the
+/// command and the orchestration path (task_create / `POST /api/tasks`) share
+/// one implementation.
+fn create_worktree_core(db: &Db, args: CreateWorktreeArgs) -> AppResult<Worktree> {
+    let repo = db.get_repo(args.repo_id)?;
     let repo_path = PathBuf::from(&repo.path);
     let slug = git::slugify(&args.branch);
     let path = match args.path {
@@ -179,7 +186,7 @@ pub fn worktree_create(
         .unwrap_or(DEFAULT_PERMISSION_MODE);
     validate_permission_mode(permission_mode)?;
 
-    let w = state.db.insert_worktree(
+    let w = db.insert_worktree(
         repo.id,
         &args.branch,
         path.to_string_lossy().as_ref(),
@@ -299,9 +306,132 @@ pub fn session_open(
         args.rows,
         &w.permission_mode,
         &env_vars,
+        None,
     )?;
     state.db.touch_worktree(args.worktree_id)?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct CreateTaskArgs {
+    pub repo_id: i64,
+    pub prompt: String,
+    /// Branch leaf; auto-derived from the prompt when omitted.
+    pub branch: Option<String>,
+    pub base: Option<String>,
+    pub title: Option<String>,
+    pub permission_mode: Option<String>,
+}
+
+/// Orchestration primitive: create a worktree and start claude on it with an
+/// initial prompt, headlessly (no viewer needed). This is the substrate for
+/// loops — cron, MCP, the REST API, or another agent can spawn a task and walk
+/// away; the monitor picks up its status and auto-titles it. Shared by the
+/// `task_create` command and `POST /api/tasks`.
+pub fn start_task_core(
+    state: &AppState,
+    repo_id: i64,
+    prompt: &str,
+    branch: Option<String>,
+    base: Option<String>,
+    title: Option<String>,
+    permission_mode: Option<String>,
+) -> AppResult<Worktree> {
+    let leaf = branch.unwrap_or_else(|| branch_from_prompt(prompt));
+    // Create the worktree, retrying with a numeric suffix on branch collision
+    // (the loop caller can't know what names are already taken).
+    let mut last_err = None;
+    let mut w = None;
+    for attempt in 0..6 {
+        let candidate = if attempt == 0 {
+            leaf.clone()
+        } else {
+            format!("{leaf}-{}", attempt + 1)
+        };
+        let full = if candidate.contains('/') {
+            candidate
+        } else {
+            format!("flock/{candidate}")
+        };
+        let args = CreateWorktreeArgs {
+            repo_id,
+            branch: full,
+            base: base.clone(),
+            title: title.clone(),
+            new_branch: true,
+            path: None,
+            permission_mode: permission_mode.clone(),
+        };
+        match create_worktree_core(&state.db, args) {
+            Ok(created) => {
+                w = Some(created);
+                break;
+            }
+            Err(e) if is_branch_collision(&e) => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let w = w.ok_or_else(|| {
+        last_err.unwrap_or_else(|| AppError::msg("could not create worktree after retries"))
+    })?;
+
+    let repo = state.db.get_repo(repo_id)?;
+    let env_vars = env_profiles::resolve_vars(&env_profiles::load(), &repo.path);
+    pty::start_detached(
+        w.id,
+        Path::new(&w.path),
+        &w.permission_mode,
+        &env_vars,
+        Some(prompt),
+    )?;
+    state.db.touch_worktree(w.id)?;
+    Ok(w)
+}
+
+fn is_branch_collision(e: &AppError) -> bool {
+    let s = e.to_string().to_lowercase();
+    s.contains("already exists")
+        || s.contains("already used by worktree")
+        || s.contains("already checked out")
+}
+
+/// Derive a branch leaf from a prompt: first few words, slugified, capped.
+fn branch_from_prompt(prompt: &str) -> String {
+    let words = prompt
+        .split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("-");
+    // Guard before slugify: slugify falls back to "branch" on empty input,
+    // but "task" is a clearer default for a prompt-less task.
+    if words.trim().is_empty() {
+        return "task".to_string();
+    }
+    let slug: String = git::slugify(&words).chars().take(40).collect();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "task".to_string()
+    } else {
+        slug
+    }
+}
+
+/// Spawn a task (worktree + prompted claude) from the desktop. Returns the new
+/// worktree so the UI can open it.
+#[tauri::command]
+pub fn task_create(state: State<'_, AppState>, args: CreateTaskArgs) -> AppResult<Worktree> {
+    start_task_core(
+        &state,
+        args.repo_id,
+        &args.prompt,
+        args.branch,
+        args.base,
+        args.title,
+        args.permission_mode,
+    )
 }
 
 /// Read the full environments + folder-bindings config (tokens included; this
@@ -380,4 +510,20 @@ pub fn session_close(state: State<'_, AppState>, worktree_id: i64) -> AppResult<
 #[tauri::command]
 pub fn tmux_check() -> bool {
     pty::tmux_available()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_from_prompt_is_a_sane_slug() {
+        let b = branch_from_prompt("Fix the checkout race condition, please!");
+        assert!(!b.is_empty());
+        assert!(!b.contains(' '));
+        assert!(b.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+        assert!(b.len() <= 40);
+        assert_eq!(branch_from_prompt("   "), "task");
+        assert_eq!(branch_from_prompt(""), "task");
+    }
 }

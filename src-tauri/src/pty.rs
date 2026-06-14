@@ -123,6 +123,7 @@ impl PtyManager {
         rows: u16,
         permission_mode: &str,
         env_vars: &[(String, String)],
+        initial_prompt: Option<&str>,
     ) -> AppResult<()> {
         // Evict any prior attach for this worktree. `kill()` marks the old
         // attach silent so its reader thread's tail `pty:exit` emit is
@@ -149,34 +150,20 @@ impl PtyManager {
         // Run through the user's interactive login shell so ~/.zshrc runs
         // and PATH picks up brew-installed tmux plus the user's `claude`.
         //
-        // `--permission-mode` is appended only when not "default" — passing
-        // the literal string `default` is equivalent but noisier in `ps`.
-        // tmux `new-session -A` is sticky: the flag we choose now is the
-        // flag claude lives with until the session is killed. The frontend
-        // toggle handles that by calling kill() before re-attaching.
-        let claude_cmd = if permission_mode == "default" || permission_mode.is_empty() {
-            "claude".to_string()
-        } else {
-            format!(
-                "claude --permission-mode {}",
-                shell_escape(permission_mode)
-            )
-        };
-        // Per-environment vars injected into the tmux session via `-e KEY=VAL`.
-        // Like the permission mode, these are sticky: tmux captures them at
-        // session creation, so changing an environment only takes effect after
-        // the session is killed and reopened.
-        let env_flags: String = env_vars
-            .iter()
-            .map(|(k, v)| format!(" -e {}", shell_escape(&format!("{k}={v}"))))
-            .collect();
+        // `--permission-mode`, env vars, and any initial prompt are all baked
+        // into the claude invocation at session creation. tmux `new-session -A`
+        // is sticky: these are the flags claude lives with until the session is
+        // killed (the frontend toggle handles that by killing before
+        // re-attaching). On *re-attach* to an existing session the prompt arg
+        // is moot — claude is already running.
+        let claude = claude_invocation(permission_mode, initial_prompt);
+        let env_flags = build_env_flags(env_vars);
         let tmux_cmd = format!(
             "exec tmux -L {socket} -f {conf} new-session -A -D{env_flags} -s {name} -c {cwd} {claude}",
             socket = shell_escape(TMUX_SOCKET),
             conf = shell_escape(&conf_path.to_string_lossy()),
             name = shell_escape(&session_name),
             cwd = shell_escape(&cwd_str),
-            claude = claude_cmd,
         );
 
         let mut cmd = CommandBuilder::new(&shell);
@@ -320,6 +307,70 @@ fn shell_escape(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+/// Build the `claude` invocation: base command + optional `--permission-mode`
+/// + optional initial prompt (passed as a positional argument, which Claude
+/// Code runs as the session's first turn). All user-supplied parts are shell-
+/// escaped because the result is embedded in a `sh -c` string.
+fn claude_invocation(permission_mode: &str, initial_prompt: Option<&str>) -> String {
+    let mut cmd = if permission_mode == "default" || permission_mode.is_empty() {
+        "claude".to_string()
+    } else {
+        format!("claude --permission-mode {}", shell_escape(permission_mode))
+    };
+    if let Some(p) = initial_prompt {
+        if !p.is_empty() {
+            cmd = format!("{cmd} {}", shell_escape(p));
+        }
+    }
+    cmd
+}
+
+/// `-e KEY=VAL` flags for per-environment vars (see env_profiles). Each pair is
+/// shell-escaped as a unit.
+fn build_env_flags(env_vars: &[(String, String)]) -> String {
+    env_vars
+        .iter()
+        .map(|(k, v)| format!(" -e {}", shell_escape(&format!("{k}={v}"))))
+        .collect()
+}
+
+/// Start a worktree's claude session **detached** (no PTY client), optionally
+/// seeding an initial prompt. Used by the orchestration path so a task can be
+/// spawned headlessly (cron, MCP, REST); a viewer reattaches later via
+/// `attach`, which reconnects to this live tmux session rather than restarting
+/// claude.
+pub fn start_detached(
+    worktree_id: i64,
+    cwd: &Path,
+    permission_mode: &str,
+    env_vars: &[(String, String)],
+    initial_prompt: Option<&str>,
+) -> AppResult<()> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let session_name = tmux_session_name(worktree_id);
+    let conf_path = tmux_config_path()?;
+    let claude = claude_invocation(permission_mode, initial_prompt);
+    let env_flags = build_env_flags(env_vars);
+    let tmux_cmd = format!(
+        "tmux -L {socket} -f {conf} new-session -d{env_flags} -s {name} -c {cwd} {claude}",
+        socket = shell_escape(TMUX_SOCKET),
+        conf = shell_escape(&conf_path.to_string_lossy()),
+        name = shell_escape(&session_name),
+        cwd = shell_escape(&cwd.to_string_lossy()),
+    );
+    let out = std::process::Command::new(shell)
+        .args(["-i", "-l", "-c", &tmux_cmd])
+        .output()
+        .map_err(|e| AppError::Pty(format!("spawn detached: {e}")))?;
+    if !out.status.success() {
+        return Err(AppError::Pty(format!(
+            "tmux new-session failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 /// Kill a Flock tmux session by worktree id. Called when a worktree is

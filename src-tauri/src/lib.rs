@@ -45,6 +45,7 @@ pub fn run() {
             commands::worktree_set_title,
             commands::env_config_get,
             commands::env_config_set,
+            commands::task_create,
             commands::session_open,
             commands::session_write,
             commands::session_resize,

@@ -309,6 +309,67 @@ async fn input(Path(id): Path<i64>, Json(body): Json<InputBody>) -> StatusCode {
     }
 }
 
+#[derive(Deserialize)]
+struct CreateTaskBody {
+    repo: String,
+    prompt: String,
+    branch: Option<String>,
+    base: Option<String>,
+    title: Option<String>,
+    permission_mode: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CreatedTask {
+    id: i64,
+    branch: String,
+    title: Option<String>,
+    path: String,
+}
+
+/// Orchestration entry point: spawn a worktree + prompted claude session.
+/// `{"repo":"<name>","prompt":"...","branch?","base?","title?","permission_mode?"}`.
+/// This is what lets a loop (cron, script, or another agent) create work.
+async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>) -> Response {
+    let st = ctx.app.state::<AppState>();
+    let repo_id = st
+        .db
+        .list_repos()
+        .ok()
+        .and_then(|repos| repos.into_iter().find(|r| r.name == body.repo).map(|r| r.id));
+    let Some(repo_id) = repo_id else {
+        return (StatusCode::BAD_REQUEST, format!("unknown repo {:?}", body.repo)).into_response();
+    };
+
+    // Git + tmux work is blocking — keep it off the async executor.
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        crate::commands::start_task_core(
+            &st,
+            repo_id,
+            &body.prompt,
+            body.branch,
+            body.base,
+            body.title,
+            body.permission_mode,
+        )
+    })
+    .await;
+
+    match res {
+        Ok(Ok(w)) => Json(CreatedTask {
+            id: w.id,
+            branch: w.branch,
+            title: w.title,
+            path: w.path,
+        })
+        .into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "task join failed").into_response(),
+    }
+}
+
 async fn index() -> impl IntoResponse {
     Html(INDEX_HTML)
 }
@@ -461,6 +522,7 @@ fn build_router(ctx: ApiCtx) -> Router {
         .route("/worktrees", get(worktrees))
         .route("/worktrees/:id/stream", get(stream))
         .route("/worktrees/:id/input", post(input))
+        .route("/tasks", post(create_task))
         .route("/status", get(status_counts))
         .route("/push/vapid-public-key", get(vapid_public_key))
         .route("/push/subscribe", post(push_subscribe))
