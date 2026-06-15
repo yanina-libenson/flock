@@ -80,7 +80,12 @@ function App() {
     const statusUnlisten = onWorktreeStatus((e) => {
       const prev = appStore.statusByWorktree[e.worktree_id];
       setWorktreeStatus(e.worktree_id, e.status);
-      if (e.status !== "needs_input" || prev === "needs_input") return;
+      // It's your turn when the agent asks for input, or finishes working.
+      // (idle from `working` = it just stopped; idle from undefined = startup,
+      // which we don't announce.)
+      const asked = e.status === "needs_input" && prev !== "needs_input";
+      const finished = e.status === "idle" && prev === "working";
+      if (!asked && !finished) return;
       const lookingHere =
         appStore.activePaneId === e.worktree_id && document.hasFocus();
       if (lookingHere) return;
@@ -92,7 +97,11 @@ function App() {
         ? `${repo?.name ? `${repo.name}/` : ""}${w.branch}`
         : `worktree ${e.worktree_id}`;
       try {
-        sendNotification({ title: "Claude needs you", body: label, sound: "Ping" });
+        sendNotification({
+          title: asked ? "Claude needs your input" : "Claude finished",
+          body: label,
+          sound: "Ping",
+        });
       } catch {
         /* permission denied or unavailable */
       }
