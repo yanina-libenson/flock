@@ -58,12 +58,13 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
 
   onMount(async () => {
     term = new Terminal({
-      fontFamily:
-        '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      // Match Yani's iTerm "Default" profile: Monaco 12, classic ANSI palette
+      // on pure black. Read from ~/Library/Preferences/com.googlecode.iterm2.plist.
+      fontFamily: "Monaco, ui-monospace, Menlo, monospace",
       fontSize: 12,
-      lineHeight: 1.28,
+      lineHeight: 1.0,
       cursorBlink: true,
-      cursorStyle: "bar",
+      cursorStyle: "block",
       allowProposedApi: true,
       // tmux runs with `mouse on` so a plain drag goes into tmux copy-mode
       // rather than producing an xterm selection. Holding Option bypasses
@@ -78,27 +79,28 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
       // (clean history) via `mouse on`.
       scrollback: 0,
       theme: {
-        background: "#00000000",
-        foreground: "#f2f2f5",
-        cursor: "#7dd3fc",
-        cursorAccent: "#0a0a0f",
-        selectionBackground: "#7dd3fc55",
-        black: "#1a1a22",
-        red: "#ff6b6b",
-        green: "#6ee7b7",
-        yellow: "#fde68a",
-        blue: "#93c5fd",
-        magenta: "#d8b4fe",
-        cyan: "#67e8f9",
-        white: "#e5e7eb",
-        brightBlack: "#4b5563",
-        brightRed: "#fca5a5",
-        brightGreen: "#86efac",
-        brightYellow: "#fef3c7",
-        brightBlue: "#bfdbfe",
-        brightMagenta: "#e9d5ff",
-        brightCyan: "#a5f3fc",
-        brightWhite: "#f9fafb",
+        background: "#000000",
+        foreground: "#ffffff",
+        cursor: "#cccccc",
+        cursorAccent: "#ffffff",
+        selectionBackground: "#b5d5ff",
+        selectionForeground: "#000000",
+        black: "#000000",
+        red: "#bb0000",
+        green: "#00bb00",
+        yellow: "#bbbb00",
+        blue: "#0000bb",
+        magenta: "#bb00bb",
+        cyan: "#00bbbb",
+        white: "#bbbbbb",
+        brightBlack: "#555555",
+        brightRed: "#ff5555",
+        brightGreen: "#55ff55",
+        brightYellow: "#ffff55",
+        brightBlue: "#5555ff",
+        brightMagenta: "#ff55ff",
+        brightCyan: "#55ffff",
+        brightWhite: "#ffffff",
       },
     });
 

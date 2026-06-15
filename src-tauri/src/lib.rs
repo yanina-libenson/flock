@@ -8,6 +8,7 @@ mod monitor;
 mod pty;
 mod schedule;
 mod state;
+mod transcript;
 
 use state::AppState;
 

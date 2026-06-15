@@ -10,7 +10,7 @@
 use crate::db::Schedule;
 use crate::monitor::WorktreeStatus;
 use crate::state::AppState;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -495,6 +495,74 @@ async fn resize_window(Path(id): Path<i64>, Json(body): Json<ResizeBody>) -> Sta
     }
 }
 
+#[derive(Deserialize)]
+struct TranscriptQuery {
+    /// Byte offset into the session file already seen; only newer bytes are
+    /// parsed and returned (incremental polling). 0/omitted = initial load.
+    since: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct TranscriptResp {
+    messages: Vec<crate::transcript::Msg>,
+    bytes: u64,
+}
+
+/// Reader feed: the worktree's Claude conversation as clean messages, parsed
+/// from the session JSONL (read-only — never touches the live terminal). Poll
+/// with `?since=<bytes>` to fetch only what's new.
+async fn transcript_h(
+    State(ctx): State<ApiCtx>,
+    Path(id): Path<i64>,
+    Query(q): Query<TranscriptQuery>,
+) -> Response {
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let w = st.db.get_worktree(id).ok()?;
+        let file = crate::transcript::session_file_for(&w.path)?;
+        let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        let since = q.since.unwrap_or(0);
+        let text = if since > 0 && since <= size {
+            read_from(&file, since)
+        } else {
+            std::fs::read(&file)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default()
+        };
+        let mut msgs = crate::transcript::parse_messages(&text);
+        // Initial load: cap to the most recent slice so the payload is bounded.
+        if since == 0 && msgs.len() > 150 {
+            msgs = msgs.split_off(msgs.len() - 150);
+        }
+        Some(TranscriptResp { messages: msgs, bytes: size })
+    })
+    .await
+    .ok()
+    .flatten();
+    match res {
+        Some(r) => Json(r).into_response(),
+        None => Json(TranscriptResp {
+            messages: vec![],
+            bytes: 0,
+        })
+        .into_response(),
+    }
+}
+
+fn read_from(path: &std::path::Path, offset: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    if f.seek(SeekFrom::Start(offset)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 async fn index() -> impl IntoResponse {
     Html(shell_asset("index.html", INDEX_HTML))
 }
@@ -654,6 +722,7 @@ fn build_router(ctx: ApiCtx) -> Router {
         .route("/worktrees/:id/stream", get(stream))
         .route("/worktrees/:id/input", post(input))
         .route("/worktrees/:id/resize", post(resize_window))
+        .route("/worktrees/:id/transcript", get(transcript_h))
         .route("/tasks", post(create_task))
         .route("/repos", get(repos))
         .route("/schedules", get(schedules_list).post(schedule_create_h))

@@ -92,7 +92,7 @@ function App() {
         ? `${repo?.name ? `${repo.name}/` : ""}${w.branch}`
         : `worktree ${e.worktree_id}`;
       try {
-        sendNotification({ title: "Claude needs you", body: label });
+        sendNotification({ title: "Claude needs you", body: label, sound: "Ping" });
       } catch {
         /* permission denied or unavailable */
       }

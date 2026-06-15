@@ -158,7 +158,7 @@ document.getElementById("main").addEventListener("click", (e) => {
   if (!row) return;
   const id = Number(row.getAttribute("data-id"));
   const w = currentWorktrees.find((x) => x.id === id);
-  if (w) openTerm(w);
+  if (w) openReader(w);
 });
 
 // ---------- new task ----------
@@ -232,6 +232,7 @@ let fit = null;
 let es = null;
 let overlay = null;
 let onResize = null;
+let readerCleanup = null;
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -266,6 +267,42 @@ const VKEYS = [
   ["Ctrl-C", "ctrl-c"],
 ];
 
+// Virtual key bar + compose input, shared by the terminal and reader views.
+function composeBarHtml() {
+  return `
+    <div class="term-keys" data-keys></div>
+    <div class="term-compose">
+      <input class="compose-input" type="text" placeholder="Message…  (Send to submit)"
+             autocomplete="off" autocapitalize="off" autocorrect="off" />
+      <button class="compose-send">Send</button>
+    </div>`;
+}
+
+function wireComposeBar(root, wid) {
+  const keysEl = root.querySelector("[data-keys]");
+  for (const [label, key] of VKEYS) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.onclick = () => sendInput(wid, { key });
+    keysEl.appendChild(b);
+  }
+  const inputEl = root.querySelector(".compose-input");
+  const submit = async () => {
+    const v = inputEl.value;
+    if (!v) return;
+    inputEl.value = "";
+    await sendInput(wid, { text: v });
+    await sendInput(wid, { key: "enter" });
+  };
+  root.querySelector(".compose-send").onclick = submit;
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submit();
+    }
+  });
+}
+
 function openTerm(w) {
   clearInterval(timer); // pause the list poll while viewing
   const title = w.title && w.title.trim() ? w.title : w.branch;
@@ -276,40 +313,17 @@ function openTerm(w) {
     <div class="term-header">
       <button class="back">‹ Back</button>
       <div class="t">${esc(title)}</div>
+      <button class="to-reader" title="Reader view">📖</button>
     </div>
     <div class="term-host" id="term-host"></div>
-    <div class="term-keys" id="term-keys"></div>
-    <div class="term-compose">
-      <input id="term-input" type="text" placeholder="Message…  (Send to submit)"
-             autocomplete="off" autocapitalize="off" autocorrect="off" />
-      <button id="term-send">Send</button>
-    </div>`;
+    ${composeBarHtml()}`;
   document.body.appendChild(overlay);
   overlay.querySelector(".back").onclick = closeTerm;
-
-  const keysEl = overlay.querySelector("#term-keys");
-  for (const [label, key] of VKEYS) {
-    const b = document.createElement("button");
-    b.textContent = label;
-    b.onclick = () => sendInput(w.id, { key });
-    keysEl.appendChild(b);
-  }
-
-  const inputEl = overlay.querySelector("#term-input");
-  const submit = async () => {
-    const v = inputEl.value;
-    if (!v) return;
-    inputEl.value = "";
-    await sendInput(w.id, { text: v });
-    await sendInput(w.id, { key: "enter" });
+  overlay.querySelector(".to-reader").onclick = () => {
+    closeTerm();
+    openReader(w);
   };
-  overlay.querySelector("#term-send").onclick = submit;
-  inputEl.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      submit();
-    }
-  });
+  wireComposeBar(overlay, w.id);
 
   term = new Terminal({
     fontSize: 11,
@@ -423,6 +437,84 @@ function closeTerm() {
   if (overlay) {
     overlay.remove();
     overlay = null;
+  }
+  tick();
+  timer = setInterval(tick, 2000);
+}
+
+// ---------- reader view (clean chat from the session JSONL) ----------
+
+// Minimal, safe markdown: escape, then fenced code, inline code, bold. Newlines
+// are preserved by CSS (white-space: pre-wrap) on the bubble.
+function renderMd(text) {
+  const esc2 = (s) =>
+    s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  let h = esc2(text);
+  h = h.replace(/```([\s\S]*?)```/g, (_, c) => `<pre>${c.replace(/^\n|\n$/g, "")}</pre>`);
+  h = h.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  h = h.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  return h;
+}
+
+function openReader(w) {
+  clearInterval(timer);
+  const title = w.title && w.title.trim() ? w.title : w.branch;
+  const ov = document.createElement("div");
+  ov.className = "reader-screen";
+  ov.innerHTML = `
+    <div class="term-header">
+      <button class="back">‹ Back</button>
+      <div class="t">${esc(title)}</div>
+      <button class="to-term" title="Terminal view">⌨</button>
+    </div>
+    <div class="reader-msgs" id="reader-msgs"></div>
+    ${composeBarHtml()}`;
+  document.body.appendChild(ov);
+  ov.querySelector(".back").onclick = closeReader;
+  ov.querySelector(".to-term").onclick = () => {
+    closeReader();
+    openTerm(w);
+  };
+  wireComposeBar(ov, w.id);
+
+  const msgsEl = ov.querySelector("#reader-msgs");
+  let bytes = 0;
+  const atBottom = () =>
+    msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 80;
+  const append = (messages) => {
+    const stick = atBottom();
+    for (const m of messages) {
+      const div = document.createElement("div");
+      div.className = "msg " + (m.role === "user" ? "user" : "assistant");
+      div.innerHTML = renderMd(m.text);
+      msgsEl.appendChild(div);
+    }
+    if (stick) msgsEl.scrollTop = msgsEl.scrollHeight;
+  };
+  const poll = async (initial) => {
+    try {
+      const path = initial
+        ? `/api/worktrees/${w.id}/transcript`
+        : `/api/worktrees/${w.id}/transcript?since=${bytes}`;
+      const data = await api(path);
+      if (data.messages && data.messages.length) append(data.messages);
+      if (typeof data.bytes === "number") bytes = data.bytes;
+    } catch {
+      /* ignore; retry next tick */
+    }
+  };
+  poll(true).then(() => (msgsEl.scrollTop = msgsEl.scrollHeight));
+  const rt = setInterval(() => poll(false), 2500);
+  readerCleanup = () => {
+    clearInterval(rt);
+    ov.remove();
+  };
+}
+
+function closeReader() {
+  if (readerCleanup) {
+    readerCleanup();
+    readerCleanup = null;
   }
   tick();
   timer = setInterval(tick, 2000);
