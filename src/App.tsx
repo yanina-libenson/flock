@@ -28,6 +28,7 @@ import {
   onWorktreeTitle,
   onPtyExit,
   remoteStart,
+  worktreeLabel,
   type Repo,
   type Worktree,
 } from "./lib/ipc";
@@ -90,12 +91,9 @@ function App() {
         appStore.activePaneId === e.worktree_id && document.hasFocus();
       if (lookingHere) return;
       const w = worktreesById().get(e.worktree_id);
-      const repo = w
-        ? appStore.repos.find((r) => r.id === w.repo_id)
-        : undefined;
-      const label = w
-        ? `${repo?.name ? `${repo.name}/` : ""}${w.branch}`
-        : `worktree ${e.worktree_id}`;
+      // The task title (auto-generated) is what's meaningful — fall back to the
+      // branch only if there's no title yet.
+      const label = w ? worktreeLabel(w) : `worktree ${e.worktree_id}`;
       try {
         sendNotification({
           title: asked ? "Claude needs your input" : "Claude finished",
