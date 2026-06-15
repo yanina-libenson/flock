@@ -100,7 +100,9 @@ function App() {
         sendNotification({
           title: asked ? "Claude needs your input" : "Claude finished",
           body: label,
-          sound: "Ping",
+          // Gentle macOS chime. Alternatives if you want softer/different:
+          // Tink, Pop, Purr (subtle) · Hero, Submarine (deeper) · Bottle, Frog.
+          sound: "Glass",
         });
       } catch {
         /* permission denied or unavailable */
