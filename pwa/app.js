@@ -312,7 +312,7 @@ function openTerm(w) {
   });
 
   term = new Terminal({
-    fontSize: 12,
+    fontSize: 11,
     fontFamily: "ui-monospace, Menlo, monospace",
     cursorBlink: false,
     disableStdin: true,
@@ -321,14 +321,70 @@ function openTerm(w) {
   });
   fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
-  term.open(document.getElementById("term-host"));
-  fit.fit();
+  const hostEl = document.getElementById("term-host");
+  term.open(hostEl);
 
-  onResize = () => {
+  // Touch scroll: xterm only scrolls its scrollback via mouse wheel, not
+  // finger drag (the text layer isn't the scroll container). Map a vertical
+  // drag to term.scrollLines so swiping up shows conversation history.
+  let touchY = null;
+  hostEl.addEventListener(
+    "touchstart",
+    (e) => {
+      touchY = e.touches[0].clientY;
+    },
+    { passive: true },
+  );
+  hostEl.addEventListener(
+    "touchmove",
+    (e) => {
+      if (touchY == null || !term) return;
+      e.preventDefault();
+      const y = e.touches[0].clientY;
+      const rowH = hostEl.clientHeight / Math.max(term.rows, 1);
+      const lines = Math.round((y - touchY) / rowH);
+      if (lines !== 0) {
+        term.scrollLines(-lines);
+        touchY = y;
+      }
+    },
+    { passive: false },
+  );
+  hostEl.addEventListener(
+    "touchend",
+    () => {
+      touchY = null;
+    },
+    { passive: true },
+  );
+
+  // Fit to the phone, trim 2 columns of safety margin (xterm's cell-width
+  // measurement runs a hair narrow → otherwise the right edge clips), then
+  // reflow the session to that width so the agent re-renders narrow. The
+  // desktop reclaims its own width when its pane is next active — this never
+  // permanently shrinks the desktop.
+  const fitAndSend = () => {
+    if (!term || !fit) return;
     try {
       fit.fit();
+      if (term.cols > 22) term.resize(term.cols - 2, term.rows);
     } catch {}
+    if (term.cols > 0 && term.rows > 0) {
+      fetch(`/api/worktrees/${w.id}/resize`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ cols: term.cols, rows: term.rows }),
+      }).catch(() => {});
+    }
   };
+  fitAndSend();
+  // Re-fit after the monospace font has loaded (first measure can be off).
+  setTimeout(fitAndSend, 300);
+
+  onResize = fitAndSend;
   window.addEventListener("resize", onResize);
   window.addEventListener("orientationchange", onResize);
 
@@ -336,8 +392,11 @@ function openTerm(w) {
     `/api/worktrees/${w.id}/stream?token=${encodeURIComponent(token)}`,
   );
   es.onmessage = (ev) => {
-    // Each frame is a full screen snapshot; clear then repaint.
-    term.write("\x1b[2J\x1b[H");
+    // Each frame is a full snapshot (incl. ~200 lines of scrollback). Clear the
+    // scrollback (\x1b[3J) too so frames don't pile up duplicate history, then
+    // repaint. While idle (no new frames) you can scroll up freely; a new frame
+    // resets you to the bottom.
+    term.write("\x1b[3J\x1b[2J\x1b[H");
     term.write(b64ToBytes(ev.data));
   };
   es.addEventListener("exit", () => {
@@ -372,6 +431,9 @@ function closeTerm() {
 // ---------- token prompt ----------
 
 function showTokenPrompt() {
+  // The 2s poll re-enters here while there's no token. Don't rebuild the form
+  // if it's already up, or it wipes what the user is pasting.
+  if (document.getElementById("token-input")) return;
   const main = document.getElementById("main");
   document.getElementById("count").textContent = "";
   main.innerHTML = `

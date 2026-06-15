@@ -10,6 +10,7 @@ import {
   sessionOpen,
   sessionResize,
   sessionWrite,
+  worktreeResizeWindow,
   type Worktree,
 } from "../lib/ipc";
 import { closePane } from "../lib/store";
@@ -210,6 +211,9 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
       fit?.fit();
       if (term.cols > 0 && term.rows > 0) {
         sessionResize(worktreeId, term.cols, term.rows).catch(() => {});
+        // Reclaim the desktop's full width on the tmux window — a phone viewer
+        // may have narrowed it (window-size manual).
+        worktreeResizeWindow(worktreeId, term.cols, term.rows).catch(() => {});
       }
     });
     resizeObserver.observe(containerRef);
@@ -225,6 +229,13 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
       queueMicrotask(() => {
         fit?.fit();
         term?.focus();
+        // Reclaim our width: returning to this pane after a phone viewer
+        // narrowed the session restores it to the desktop size.
+        if (term && term.cols > 0 && term.rows > 0) {
+          worktreeResizeWindow(props.worktree.id, term.cols, term.rows).catch(
+            () => {},
+          );
+        }
       });
     }
   });

@@ -477,6 +477,15 @@ pub fn worktree_set_permission_mode(
     Ok(())
 }
 
+/// Reflow the worktree's tmux window to a size. The desktop calls this to
+/// reclaim its full width when its pane becomes active (after the phone may
+/// have narrowed the session). See `pty::tmux_resize_window`.
+#[tauri::command]
+pub fn worktree_resize_window(worktree_id: i64, cols: u16, rows: u16) -> AppResult<()> {
+    pty::tmux_resize_window(worktree_id, cols, rows);
+    Ok(())
+}
+
 /// Set a worktree's display title. Used to correct or override the title the
 /// monitor auto-generates from the session. Display-only — branch and worktree
 /// path stay locked to the original slug.

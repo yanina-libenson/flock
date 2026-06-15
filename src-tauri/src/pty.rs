@@ -455,6 +455,42 @@ pub fn tmux_capture_pane(worktree_id: i64) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Reflow a worktree's tmux window to an explicit size. Sets `window-size
+/// manual` so the resize sticks even while a differently-sized client is
+/// attached (without it, tmux snaps the window back to the attached client).
+/// This is the "active viewer claims the size" primitive: the phone calls it
+/// with its narrow size on open, the desktop re-claims its full size when its
+/// pane becomes active. Last caller wins.
+pub fn tmux_resize_window(worktree_id: i64, cols: u16, rows: u16) -> bool {
+    let Some(bin) = tmux_bin() else {
+        return false;
+    };
+    let name = tmux_session_name(worktree_id);
+    let cols = cols.max(1).to_string();
+    let rows = rows.max(1).to_string();
+    std::process::Command::new(bin)
+        .args([
+            "-L",
+            TMUX_SOCKET,
+            "set-option",
+            "-t",
+            name.as_str(),
+            "window-size",
+            "manual",
+            ";",
+            "resize-window",
+            "-t",
+            name.as_str(),
+            "-x",
+            &cols,
+            "-y",
+            &rows,
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Like `tmux_capture_pane` but keeps escape sequences (`-e`) so colors and
 /// attributes survive — used to paint the live terminal in the PWA via
 /// xterm.js. The monitor uses the plain (escape-stripped) variant instead,
@@ -462,8 +498,15 @@ pub fn tmux_capture_pane(worktree_id: i64) -> Option<String> {
 pub fn tmux_capture_pane_ansi(worktree_id: i64) -> Option<String> {
     let bin = tmux_bin()?;
     let name = tmux_session_name(worktree_id);
+    // `-S -50`: include ~50 lines of scrollback above the visible screen so the
+    // PWA can scroll back through recent context. Kept modest on purpose:
+    // older lines were printed at the desktop's wider width and can't re-wrap
+    // (terminal scrollback is fixed-width), so deep history reads jagged on a
+    // narrow phone. Recent lines are more likely at the current narrow width.
     let out = std::process::Command::new(bin)
-        .args(["-L", TMUX_SOCKET, "capture-pane", "-t", &name, "-e", "-p"])
+        .args([
+            "-L", TMUX_SOCKET, "capture-pane", "-t", &name, "-e", "-p", "-S", "-50",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {

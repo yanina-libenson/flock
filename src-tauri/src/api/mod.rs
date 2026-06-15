@@ -48,6 +48,20 @@ const XTERM_JS: &str = include_str!("../../../pwa/vendor/xterm.js");
 const XTERM_CSS: &str = include_str!("../../../pwa/vendor/xterm.css");
 const ADDON_FIT_JS: &str = include_str!("../../../pwa/vendor/addon-fit.js");
 
+/// Shell asset body. In debug, read live from disk so PWA edits don't need a
+/// rebuild (the assets are otherwise compiled into the binary via include_str!,
+/// and `tauri dev` doesn't watch the pwa/ folder). In release, use the embedded
+/// copy.
+#[cfg(debug_assertions)]
+fn shell_asset(rel: &str, embedded: &'static str) -> String {
+    let path = format!("{}/../pwa/{}", env!("CARGO_MANIFEST_DIR"), rel);
+    std::fs::read_to_string(path).unwrap_or_else(|_| embedded.to_string())
+}
+#[cfg(not(debug_assertions))]
+fn shell_asset(_rel: &str, embedded: &'static str) -> String {
+    embedded.to_string()
+}
+
 #[derive(Clone)]
 struct ApiCtx {
     app: AppHandle,
@@ -461,20 +475,46 @@ async fn schedule_run_h(State(ctx): State<ApiCtx>, Path(id): Path<i64>) -> Respo
     }
 }
 
+#[derive(Deserialize)]
+struct ResizeBody {
+    cols: u16,
+    rows: u16,
+}
+
+/// Reflow the session to the phone's viewport so the agent re-renders at a
+/// readable width. Does not touch the desktop pane — the desktop re-claims its
+/// own width when its pane is next active.
+async fn resize_window(Path(id): Path<i64>, Json(body): Json<ResizeBody>) -> StatusCode {
+    let ok = tokio::task::spawn_blocking(move || crate::pty::tmux_resize_window(id, body.cols, body.rows))
+        .await
+        .unwrap_or(false);
+    if ok {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::BAD_GATEWAY
+    }
+}
+
 async fn index() -> impl IntoResponse {
-    Html(INDEX_HTML)
+    Html(shell_asset("index.html", INDEX_HTML))
 }
 async fn app_js() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "application/javascript")], APP_JS)
+    (
+        [(header::CONTENT_TYPE, "application/javascript")],
+        shell_asset("app.js", APP_JS),
+    )
 }
 async fn manifest() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "application/manifest+json")],
-        MANIFEST,
+        shell_asset("manifest.webmanifest", MANIFEST),
     )
 }
 async fn service_worker() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "application/javascript")], SW_JS)
+    (
+        [(header::CONTENT_TYPE, "application/javascript")],
+        shell_asset("sw.js", SW_JS),
+    )
 }
 async fn xterm_js() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "application/javascript")], XTERM_JS)
@@ -613,6 +653,7 @@ fn build_router(ctx: ApiCtx) -> Router {
         .route("/worktrees", get(worktrees))
         .route("/worktrees/:id/stream", get(stream))
         .route("/worktrees/:id/input", post(input))
+        .route("/worktrees/:id/resize", post(resize_window))
         .route("/tasks", post(create_task))
         .route("/repos", get(repos))
         .route("/schedules", get(schedules_list).post(schedule_create_h))

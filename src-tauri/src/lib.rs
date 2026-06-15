@@ -45,6 +45,7 @@ pub fn run() {
             commands::worktree_current_branch,
             commands::worktree_set_permission_mode,
             commands::worktree_set_title,
+            commands::worktree_resize_window,
             commands::env_config_get,
             commands::env_config_set,
             commands::task_create,

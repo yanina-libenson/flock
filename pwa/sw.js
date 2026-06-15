@@ -1,6 +1,6 @@
 // Bump this whenever any shell asset (index.html, app.js, manifest) changes,
 // or installed PWAs keep serving the stale shell forever.
-const SW_VERSION = "flock-shell-v5";
+const SW_VERSION = "flock-shell-v7";
 const SHELL = ["/", "/app.js", "/manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
@@ -23,9 +23,19 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   // API calls are always live — never cache agent state.
   if (url.pathname.startsWith("/api/")) return;
-  // Shell: cache-first, fall back to network.
+  // Shell: network-first (updates land on plain reload), cache as offline
+  // fallback.
   e.respondWith(
-    caches.match(e.request).then((hit) => hit || fetch(e.request)),
+    fetch(e.request)
+      .then((res) => {
+        const copy = res.clone();
+        caches
+          .open(SW_VERSION)
+          .then((c) => c.put(e.request, copy))
+          .catch(() => {});
+        return res;
+      })
+      .catch(() => caches.match(e.request)),
   );
 });
 
