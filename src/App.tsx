@@ -15,6 +15,7 @@ import { SettingsModal, remoteEnabledPref } from "./components/SettingsModal";
 import {
   appStore,
   closePane,
+  openPane,
   setActivePane,
   setWorktreeStatus,
   clearWorktreeStatus,
@@ -36,6 +37,7 @@ import {
   isPermissionGranted,
   requestPermission,
   sendNotification,
+  onAction,
 } from "@tauri-apps/plugin-notification";
 import { GitBranch, Settings as SettingsIcon } from "lucide-solid";
 
@@ -78,22 +80,44 @@ function App() {
 
     // Backend monitor pushes one event per status change. needs_input is the
     // attention signal: notify unless you're already looking at that pane.
+    // Per-worktree timing to keep notifications meaningful (not flicker).
+    const workingSince = new Map<number, number>();
+    const lastNotified = new Map<number, number>();
+    const MIN_WORK_MS = 8000; // ignore working blips (focus redraws, quick edits)
+    const COOLDOWN_MS = 30000; // at most one ping per worktree per 30s
+
     const statusUnlisten = onWorktreeStatus((e) => {
       const prev = appStore.statusByWorktree[e.worktree_id];
       setWorktreeStatus(e.worktree_id, e.status);
-      // It's your turn when the agent asks for input, or finishes working.
-      // (idle from `working` = it just stopped; idle from undefined = startup,
-      // which we don't announce.)
+      const id = e.worktree_id;
+      const now = Date.now();
+
+      if (e.status === "working") {
+        if (prev !== "working") workingSince.set(id, now);
+        return;
+      }
+
+      // Now idle or needs_input. How long was it actually working?
+      const workedMs = workingSince.has(id) ? now - workingSince.get(id)! : 0;
+      workingSince.delete(id);
+
       const asked = e.status === "needs_input" && prev !== "needs_input";
-      const finished = e.status === "idle" && prev === "working";
+      // "Finished" only after sustained work — filters the working↔idle flicker
+      // that switching panes/apps causes (tmux focus events make Claude redraw).
+      const finished =
+        e.status === "idle" && prev === "working" && workedMs >= MIN_WORK_MS;
       if (!asked && !finished) return;
+      if (now - (lastNotified.get(id) ?? 0) < COOLDOWN_MS) return;
+
       const lookingHere =
-        appStore.activePaneId === e.worktree_id && document.hasFocus();
+        appStore.activePaneId === id && document.hasFocus();
       if (lookingHere) return;
-      const w = worktreesById().get(e.worktree_id);
+
+      lastNotified.set(id, now);
+      const w = worktreesById().get(id);
       // The task title (auto-generated) is what's meaningful — fall back to the
       // branch only if there's no title yet.
-      const label = w ? worktreeLabel(w) : `worktree ${e.worktree_id}`;
+      const label = w ? worktreeLabel(w) : `worktree ${id}`;
       try {
         sendNotification({
           title: asked ? "Claude needs your input" : "Claude finished",
@@ -101,6 +125,8 @@ function App() {
           // Gentle macOS chime. Alternatives if you want softer/different:
           // Tink, Pop, Purr (subtle) · Hero, Submarine (deeper) · Bottle, Frog.
           sound: "Glass",
+          // Carried back to onAction so a click jumps to this worktree.
+          extra: { worktreeId: id },
         });
       } catch {
         /* permission denied or unavailable */
@@ -110,10 +136,16 @@ function App() {
       applyWorktreeTitle(e.worktree_id, e.title),
     );
     const exitUnlisten = onPtyExit((e) => clearWorktreeStatus(e.worktree_id));
+    // Clicking a notification jumps to its worktree (opens/activates the pane).
+    const actionUnlisten = onAction((n) => {
+      const wid = (n.extra as { worktreeId?: number } | undefined)?.worktreeId;
+      if (typeof wid === "number") openPane(wid);
+    });
     onCleanup(() => {
       statusUnlisten.then((f) => f());
       titleUnlisten.then((f) => f());
       exitUnlisten.then((f) => f());
+      actionUnlisten.then((l) => l.unregister());
     });
 
     const handler = (e: KeyboardEvent) => {
