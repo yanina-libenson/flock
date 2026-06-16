@@ -39,6 +39,7 @@ import {
   sendNotification,
   onAction,
 } from "@tauri-apps/plugin-notification";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { GitBranch, Settings as SettingsIcon } from "lucide-solid";
 
 function App() {
@@ -83,9 +84,16 @@ function App() {
     // Per-worktree timing to keep notifications meaningful (not flicker).
     const workingSince = new Map<number, number>();
     const lastNotified = new Map<number, number>();
-    // Most recent worktree we notified about — fallback for the notification
-    // click in case the `extra` payload doesn't round-trip on macOS.
+    // Most recent worktree we notified about, and whether a notification-click
+    // jump is still "armed". Clicking a notification activates the app (window
+    // regains focus); if that happens shortly after we notified, jump to that
+    // worktree. This works regardless of whether onAction fires (flaky on macOS).
     let lastNotifiedWorktree: number | null = null;
+    let pendingJump = false;
+    const jumpTo = (wid: number | null) => {
+      pendingJump = false;
+      if (wid != null) openPane(wid);
+    };
     const MIN_WORK_MS = 8000; // ignore working blips (focus redraws, quick edits)
     const COOLDOWN_MS = 30000; // at most one ping per worktree per 30s
 
@@ -118,6 +126,12 @@ function App() {
 
       lastNotified.set(id, now);
       lastNotifiedWorktree = id;
+      // Arm the focus-jump for a short window; clear it so a later manual
+      // focus doesn't hijack to this worktree.
+      pendingJump = true;
+      setTimeout(() => {
+        pendingJump = false;
+      }, 12000);
       const w = worktreesById().get(id);
       // The task title (auto-generated) is what's meaningful — fall back to the
       // branch only if there's no title yet.
@@ -140,18 +154,23 @@ function App() {
       applyWorktreeTitle(e.worktree_id, e.title),
     );
     const exitUnlisten = onPtyExit((e) => clearWorktreeStatus(e.worktree_id));
-    // Clicking a notification jumps to its worktree (opens/activates the pane).
+    // Clicking a notification jumps to its worktree. Primary: onAction (when it
+    // fires). Reliable fallback: the window regaining focus while a jump is
+    // armed (a notification click activates the app).
     const actionUnlisten = onAction((n) => {
       const raw = (n.extra as { worktreeId?: unknown } | undefined)?.worktreeId;
       const fromExtra = raw != null && !isNaN(Number(raw)) ? Number(raw) : null;
-      const wid = fromExtra ?? lastNotifiedWorktree;
-      if (wid != null) openPane(wid);
+      jumpTo(fromExtra ?? lastNotifiedWorktree);
+    });
+    const focusUnlisten = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused && pendingJump) jumpTo(lastNotifiedWorktree);
     });
     onCleanup(() => {
       statusUnlisten.then((f) => f());
       titleUnlisten.then((f) => f());
       exitUnlisten.then((f) => f());
       actionUnlisten.then((l) => l.unregister());
+      focusUnlisten.then((f) => f());
     });
 
     const handler = (e: KeyboardEvent) => {
