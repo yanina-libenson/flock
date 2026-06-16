@@ -83,6 +83,9 @@ function App() {
     // Per-worktree timing to keep notifications meaningful (not flicker).
     const workingSince = new Map<number, number>();
     const lastNotified = new Map<number, number>();
+    // Most recent worktree we notified about — fallback for the notification
+    // click in case the `extra` payload doesn't round-trip on macOS.
+    let lastNotifiedWorktree: number | null = null;
     const MIN_WORK_MS = 8000; // ignore working blips (focus redraws, quick edits)
     const COOLDOWN_MS = 30000; // at most one ping per worktree per 30s
 
@@ -114,6 +117,7 @@ function App() {
       if (lookingHere) return;
 
       lastNotified.set(id, now);
+      lastNotifiedWorktree = id;
       const w = worktreesById().get(id);
       // The task title (auto-generated) is what's meaningful — fall back to the
       // branch only if there's no title yet.
@@ -138,8 +142,10 @@ function App() {
     const exitUnlisten = onPtyExit((e) => clearWorktreeStatus(e.worktree_id));
     // Clicking a notification jumps to its worktree (opens/activates the pane).
     const actionUnlisten = onAction((n) => {
-      const wid = (n.extra as { worktreeId?: number } | undefined)?.worktreeId;
-      if (typeof wid === "number") openPane(wid);
+      const raw = (n.extra as { worktreeId?: unknown } | undefined)?.worktreeId;
+      const fromExtra = raw != null && !isNaN(Number(raw)) ? Number(raw) : null;
+      const wid = fromExtra ?? lastNotifiedWorktree;
+      if (wid != null) openPane(wid);
     });
     onCleanup(() => {
       statusUnlisten.then((f) => f());
