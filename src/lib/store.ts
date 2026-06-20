@@ -1,5 +1,5 @@
 import { createStore } from "solid-js/store";
-import { createEffect } from "solid-js";
+import { createEffect, createSignal } from "solid-js";
 import type { Repo, Worktree, WorktreeStatus } from "./ipc";
 
 export interface AppStoreState {
@@ -54,6 +54,31 @@ createEffect(() => {
 
 export const appStore = store;
 export const setAppStore = setStore;
+
+/// Whether the repositories sidebar is shown. Hiding it makes the desktop
+/// terminal fill the window like a plain iTerm tab. Persisted across launches.
+const SIDEBAR_KEY = "flock.sidebar.visible.v1";
+const [sidebarVisible, setSidebarVisibleSig] = createSignal(
+  (() => {
+    try {
+      return localStorage.getItem(SIDEBAR_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  })(),
+);
+export { sidebarVisible };
+export function toggleSidebar() {
+  setSidebarVisibleSig((v) => {
+    const next = !v;
+    try {
+      localStorage.setItem(SIDEBAR_KEY, next ? "1" : "0");
+    } catch {
+      /* ignore quota errors */
+    }
+    return next;
+  });
+}
 
 export function openPane(worktreeId: number) {
   setStore((s) => {

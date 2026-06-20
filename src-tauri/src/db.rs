@@ -46,6 +46,33 @@ pub struct Schedule {
     pub created_at: i64,
 }
 
+/// A knowledge-base search hit (ranked FTS5 match with a highlighted snippet).
+#[derive(Debug, Clone, Serialize)]
+pub struct KbHit {
+    pub path: String,
+    pub title: String,
+    pub snippet: String,
+}
+
+/// A full knowledge-base document, as returned by `kb_read`.
+#[derive(Debug, Clone, Serialize)]
+pub struct KbDoc {
+    pub path: String,
+    pub title: String,
+    pub body: String,
+    pub tags: Vec<String>,
+    pub word_count: i64,
+    pub modified_at: i64,
+}
+
+/// A directory-listing entry (no body), as returned by `kb_list`.
+#[derive(Debug, Clone, Serialize)]
+pub struct KbListItem {
+    pub path: String,
+    pub title: String,
+    pub word_count: i64,
+}
+
 pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
 fn now() -> i64 {
@@ -61,7 +88,12 @@ impl Db {
             .ok_or_else(|| AppError::msg("no data local dir"))?
             .join("Flock");
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join("flock.db");
+        Self::open_at(&dir.join("flock.db"))
+    }
+
+    /// Open (and migrate) the DB at an explicit path. `open()` is this against
+    /// the data dir; tests use it with a temp file.
+    pub fn open_at(path: &std::path::Path) -> AppResult<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             r#"
@@ -98,6 +130,19 @@ impl Db {
               last_run   INTEGER,
               next_run   INTEGER NOT NULL,
               created_at INTEGER NOT NULL
+            );
+
+            -- Knowledge base: an FTS5 index over an Obsidian vault (the vault on
+            -- disk is the source of truth; this index is rebuilt from it). The
+            -- UNINDEXED `path` is the vault-relative file path / identity.
+            CREATE VIRTUAL TABLE IF NOT EXISTS kb_documents USING fts5(
+              path UNINDEXED, title, body, tags, tokenize = 'porter unicode61'
+            );
+            CREATE TABLE IF NOT EXISTS kb_metadata (
+              path        TEXT PRIMARY KEY,
+              modified_at INTEGER NOT NULL,
+              ingested_at INTEGER NOT NULL,
+              word_count  INTEGER NOT NULL DEFAULT 0
             );
 
             -- Legacy: earlier versions of Flock persisted PTY scrollback blobs
@@ -366,5 +411,176 @@ impl Db {
         self.c()?
             .execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    // --- Knowledge base ---
+
+    /// Insert or replace a document, keeping the FTS index and metadata in sync.
+    /// `path` is the vault-relative identity; `tags` is a space-separated string.
+    pub fn kb_upsert(
+        &self,
+        path: &str,
+        title: &str,
+        body: &str,
+        tags: &str,
+        modified_at: i64,
+        word_count: i64,
+    ) -> AppResult<()> {
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM kb_documents WHERE path = ?1", params![path])?;
+        tx.execute(
+            "INSERT INTO kb_documents (path, title, body, tags) VALUES (?1, ?2, ?3, ?4)",
+            params![path, title, body, tags],
+        )?;
+        tx.execute(
+            "INSERT INTO kb_metadata (path, modified_at, ingested_at, word_count)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET
+               modified_at=excluded.modified_at,
+               ingested_at=excluded.ingested_at,
+               word_count=excluded.word_count",
+            params![path, modified_at, now(), word_count],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn kb_delete(&self, path: &str) -> AppResult<()> {
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM kb_documents WHERE path = ?1", params![path])?;
+        tx.execute("DELETE FROM kb_metadata WHERE path = ?1", params![path])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// FTS5 search. `query` must already be sanitized into a valid MATCH
+    /// expression (see `kb::sanitize_query`).
+    pub fn kb_search(&self, query: &str, limit: i64) -> AppResult<Vec<KbHit>> {
+        let c = self.c()?;
+        let mut stmt = c.prepare(
+            "SELECT path, title, snippet(kb_documents, 2, '[', ']', '…', 12)
+             FROM kb_documents WHERE kb_documents MATCH ?1 ORDER BY rank LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![query, limit], |row| {
+            Ok(KbHit {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                snippet: row.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn kb_get(&self, path: &str) -> AppResult<KbDoc> {
+        let c = self.c()?;
+        let doc = c.query_row(
+            "SELECT d.path, d.title, d.body, d.tags,
+                    COALESCE(m.word_count, 0), COALESCE(m.modified_at, 0)
+             FROM kb_documents d LEFT JOIN kb_metadata m ON m.path = d.path
+             WHERE d.path = ?1",
+            params![path],
+            |row| {
+                let tags: String = row.get(3)?;
+                Ok(KbDoc {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                    body: row.get(2)?,
+                    tags: tags.split_whitespace().map(|s| s.to_string()).collect(),
+                    word_count: row.get(4)?,
+                    modified_at: row.get(5)?,
+                })
+            },
+        )?;
+        Ok(doc)
+    }
+
+    pub fn kb_list(&self, prefix: Option<&str>, limit: i64) -> AppResult<Vec<KbListItem>> {
+        let c = self.c()?;
+        let like = format!("{}%", prefix.unwrap_or(""));
+        let mut stmt = c.prepare(
+            "SELECT d.path, d.title, COALESCE(m.word_count, 0)
+             FROM kb_documents d LEFT JOIN kb_metadata m ON m.path = d.path
+             WHERE d.path LIKE ?1 ORDER BY d.path LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![like, limit], |row| {
+            Ok(KbListItem {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                word_count: row.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// path → mtime for every indexed doc — drives the incremental re-scan
+    /// (skip files whose mtime is unchanged) and prune of deleted files.
+    pub fn kb_metadata_map(&self) -> AppResult<std::collections::HashMap<String, i64>> {
+        let c = self.c()?;
+        let mut stmt = c.prepare("SELECT path, modified_at FROM kb_metadata")?;
+        let rows =
+            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        let mut map = std::collections::HashMap::new();
+        for r in rows {
+            let (p, m) = r?;
+            map.insert(p, m);
+        }
+        Ok(map)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{params, Connection};
+
+    /// Linchpin: the bundled SQLite must ship FTS5, and our search shape
+    /// (MATCH + snippet + rank ordering + DELETE-by-column) must run.
+    #[test]
+    fn fts5_available_and_search_shape_works() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE VIRTUAL TABLE kb_documents USING fts5(\
+             path UNINDEXED, title, body, tags, tokenize='porter unicode61');",
+        )
+        .expect("FTS5 must be enabled in the bundled SQLite");
+        c.execute(
+            "INSERT INTO kb_documents (path, title, body, tags) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "memory/deploy.md",
+                "Deploy process",
+                "We deploy via Render to production each morning",
+                "ops"
+            ],
+        )
+        .unwrap();
+        let (title, snippet): (String, String) = c
+            .query_row(
+                "SELECT title, snippet(kb_documents, 2, '[', ']', '…', 12) \
+                 FROM kb_documents WHERE kb_documents MATCH ?1 ORDER BY rank LIMIT 1",
+                params!["\"deploy\""],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Deploy process");
+        assert!(snippet.to_lowercase().contains("deploy"));
+
+        c.execute(
+            "DELETE FROM kb_documents WHERE path = ?1",
+            params!["memory/deploy.md"],
+        )
+        .unwrap();
+        let n: i64 = c
+            .query_row("SELECT count(*) FROM kb_documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

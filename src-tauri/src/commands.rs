@@ -599,6 +599,57 @@ pub fn schedule_run_now(state: State<'_, AppState>, id: i64) -> AppResult<Worktr
     Ok(w)
 }
 
+// ---------- Knowledge base ----------
+
+/// The currently configured Obsidian vault path, or None if unset.
+#[tauri::command]
+pub fn kb_get_vault() -> Option<String> {
+    crate::kb::vault_path()
+}
+
+/// Point the knowledge base at a vault folder (created if missing), persist it,
+/// run an initial index, and (re)start the live watcher. Returns the number of
+/// notes indexed.
+#[tauri::command]
+pub fn kb_set_vault(app: AppHandle, state: State<'_, AppState>, path: String) -> AppResult<usize> {
+    let vault = path.trim().to_string();
+    if vault.is_empty() {
+        return Err(AppError::msg("empty vault path"));
+    }
+    std::fs::create_dir_all(&vault)?;
+    crate::kb::save_config(&crate::kb::KbConfig {
+        vault_path: Some(vault.clone()),
+    })
+    .map_err(|e| AppError::msg(e.to_string()))?;
+    let count = crate::kb::reindex(&state.db, &vault)?;
+    crate::kb::restart_watcher(&app, Some(vault));
+    Ok(count)
+}
+
+/// Re-scan the configured vault. Returns the number of notes (re)indexed.
+#[tauri::command]
+pub fn kb_reindex(state: State<'_, AppState>) -> AppResult<usize> {
+    match crate::kb::vault_path() {
+        Some(v) => crate::kb::reindex(&state.db, &v),
+        None => Ok(0),
+    }
+}
+
+/// Full-text search the knowledge base (for a future desktop search UI; the
+/// agent-facing path is the MCP `kb_search` tool → REST).
+#[tauri::command]
+pub fn kb_search(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<i64>,
+) -> AppResult<Vec<crate::db::KbHit>> {
+    let q = crate::kb::sanitize_query(&query);
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    state.db.kb_search(&q, limit.unwrap_or(20))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -24,6 +24,10 @@ set -g mouse on
 set -g history-limit 50000
 set -g default-terminal \"xterm-256color\"
 set -ag terminal-overrides \",xterm-256color:RGB\"
+# Pass OSC 8 hyperlinks through to xterm.js — without this tmux strips them and
+# links whose visible text differs from the URL render as plain (unclickable)
+# text. xterm.js supports OSC 8 (we set a linkHandler), so advertise it.
+set -as terminal-features \",xterm-256color:hyperlinks\"
 set -g escape-time 10
 set -g status off
 # Forward window focus events to the program (Claude Code uses these for

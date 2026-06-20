@@ -563,6 +563,132 @@ fn read_from(path: &std::path::Path, offset: u64) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+// ---------- knowledge base ----------
+
+#[derive(Deserialize)]
+struct KbSearchQ {
+    q: String,
+    limit: Option<i64>,
+}
+
+async fn kb_search_h(State(ctx): State<ApiCtx>, Query(q): Query<KbSearchQ>) -> Response {
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let query = crate::kb::sanitize_query(&q.q);
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        st.db.kb_search(&query, q.limit.unwrap_or(20))
+    })
+    .await;
+    match res {
+        Ok(Ok(hits)) => Json(hits).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "join failed").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct KbReadQ {
+    path: String,
+}
+
+async fn kb_read_h(State(ctx): State<ApiCtx>, Query(q): Query<KbReadQ>) -> Response {
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        st.db.kb_get(&q.path)
+    })
+    .await;
+    match res {
+        Ok(Ok(doc)) => Json(doc).into_response(),
+        Ok(Err(_)) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "join failed").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct KbListQ {
+    prefix: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn kb_list_h(State(ctx): State<ApiCtx>, Query(q): Query<KbListQ>) -> Response {
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        st.db.kb_list(q.prefix.as_deref(), q.limit.unwrap_or(100))
+    })
+    .await;
+    match res {
+        Ok(Ok(items)) => Json(items).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "join failed").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct KbIngestBody {
+    path: String,
+    content: String,
+}
+
+async fn kb_ingest_h(State(ctx): State<ApiCtx>, Json(body): Json<KbIngestBody>) -> Response {
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        crate::kb::ingest_content(
+            &st.db,
+            crate::kb::vault_path().as_deref(),
+            &body.path,
+            &body.content,
+        )
+    })
+    .await;
+    match res {
+        Ok(Ok(path)) => Json(serde_json::json!({ "ok": true, "path": path })).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "join failed").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct KbDeleteBody {
+    path: String,
+}
+
+async fn kb_delete_h(State(ctx): State<ApiCtx>, Json(body): Json<KbDeleteBody>) -> Response {
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        crate::kb::delete_doc(&st.db, crate::kb::vault_path().as_deref(), &body.path)
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "join failed").into_response(),
+    }
+}
+
+async fn kb_reindex_h(State(ctx): State<ApiCtx>) -> Response {
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        match crate::kb::vault_path() {
+            Some(v) => crate::kb::reindex(&st.db, &v),
+            None => Ok(0),
+        }
+    })
+    .await;
+    match res {
+        Ok(Ok(count)) => Json(serde_json::json!({ "indexed": count })).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "join failed").into_response(),
+    }
+}
+
 async fn index() -> impl IntoResponse {
     Html(shell_asset("index.html", INDEX_HTML))
 }
@@ -729,6 +855,12 @@ fn build_router(ctx: ApiCtx) -> Router {
         .route("/schedules/:id", delete(schedule_delete_h))
         .route("/schedules/:id/run", post(schedule_run_h))
         .route("/status", get(status_counts))
+        .route("/kb/search", get(kb_search_h))
+        .route("/kb/read", get(kb_read_h))
+        .route("/kb/list", get(kb_list_h))
+        .route("/kb/ingest", post(kb_ingest_h))
+        .route("/kb/delete", post(kb_delete_h))
+        .route("/kb/reindex", post(kb_reindex_h))
         .route("/push/vapid-public-key", get(vapid_public_key))
         .route("/push/subscribe", post(push_subscribe))
         .route_layer(middleware::from_fn_with_state(ctx.clone(), require_auth));

@@ -22,6 +22,8 @@ import {
   applyWorktreeTitle,
   jumpToNextNeedingInput,
   worktreesNeedingInput,
+  sidebarVisible,
+  toggleSidebar,
 } from "./lib/store";
 import {
   tmuxCheck,
@@ -40,13 +42,22 @@ import {
   onAction,
 } from "@tauri-apps/plugin-notification";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { GitBranch, Settings as SettingsIcon } from "lucide-solid";
+import {
+  GitBranch,
+  Settings as SettingsIcon,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+} from "lucide-solid";
 
 function App() {
   const [modalRepo, setModalRepo] = createSignal<Repo | null>(null);
   const [showSettings, setShowSettings] = createSignal(false);
   // null = still checking; true/false once we know.
   const [tmuxOk, setTmuxOk] = createSignal<boolean | null>(null);
+  // macOS hides the traffic lights in fullscreen, leaving the top-left empty —
+  // we fill it with the Flock wordmark and drop the inset there.
+  const [isFullscreen, setIsFullscreen] = createSignal(false);
 
   const worktreesById = createMemo(() => {
     const m = new Map<number, Worktree>();
@@ -57,10 +68,28 @@ function App() {
     return m;
   });
 
+  // Repo of the active tab — what the "+" (new tab) button creates against.
+  const activeRepo = createMemo(() => {
+    const id = appStore.activePaneId;
+    if (id == null) return null;
+    const w = worktreesById().get(id);
+    if (!w) return null;
+    return appStore.repos.find((r) => r.id === w.repo_id) ?? null;
+  });
+
   onMount(() => {
     tmuxCheck()
       .then(setTmuxOk)
       .catch(() => setTmuxOk(false));
+
+    // Track fullscreen so the top bar can swap traffic-light space for the
+    // Flock wordmark. onResized fires on the fullscreen enter/exit transition.
+    const win = getCurrentWindow();
+    win.isFullscreen().then(setIsFullscreen).catch(() => {});
+    const fsUnlisten = win.onResized(() => {
+      win.isFullscreen().then(setIsFullscreen).catch(() => {});
+    });
+    onCleanup(() => fsUnlisten.then((f) => f()));
 
     // Resume remote access if it was on last session.
     if (remoteEnabledPref()) {
@@ -180,6 +209,11 @@ function App() {
         jumpToNextNeedingInput();
         return;
       }
+      if (e.key === "b" || e.key === "B") {
+        e.preventDefault();
+        toggleSidebar();
+        return;
+      }
       if (e.key === "w") {
         if (appStore.activePaneId !== null) {
           e.preventDefault();
@@ -213,10 +247,46 @@ function App() {
 
   return (
     <div class="flex flex-col h-screen w-screen overflow-hidden bg-[var(--color-bg)] text-[var(--color-fg)]">
-      <TitleBar>
+      <TitleBar padLeft={isFullscreen() ? 10 : 80}>
+        {/* In fullscreen the traffic lights vanish — fill the gap with the
+            Flock wordmark so the top-left isn't empty. */}
+        <Show when={isFullscreen()}>
+          <div class="flex items-center gap-2 shrink-0 pr-1 text-[11px] font-semibold tracking-wide text-[var(--color-fg-muted)] uppercase select-none">
+            <span
+              class="inline-block w-2 h-2 rounded-full"
+              style={{ background: "var(--color-accent)" }}
+            />
+            <span>Flock</span>
+          </div>
+        </Show>
+        {/* Sidebar toggle, top-left — like VS Code / Zed. */}
+        <button
+          class="no-drag p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition shrink-0"
+          title={sidebarVisible() ? "Hide sidebar (⌘B)" : "Show sidebar (⌘B)"}
+          onClick={() => toggleSidebar()}
+        >
+          <Show when={sidebarVisible()} fallback={<PanelLeftOpen size={15} />}>
+            <PanelLeftClose size={15} />
+          </Show>
+        </button>
+        {/* Tabs, right after the toggle. */}
+        <div class="flex items-center gap-1 min-w-0 overflow-x-auto">
+          <TabBar worktreesById={worktreesById} />
+          <Show when={activeRepo()}>
+            <button
+              class="no-drag shrink-0 p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+              title={`New worktree in ${activeRepo()!.name}`}
+              onClick={() => setModalRepo(activeRepo())}
+            >
+              <Plus size={15} />
+            </button>
+          </Show>
+        </div>
+        {/* Draggable gap, then the controls cluster on the right. */}
+        <div class="flex-1 self-stretch" />
         <WaitingIndicator />
         <button
-          class="no-drag p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+          class="no-drag p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition shrink-0"
           title="Settings"
           onClick={() => setShowSettings(true)}
         >
@@ -224,14 +294,15 @@ function App() {
         </button>
       </TitleBar>
       <div class="flex flex-1 min-h-0">
-        <Sidebar onCreateWorktree={(r) => setModalRepo(r)} />
+        <Show when={sidebarVisible()}>
+          <Sidebar onCreateWorktree={(r) => setModalRepo(r)} />
+        </Show>
         <main class="flex-1 flex flex-col min-w-0">
           <Show
             when={appStore.openPaneIds.length > 0}
             fallback={<EmptyState />}
           >
-            <TabBar worktreesById={worktreesById} />
-            <div class="flex-1 relative min-h-0 bg-[var(--color-bg)]">
+            <div class="flex-1 relative min-h-0 bg-black">
               <For each={appStore.openPaneIds}>
                 {(id) => {
                   const w = () => worktreesById().get(id);

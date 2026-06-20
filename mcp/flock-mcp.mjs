@@ -138,11 +138,90 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {} },
     handler: () => apiCall("GET", "/api/schedules"),
   },
+  {
+    name: "kb_search",
+    description:
+      "Search your knowledge base (an Obsidian vault) — your durable memory across sessions. Returns ranked notes with snippets. Call this BEFORE starting work to recall preferences, prior decisions, conventions, and project facts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search terms" },
+        limit: { type: "number", description: "Max results (default 20)" },
+      },
+      required: ["query"],
+    },
+    handler: (a) =>
+      apiCall(
+        "GET",
+        `/api/kb/search?q=${encodeURIComponent(a.query)}${a.limit ? `&limit=${a.limit}` : ""}`,
+      ),
+  },
+  {
+    name: "kb_read",
+    description:
+      "Read a full note from the knowledge base by its vault-relative path (as returned by kb_search / kb_list).",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string", description: "Vault-relative path, e.g. memory/deploy.md" } },
+      required: ["path"],
+    },
+    handler: (a) => apiCall("GET", `/api/kb/read?path=${encodeURIComponent(a.path)}`),
+  },
+  {
+    name: "kb_list",
+    description: "List notes in the knowledge base, optionally filtered by a vault-relative path prefix.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prefix: { type: "string", description: "Optional path prefix, e.g. memory/" },
+        limit: { type: "number", description: "Max results (default 100)" },
+      },
+    },
+    handler: (a) =>
+      apiCall(
+        "GET",
+        `/api/kb/list?prefix=${encodeURIComponent(a.prefix ?? "")}${a.limit ? `&limit=${a.limit}` : ""}`,
+      ),
+  },
+  {
+    name: "kb_ingest",
+    description:
+      "Write or update a note in the knowledge base (and the Obsidian vault on disk). Use this to save durable, reusable learnings: user preferences, decisions, project facts, conventions. `path` is vault-relative (e.g. 'memory/deploy-process.md'); `content` is full markdown — include YAML front-matter (title, tags) and [[wiki-links]] to related notes. Search first to avoid duplicates; prefer updating an existing note over creating a near-duplicate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Vault-relative path ending in .md" },
+        content: { type: "string", description: "Full markdown content of the note" },
+      },
+      required: ["path", "content"],
+    },
+    handler: (a) => apiCall("POST", "/api/kb/ingest", { path: a.path, content: a.content }),
+  },
+  {
+    name: "kb_delete",
+    description: "Delete a note from the knowledge base and the vault by its vault-relative path.",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string" } },
+      required: ["path"],
+    },
+    handler: (a) => apiCall("POST", "/api/kb/delete", { path: a.path }),
+  },
 ];
+
+/// Server instructions: tell the agent to treat the knowledge base as durable
+/// memory. Mirrors argus's kbInstructions — search-first, write learnings back.
+const INSTRUCTIONS = `Flock exposes a persistent Knowledge Base backed by an Obsidian vault — treat it as your durable memory across sessions.
+
+- Before starting a task, call kb_search for relevant context: user preferences, prior decisions, project facts, naming/style conventions.
+- When you learn something durable and reusable, call kb_ingest to save it as a markdown note. Use a vault-relative path (e.g. memory/<slug>.md), include YAML front-matter with a title and tags, and link related notes with [[wiki-links]]. Search first to avoid duplicates — update the existing note instead of creating a near-duplicate.
+- Use kb_read to open a note by path and kb_list to browse.
+
+Keep notes atomic and concise (one fact or topic per note), like good Obsidian notes — the [[links]] form the knowledge graph.`;
 
 const server = new Server(
   { name: "flock", version: "0.1.0" },
-  { capabilities: { tools: {} } },
+  { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({

@@ -11,6 +11,8 @@ import {
   Boxes,
   Clock,
   Play,
+  Library,
+  RefreshCw,
 } from "lucide-solid";
 import {
   remoteInfo,
@@ -24,6 +26,9 @@ import {
   scheduleSetEnabled,
   scheduleDelete,
   scheduleRunNow,
+  kbGetVault,
+  kbSetVault,
+  kbReindex,
   type RemoteInfo,
   type EnvBinding,
   type Repo,
@@ -77,6 +82,46 @@ export function SettingsModal(props: { onClose: () => void }) {
   const [ntRepo, setNtRepo] = createSignal<number | null>(null);
   const [ntPrompt, setNtPrompt] = createSignal("");
   const [ntSpec, setNtSpec] = createSignal("@every 1d");
+
+  const [vaultPath, setVaultPath] = createSignal<string | null>(null);
+  const [kbBusy, setKbBusy] = createSignal(false);
+  const [kbMsg, setKbMsg] = createSignal<string | null>(null);
+
+  async function chooseVault() {
+    const picked = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "Pick (or create) your Obsidian vault folder",
+    });
+    if (!picked) return;
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    setKbBusy(true);
+    setKbMsg(null);
+    try {
+      const n = await kbSetVault(path);
+      setVaultPath(path);
+      setKbMsg(`Indexed ${n} note${n === 1 ? "" : "s"}.`);
+    } catch (e) {
+      console.error("kbSetVault failed", e);
+      alert(`Couldn't set vault:\n${String(e)}`);
+    } finally {
+      setKbBusy(false);
+    }
+  }
+
+  async function reindexVault() {
+    setKbBusy(true);
+    setKbMsg(null);
+    try {
+      const n = await kbReindex();
+      setKbMsg(`Reindexed ${n} changed note${n === 1 ? "" : "s"}.`);
+    } catch (e) {
+      console.error("kbReindex failed", e);
+      alert(`Couldn't reindex:\n${String(e)}`);
+    } finally {
+      setKbBusy(false);
+    }
+  }
 
   async function refreshSchedules() {
     try {
@@ -151,6 +196,11 @@ export function SettingsModal(props: { onClose: () => void }) {
       if (rs.length) setNtRepo(rs[0].id);
     } catch (e) {
       console.error("reposList failed", e);
+    }
+    try {
+      setVaultPath(await kbGetVault());
+    } catch (e) {
+      console.error("kbGetVault failed", e);
     }
     refreshSchedules();
   });
@@ -556,6 +606,53 @@ export function SettingsModal(props: { onClose: () => void }) {
                   </button>
                 </div>
               </div>
+            </Show>
+          </div>
+
+          {/* ---------- Knowledge base ---------- */}
+          <div class="mt-5 pt-5 border-t border-[var(--color-border)]">
+            <div class="flex items-start gap-3">
+              <Library size={16} class="mt-0.5 text-[var(--color-accent)] shrink-0" />
+              <div class="flex-1 min-w-0">
+                <div class="text-[13px] font-medium text-[var(--color-fg)]">
+                  Knowledge base
+                </div>
+                <div class="mt-1 text-[11px] text-[var(--color-fg-dim)] leading-snug">
+                  Index an Obsidian vault and serve it to agents over MCP as
+                  durable memory — they search it before working and write
+                  learnings back as linked notes. The vault on disk is the
+                  source of truth; edits in Obsidian re-index automatically.
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-3 flex items-center gap-2">
+              <code
+                class="flex-1 truncate text-[11px] font-mono bg-[var(--color-bg)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-fg-muted)]"
+                title={vaultPath() ?? ""}
+              >
+                {vaultPath() ?? "No vault set"}
+              </code>
+              <button
+                class="flex items-center gap-1.5 text-[11px] px-2 py-1.5 rounded border border-[var(--color-border)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] hover:bg-[var(--color-bg-hover)] transition disabled:opacity-50"
+                onClick={chooseVault}
+                disabled={kbBusy()}
+              >
+                <FolderPlus size={12} /> {vaultPath() ? "Change" : "Choose vault"}
+              </button>
+              <Show when={vaultPath()}>
+                <button
+                  class="p-1.5 rounded border border-[var(--color-border)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] hover:bg-[var(--color-bg-hover)] transition disabled:opacity-50"
+                  title="Reindex vault"
+                  onClick={reindexVault}
+                  disabled={kbBusy()}
+                >
+                  <RefreshCw size={12} class={kbBusy() ? "animate-spin" : ""} />
+                </button>
+              </Show>
+            </div>
+            <Show when={kbMsg()}>
+              <div class="mt-1.5 text-[11px] text-[var(--color-fg-dim)]">{kbMsg()}</div>
             </Show>
           </div>
         </div>

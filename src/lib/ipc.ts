@@ -164,6 +164,25 @@ export const scheduleDelete = (id: number) =>
 export const scheduleRunNow = (id: number) =>
   invoke<Worktree>("schedule_run_now", { id });
 
+// ---------- Knowledge base (Obsidian vault) ----------
+
+export interface KbHit {
+  path: string;
+  title: string;
+  snippet: string;
+}
+
+/// The configured vault path, or null if unset.
+export const kbGetVault = () => invoke<string | null>("kb_get_vault");
+/// Point the KB at a vault folder (created if missing), index it, start
+/// watching. Returns the number of notes indexed.
+export const kbSetVault = (path: string) =>
+  invoke<number>("kb_set_vault", { path });
+/// Re-scan the configured vault. Returns the number of notes (re)indexed.
+export const kbReindex = () => invoke<number>("kb_reindex");
+export const kbSearch = (query: string, limit?: number) =>
+  invoke<KbHit[]>("kb_search", { query, limit });
+
 // ---------- Task creation (desktop) ----------
 
 export interface CreateTaskArgs {

@@ -16,6 +16,10 @@ pub struct AppState {
     /// Cancellation handle for the running remote API server, or None when the
     /// server is stopped. Firing it gracefully shuts down every bound listener.
     pub remote: Mutex<Option<CancellationToken>>,
+    /// Live watcher on the knowledge-base vault (re-indexes notes edited in
+    /// Obsidian). Kept alive here; dropping it stops watching. None when no
+    /// vault is configured.
+    pub kb_watcher: Mutex<Option<notify::RecommendedWatcher>>,
 }
 
 impl AppState {
@@ -25,6 +29,7 @@ impl AppState {
             pty: PtyManager::new(),
             statuses: Arc::new(Mutex::new(HashMap::new())),
             remote: Mutex::new(None),
+            kb_watcher: Mutex::new(None),
         })
     }
 }

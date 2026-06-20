@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -13,7 +13,7 @@ import {
   worktreeResizeWindow,
   type Worktree,
 } from "../lib/ipc";
-import { closePane } from "../lib/store";
+import { appStore, closePane } from "../lib/store";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { IDisposable } from "@xterm/xterm";
 
@@ -48,6 +48,9 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
   const [status, setStatus] = createSignal<"connecting" | "ready" | "exited">(
     "connecting",
   );
+  // Live monitor status for this session — drives the iTerm-style "working" bar.
+  const working = () =>
+    appStore.statusByWorktree[props.worktree.id] === "working";
 
   let term: Terminal | null = null;
   let fit: FitAddon | null = null;
@@ -62,10 +65,24 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
       // on pure black. Read from ~/Library/Preferences/com.googlecode.iterm2.plist.
       fontFamily: "Monaco, ui-monospace, Menlo, monospace",
       fontSize: 12,
-      lineHeight: 1.0,
+      // iTerm's "Default" profile breathes between lines; xterm packs them at
+      // 1.0. 1.2 matches that airier feel (the readability win). Safe with the
+      // DOM renderer — the non-integer lineHeight glitch was WebGL-only.
+      lineHeight: 1.2,
       cursorBlink: true,
       cursorStyle: "block",
       allowProposedApi: true,
+      // OSC 8 hyperlinks — links whose visible text differs from the URL (what
+      // Claude emits for "[text](url)" style links). The WebLinksAddon only
+      // matches bare URLs, so these need a linkHandler to be clickable. Opens
+      // the same way as bare URLs (Cmd+click → openUrl, clipboard fallback).
+      linkHandler: {
+        activate: (_e, uri) => {
+          openUrl(uri).catch(() => {
+            navigator.clipboard.writeText(uri).catch(() => {});
+          });
+        },
+      },
       // tmux runs with `mouse on` so a plain drag goes into tmux copy-mode
       // rather than producing an xterm selection. Holding Option bypasses
       // mouse reporting and lets the user make a native xterm selection
@@ -152,13 +169,14 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
       );
     });
 
-    // Cmd+C: copy xterm selection to the OS clipboard. Cmd+V: paste via
-    // `term.paste`, which wraps the text in bracketed-paste markers when the
-    // remote app (Claude) has bracketed-paste mode on — so a multi-line
-    // prompt arrives as a single paste block, not line-by-line keypresses.
-    // Returning `false` suppresses xterm's default handling; `true` passes
-    // through (e.g., Ctrl+C → SIGINT is untouched because we only intercept
-    // when metaKey is set without ctrl/alt).
+    // Cmd+C: copy the xterm selection to the OS clipboard (returning `false`
+    // suppresses xterm's own handling). Ctrl+C → SIGINT is untouched because we
+    // only intercept when metaKey is set without ctrl/alt.
+    //
+    // Cmd+V is deliberately NOT intercepted: the webview fires its own native
+    // paste event, which xterm handles (and wraps in bracketed-paste markers
+    // for Claude). Intercepting it to also call `term.paste` made the text
+    // arrive twice — so we let the single native paste through.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
       if (!e.metaKey || e.ctrlKey || e.altKey) return true;
@@ -169,15 +187,6 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
         navigator.clipboard.writeText(sel).catch((err) =>
           console.error("clipboard write", err),
         );
-        return false;
-      }
-      if (k === "v") {
-        navigator.clipboard
-          .readText()
-          .then((t) => {
-            if (t && term) term.paste(t);
-          })
-          .catch((err) => console.error("clipboard read", err));
         return false;
       }
       return true;
@@ -193,7 +202,9 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
       const payload = data.slice(semi + 1);
       if (payload === "?" || payload === "") return false;
       try {
-        const text = atob(payload);
+        // tmux base64-encodes UTF-8 bytes. atob() alone yields a Latin-1
+        // string (é → Ã©), so decode the bytes as UTF-8.
+        const text = new TextDecoder().decode(b64ToBytes(payload));
         navigator.clipboard.writeText(text).catch((err) =>
           console.error("clipboard write (osc52)", err),
         );
@@ -267,6 +278,9 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
         "pointer-events": props.active ? "auto" : "none",
       }}
     >
+      <Show when={working()}>
+        <div class="flock-working-bar" />
+      </Show>
       <div
         ref={(el) => (containerRef = el)}
         class="absolute inset-0"

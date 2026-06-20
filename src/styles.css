@@ -41,8 +41,12 @@ button { font-family: inherit; }
 
 /* xterm overrides */
 .xterm {
-  padding: 10px 12px;
+  /* Tight vertical padding so the terminal claims as many full rows as the
+     pane allows — minimizes the black gutter left below the last row. */
+  padding: 4px 12px;
   height: 100%;
+  /* Black so the padding gutter blends into the terminal (no gray frame). */
+  background: #000;
 }
 .xterm-viewport { background: transparent !important; }
 
@@ -58,3 +62,28 @@ button { font-family: inherit; }
 /* Draggable titlebar region */
 .drag-region { -webkit-app-region: drag; }
 .no-drag { -webkit-app-region: no-drag; }
+
+/* Working indicator: a green line at the top of the pane with a highlight
+   sweeping left→right while the session is busy — like iTerm's progress bar. */
+.flock-working-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  background: rgba(58, 217, 0, 0.22);
+  pointer-events: none;
+  z-index: 5;
+}
+.flock-working-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, #3ad900 50%, transparent 100%);
+  animation: flock-working-sweep 1.2s linear infinite;
+}
+@keyframes flock-working-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}

@@ -35,6 +35,10 @@ dirs = "5"
 base64 = "0.22"
 env_logger = "0.11"
 
+# Knowledge base: vault walk + live re-index on file changes.
+walkdir = "2"
+notify = "6"
+
 # Remote API + PWA (phase 3)
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "io-util", "time", "macros"] }

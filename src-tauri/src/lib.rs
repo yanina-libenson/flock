@@ -4,6 +4,7 @@ mod db;
 mod env_profiles;
 mod error;
 mod git;
+mod kb;
 mod monitor;
 mod pty;
 mod schedule;
@@ -30,6 +31,7 @@ pub fn run() {
         .setup(|app| {
             monitor::spawn(app.handle().clone());
             schedule::spawn(app.handle().clone());
+            kb::start_indexing(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -60,6 +62,10 @@ pub fn run() {
             commands::session_resize,
             commands::session_close,
             commands::tmux_check,
+            commands::kb_get_vault,
+            commands::kb_set_vault,
+            commands::kb_reindex,
+            commands::kb_search,
             api::remote_start,
             api::remote_stop,
             api::remote_info,
