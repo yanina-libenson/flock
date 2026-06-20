@@ -175,6 +175,31 @@ pub fn fetch_branch(repo: &Path, remote: &str, branch: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Fast-forward the local `branch` up to `origin/<branch>` so the primary
+/// checkout doesn't drift behind after we keep branching new worktrees off
+/// `origin`. Strictly fast-forward and best-effort: if the local branch has
+/// diverged (local-only commits), is missing, or a ff merge would clobber
+/// uncommitted changes, it's left untouched. Assumes `origin/<branch>` was just
+/// fetched.
+pub fn fast_forward_local_branch(repo: &Path, branch: &str) -> AppResult<()> {
+    let upstream = format!("origin/{branch}");
+    // Only proceed when the local branch is strictly behind origin (an ancestor
+    // of it). Diverged / ahead / missing → not an ancestor → skip.
+    if run_git(repo, ["merge-base", "--is-ancestor", branch, &upstream]).is_err() {
+        return Ok(());
+    }
+    if current_branch(repo)? == branch {
+        // Checked out in the primary worktree: a ff-only merge moves the ref and
+        // updates the working tree. Fails (and we ignore) if it would overwrite
+        // local uncommitted changes.
+        run_git(repo, ["merge", "--ff-only", &upstream])?;
+    } else {
+        // Not checked out here: just move the ref forward.
+        run_git(repo, ["branch", "--force", branch, &upstream])?;
+    }
+    Ok(())
+}
+
 pub fn list_branches(repo: &Path) -> AppResult<Vec<String>> {
     let out = run_git(
         repo,

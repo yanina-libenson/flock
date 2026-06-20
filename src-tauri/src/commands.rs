@@ -152,6 +152,7 @@ fn create_worktree_core(db: &Db, args: CreateWorktreeArgs) -> AppResult<Worktree
             None | Some("default") => {
                 let default = git::detect_default_branch(&repo_path)?;
                 let _ = git::fetch_branch(&repo_path, "origin", &default);
+                let _ = git::fast_forward_local_branch(&repo_path, &default);
                 Some(format!("origin/{default}"))
             }
             Some("HEAD") | Some("") => None,
