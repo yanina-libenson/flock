@@ -7,6 +7,13 @@ export interface AppStoreState {
   worktreesByRepo: Record<number, Worktree[]>;
   openPaneIds: number[];
   activePaneId: number | null;
+  /// Subset of openPaneIds that have been activated this session — the only
+  /// panes we mount a TerminalPane (and thus attach claude) for. Lazy attach:
+  /// on launch only the restored active pane is here, so reopening Flock
+  /// doesn't respawn every worktree's claude at once. A hibernated pane drops
+  /// out of this set (back to a dormant tab) until re-activated. NOT persisted
+  /// — reset each launch so lazy attach re-applies.
+  activatedPaneIds: number[];
   /// Live agent status per worktree id, pushed from the backend monitor.
   /// Absent = no live session (never opened, or exited).
   statusByWorktree: Record<number, WorktreeStatus>;
@@ -36,6 +43,10 @@ const [store, setStore] = createStore<AppStoreState>({
   worktreesByRepo: {},
   openPaneIds: persisted.openPaneIds,
   activePaneId: persisted.activePaneId,
+  // Seed only the restored active pane: every other open tab stays dormant
+  // until clicked, so launch attaches one claude, not all of them.
+  activatedPaneIds:
+    persisted.activePaneId !== null ? [persisted.activePaneId] : [],
   statusByWorktree: {},
 });
 
@@ -80,15 +91,22 @@ export function toggleSidebar() {
   });
 }
 
+/// Add a pane to the activated set (mount it / attach claude) if not already in.
+function withActivated(ids: number[], worktreeId: number): number[] {
+  return ids.includes(worktreeId) ? ids : [...ids, worktreeId];
+}
+
 export function openPane(worktreeId: number) {
   setStore((s) => {
+    const activatedPaneIds = withActivated(s.activatedPaneIds, worktreeId);
     if (s.openPaneIds.includes(worktreeId)) {
-      return { ...s, activePaneId: worktreeId };
+      return { ...s, activePaneId: worktreeId, activatedPaneIds };
     }
     return {
       ...s,
       openPaneIds: [...s.openPaneIds, worktreeId],
       activePaneId: worktreeId,
+      activatedPaneIds,
     };
   });
 }
@@ -100,12 +118,35 @@ export function closePane(worktreeId: number) {
     if (active === worktreeId) {
       active = next[next.length - 1] ?? null;
     }
-    return { ...s, openPaneIds: next, activePaneId: active };
+    return {
+      ...s,
+      openPaneIds: next,
+      activePaneId: active,
+      activatedPaneIds: s.activatedPaneIds.filter((id) => id !== worktreeId),
+    };
   });
 }
 
 export function setActivePane(worktreeId: number | null) {
-  setStore("activePaneId", worktreeId);
+  setStore((s) => ({
+    ...s,
+    activePaneId: worktreeId,
+    activatedPaneIds:
+      worktreeId === null
+        ? s.activatedPaneIds
+        : withActivated(s.activatedPaneIds, worktreeId),
+  }));
+}
+
+/// The backend monitor hibernated this worktree's idle session to free memory.
+/// Drop it to a dormant tab: unmount its pane (frees the xterm) and clear its
+/// status dot. The tab stays in `openPaneIds`; clicking it re-activates →
+/// remounts → reattaches with `claude --resume`, restoring the conversation.
+export function hibernatePane(worktreeId: number) {
+  setStore("activatedPaneIds", (ids) =>
+    ids.filter((id) => id !== worktreeId),
+  );
+  clearWorktreeStatus(worktreeId);
 }
 
 export function setWorktreeStatus(worktreeId: number, status: WorktreeStatus) {
@@ -179,6 +220,13 @@ export function prunePanes() {
       s.activePaneId !== null && knownIds.has(s.activePaneId)
         ? s.activePaneId
         : (openPaneIds[openPaneIds.length - 1] ?? null);
-    return { ...s, openPaneIds, activePaneId };
+    let activatedPaneIds = s.activatedPaneIds.filter((id) =>
+      openPaneIds.includes(id),
+    );
+    // The (possibly newly-chosen) active pane must always be mounted.
+    if (activePaneId !== null && !activatedPaneIds.includes(activePaneId)) {
+      activatedPaneIds = [...activatedPaneIds, activePaneId];
+    }
+    return { ...s, openPaneIds, activePaneId, activatedPaneIds };
   });
 }

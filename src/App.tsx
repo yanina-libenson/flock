@@ -1,6 +1,7 @@
 import {
   For,
   Show,
+  createEffect,
   createMemo,
   createSignal,
   onCleanup,
@@ -20,6 +21,7 @@ import {
   setWorktreeStatus,
   clearWorktreeStatus,
   applyWorktreeTitle,
+  hibernatePane,
   jumpToNextNeedingInput,
   worktreesNeedingInput,
   sidebarVisible,
@@ -29,7 +31,9 @@ import {
   tmuxCheck,
   onWorktreeStatus,
   onWorktreeTitle,
+  onWorktreeHibernated,
   onPtyExit,
+  setActiveWorktree,
   remoteStart,
   worktreeLabel,
   type Repo,
@@ -183,6 +187,11 @@ function App() {
       applyWorktreeTitle(e.worktree_id, e.title),
     );
     const exitUnlisten = onPtyExit((e) => clearWorktreeStatus(e.worktree_id));
+    // Monitor reaped an idle session to save memory — drop its pane to a
+    // dormant tab. Re-activating it (clicking the tab) reattaches and resumes.
+    const hibernateUnlisten = onWorktreeHibernated((e) =>
+      hibernatePane(e.worktree_id),
+    );
     // Clicking a notification jumps to its worktree. Primary: onAction (when it
     // fires). Reliable fallback: the window regaining focus while a jump is
     // armed (a notification click activates the app).
@@ -198,6 +207,7 @@ function App() {
       statusUnlisten.then((f) => f());
       titleUnlisten.then((f) => f());
       exitUnlisten.then((f) => f());
+      hibernateUnlisten.then((f) => f());
       actionUnlisten.then((l) => l.unregister());
       focusUnlisten.then((f) => f());
     });
@@ -243,6 +253,12 @@ function App() {
     };
     window.addEventListener("keydown", handler);
     onCleanup(() => window.removeEventListener("keydown", handler));
+  });
+
+  // Keep the backend's notion of the focused pane in sync so the idle-
+  // hibernation monitor never reaps the worktree you're looking at.
+  createEffect(() => {
+    setActiveWorktree(appStore.activePaneId).catch(() => {});
   });
 
   return (
@@ -306,8 +322,12 @@ function App() {
               <For each={appStore.openPaneIds}>
                 {(id) => {
                   const w = () => worktreesById().get(id);
+                  // Lazy attach: only mount (and thus attach claude) once the
+                  // pane has been activated this session. Dormant tabs — never
+                  // opened this launch, or hibernated for memory — render
+                  // nothing until clicked, which re-activates and resumes them.
                   return (
-                    <Show when={w()}>
+                    <Show when={w() && appStore.activatedPaneIds.includes(id)}>
                       <TerminalPane
                         worktree={w()!}
                         active={appStore.activePaneId === id}

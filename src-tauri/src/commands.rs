@@ -528,6 +528,14 @@ pub fn session_close(state: State<'_, AppState>, worktree_id: i64) -> AppResult<
     state.pty.kill(worktree_id)
 }
 
+/// Tell the backend which worktree pane is focused. The idle-hibernation
+/// monitor reads this so it never reaps the session you're actively looking at.
+/// `None` clears it (no pane focused).
+#[tauri::command]
+pub fn set_active_worktree(state: State<'_, AppState>, worktree_id: Option<i64>) {
+    *state.active_worktree.lock().unwrap() = worktree_id;
+}
+
 #[tauri::command]
 pub fn tmux_check() -> bool {
     pty::tmux_available()

@@ -31,6 +31,15 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Minimum gap between phone push notifications for the same worktree.
 const PUSH_COOLDOWN: Duration = Duration::from_secs(300);
 
+/// How long a session must sit idle *at Claude's input prompt* before the
+/// monitor hibernates it — kills the tmux session (and the resident `claude`,
+/// freeing its RAM). Safe because reattaching resumes the on-disk transcript
+/// (`claude --resume`, see `pty::attach`). Generous on purpose: hibernation also
+/// requires the idle prompt to be on screen, so a quiet-but-working agent (a
+/// long bash step with no output) is never reaped — only one that has handed
+/// control back to the user and been left alone.
+const HIBERNATE_AFTER: Duration = Duration::from_secs(15 * 60);
+
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeStatus {
@@ -49,6 +58,11 @@ pub struct WorktreeStatusEvent {
 pub struct WorktreeTitleEvent {
     pub worktree_id: i64,
     pub title: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct WorktreeHibernatedEvent {
+    pub worktree_id: i64,
 }
 
 /// How long to wait for the one-shot `claude -p` title summarizer before
@@ -71,6 +85,9 @@ pub fn spawn(app: AppHandle) {
         // Last push-notification time per worktree — caps phone pushes to one
         // per PUSH_COOLDOWN even if an agent flaps in/out of needs_input.
         let mut last_push: HashMap<i64, Instant> = HashMap::new();
+        // When each session first went idle-at-prompt — the clock for
+        // hibernation. Cleared the moment a session stops being idle.
+        let mut idle_since: HashMap<i64, Instant> = HashMap::new();
 
         loop {
             std::thread::sleep(POLL_INTERVAL);
@@ -83,6 +100,14 @@ pub fn spawn(app: AppHandle) {
             last_status.retain(|k, _| live.contains(k));
             titled.retain(|k| live.contains(k));
             last_push.retain(|k, _| live.contains(k));
+            idle_since.retain(|k, _| live.contains(k));
+
+            // The focused pane is never hibernated. Snapshot it once per tick.
+            let active: Option<i64> = match app.try_state::<AppState>() {
+                Some(s) => *s.active_worktree.lock().unwrap(),
+                None => None,
+            };
+            let now = Instant::now();
             // Mirror the live set into the shared status map the REST API reads.
             if let Some(state) = app.try_state::<AppState>() {
                 state.statuses.lock().unwrap().retain(|k, _| live.contains(k));
@@ -121,10 +146,57 @@ pub fn spawn(app: AppHandle) {
                 }
 
                 maybe_generate_title(&app, &mut titled, id, &captured);
+
+                // Idle-hibernation: a session parked at Claude's idle prompt
+                // (not mid-task) past the threshold, and not the focused pane,
+                // gets reaped to free its `claude` RAM. The conversation is on
+                // disk, so reopening the pane resumes it.
+                if status == WorktreeStatus::Idle && is_at_idle_prompt(&captured) {
+                    let since = *idle_since.entry(id).or_insert(now);
+                    if now.duration_since(since) >= HIBERNATE_AFTER && active != Some(id) {
+                        hibernate(&app, id);
+                        prev.remove(&id);
+                        last_status.remove(&id);
+                        titled.remove(&id);
+                        last_push.remove(&id);
+                        idle_since.remove(&id);
+                        if let Some(state) = app.try_state::<AppState>() {
+                            state.statuses.lock().unwrap().remove(&id);
+                        }
+                        continue; // session gone — don't cache its screen
+                    }
+                } else {
+                    idle_since.remove(&id);
+                }
                 prev.insert(id, captured);
             }
         }
     });
+}
+
+/// True when the screen shows Claude's idle input prompt (`❯` + NBSP) with no
+/// blocking selection prompt and no trailing question — i.e. claude finished
+/// its turn and is waiting for the user, as opposed to mid-task (a spinner or
+/// streaming tool output, with no input prompt on screen). This is the
+/// discriminator that makes hibernation safe: a busy-but-quiet agent never
+/// shows the idle prompt, so it's never reaped.
+fn is_at_idle_prompt(screen: &str) -> bool {
+    screen.contains(PROMPT_NBSP) && !has_selection_prompt(screen) && !ends_in_question(screen)
+}
+
+/// Hibernate a worktree: kill its tmux session (and the `claude` inside it,
+/// freeing memory), then tell the frontend so it can drop the pane to a dormant
+/// tab. Reopening the pane reattaches with `claude --resume`, restoring the
+/// conversation from disk.
+fn hibernate(app: &AppHandle, id: i64) {
+    if let Some(state) = app.try_state::<AppState>() {
+        let _ = state.pty.kill(id);
+    }
+    pty::tmux_kill_session(id);
+    let _ = app.emit(
+        "worktree:hibernated",
+        WorktreeHibernatedEvent { worktree_id: id },
+    );
 }
 
 /// Classify a freshly captured screen against the previous capture.
@@ -424,6 +496,18 @@ mod tests {
     fn sanitize_title_caps_length() {
         let long = "a".repeat(200);
         assert_eq!(sanitize_title(&long).unwrap().chars().count(), 60);
+    }
+
+    #[test]
+    fn idle_prompt_gate_protects_busy_and_blocked_sessions() {
+        // At the idle prompt, done → hibernatable.
+        assert!(is_at_idle_prompt("⏺ Done. All tests pass.\n\n❯\u{00a0}\n  ? for shortcuts\n"));
+        // Mid-task: spinner/output, no input prompt → NOT hibernatable.
+        assert!(!is_at_idle_prompt("⏺ Running tests...\n✻ Brewed for 42s\n"));
+        // Waiting on the user (selection prompt) → NOT hibernatable.
+        assert!(!is_at_idle_prompt("Pick one:\n❯ 1. Yes\n  2. No\n"));
+        // Trailing question (stable) → NOT hibernatable.
+        assert!(!is_at_idle_prompt("⏺ Ship it?\n\n❯\u{00a0}\n"));
     }
 
     #[test]

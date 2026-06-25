@@ -61,6 +61,7 @@ pub fn run() {
             commands::session_write,
             commands::session_resize,
             commands::session_close,
+            commands::set_active_worktree,
             commands::tmux_check,
             commands::kb_get_vault,
             commands::kb_set_vault,

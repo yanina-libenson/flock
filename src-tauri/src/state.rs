@@ -20,6 +20,10 @@ pub struct AppState {
     /// Obsidian). Kept alive here; dropping it stops watching. None when no
     /// vault is configured.
     pub kb_watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    /// The worktree whose pane is currently focused in the desktop UI, set by
+    /// the frontend. The idle-hibernation monitor never reaps this one — you're
+    /// looking at it.
+    pub active_worktree: Mutex<Option<i64>>,
 }
 
 impl AppState {
@@ -30,6 +34,7 @@ impl AppState {
             statuses: Arc::new(Mutex::new(HashMap::new())),
             remote: Mutex::new(None),
             kb_watcher: Mutex::new(None),
+            active_worktree: Mutex::new(None),
         })
     }
 }

@@ -98,6 +98,10 @@ export const sessionResize = (worktreeId: number, cols: number, rows: number) =>
   invoke<void>("session_resize", { worktreeId, cols, rows });
 export const sessionClose = (worktreeId: number) =>
   invoke<void>("session_close", { worktreeId });
+/// Tell the backend which pane is focused so the idle-hibernation monitor
+/// never reaps the session you're looking at. Pass null when no pane is active.
+export const setActiveWorktree = (worktreeId: number | null) =>
+  invoke<void>("set_active_worktree", { worktreeId });
 export const tmuxCheck = () => invoke<boolean>("tmux_check");
 
 // ---------- Remote API / PWA ----------
@@ -222,6 +226,13 @@ export interface WorktreeTitleEvent {
   title: string;
 }
 
+/// The monitor hibernated this worktree's session (idle too long) to free
+/// memory. Its tmux session + `claude` are gone; reopening the pane resumes
+/// the conversation from disk.
+export interface WorktreeHibernatedEvent {
+  worktree_id: number;
+}
+
 /// What to show for a worktree: its auto-generated title when present, else
 /// the branch name (the place slug).
 export function worktreeLabel(w: Worktree): string {
@@ -243,3 +254,8 @@ export const onWorktreeTitle = (
   cb: (e: WorktreeTitleEvent) => void,
 ): Promise<UnlistenFn> =>
   listen<WorktreeTitleEvent>("worktree:title", (e) => cb(e.payload));
+
+export const onWorktreeHibernated = (
+  cb: (e: WorktreeHibernatedEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<WorktreeHibernatedEvent>("worktree:hibernated", (e) => cb(e.payload));
