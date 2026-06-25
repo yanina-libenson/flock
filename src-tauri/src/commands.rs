@@ -282,6 +282,20 @@ pub fn worktree_current_branch(
     git::current_branch(Path::new(&w.path))
 }
 
+/// PR lifecycle status for one worktree, computed on demand (the background
+/// poller in `pr.rs` keeps it fresh after this initial paint). None = no badge.
+#[tauri::command]
+pub fn worktree_refresh_pr_status(
+    state: State<'_, AppState>,
+    id: i64,
+) -> AppResult<Option<crate::pr::PrStatus>> {
+    let w = state.db.get_worktree(id)?;
+    let repo = state.db.get_repo(w.repo_id)?;
+    let default_branch = git::detect_default_branch(Path::new(&repo.path))
+        .unwrap_or_else(|_| "main".to_string());
+    Ok(crate::pr::compute(Path::new(&w.path), &default_branch))
+}
+
 // ---------- Session / PTY commands ----------
 //
 // "Session" here is a loose term — the real session lives inside tmux.

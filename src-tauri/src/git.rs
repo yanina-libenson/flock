@@ -200,6 +200,13 @@ pub fn fast_forward_local_branch(repo: &Path, branch: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Number of commits on HEAD that aren't in `base` (e.g. "origin/main").
+/// Errors if `base` is unknown/unreachable; parses to 0 on unexpected output.
+pub fn commits_ahead(path: &Path, base: &str) -> AppResult<usize> {
+    let out = run_git(path, ["rev-list", "--count", &format!("{base}..HEAD")])?;
+    Ok(out.trim().parse().unwrap_or(0))
+}
+
 pub fn list_branches(repo: &Path) -> AppResult<Vec<String>> {
     let out = run_git(
         repo,

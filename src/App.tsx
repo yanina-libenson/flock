@@ -20,6 +20,7 @@ import {
   setActivePane,
   setWorktreeStatus,
   clearWorktreeStatus,
+  setWorktreePrStatus,
   applyWorktreeTitle,
   hibernatePane,
   jumpToNextNeedingInput,
@@ -31,6 +32,7 @@ import {
   tmuxCheck,
   onWorktreeStatus,
   onWorktreeTitle,
+  onWorktreePrStatus,
   onWorktreeHibernated,
   onPtyExit,
   setActiveWorktree,
@@ -189,6 +191,9 @@ function App() {
       applyWorktreeTitle(e.worktree_id, e.title),
     );
     const exitUnlisten = onPtyExit((e) => clearWorktreeStatus(e.worktree_id));
+    const prStatusUnlisten = onWorktreePrStatus((e) =>
+      setWorktreePrStatus(e.worktree_id, e.status),
+    );
     // Monitor reaped a session to save memory — drop its pane to a dormant
     // tab. Re-activating it (clicking the tab) reattaches and resumes. A
     // "memory" reap carries a note so the reopened pane explains the kill.
@@ -232,6 +237,7 @@ function App() {
       statusUnlisten.then((f) => f());
       titleUnlisten.then((f) => f());
       exitUnlisten.then((f) => f());
+      prStatusUnlisten.then((f) => f());
       hibernateUnlisten.then((f) => f());
       actionUnlisten.then((l) => l.unregister());
       focusUnlisten.then((f) => f());

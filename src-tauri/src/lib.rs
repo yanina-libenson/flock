@@ -6,6 +6,7 @@ mod error;
 mod git;
 mod kb;
 mod monitor;
+mod pr;
 mod pty;
 mod schedule;
 mod state;
@@ -30,6 +31,7 @@ pub fn run() {
         .manage(app_state)
         .setup(|app| {
             monitor::spawn(app.handle().clone());
+            pr::spawn(app.handle().clone());
             schedule::spawn(app.handle().clone());
             kb::start_indexing(app.handle().clone());
             Ok(())
@@ -46,6 +48,7 @@ pub fn run() {
             commands::worktree_remove,
             commands::worktree_dirty,
             commands::worktree_current_branch,
+            commands::worktree_refresh_pr_status,
             commands::worktree_set_permission_mode,
             commands::worktree_set_title,
             commands::worktree_resize_window,

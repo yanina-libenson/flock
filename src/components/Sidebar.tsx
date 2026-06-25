@@ -1,4 +1,4 @@
-import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createSignal, onMount } from "solid-js";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -7,14 +7,13 @@ import {
   repoRemove,
   worktreesList,
   worktreeRemove,
-  worktreeDirty,
-  worktreeSetPermissionMode,
+  worktreeRefreshPrStatus,
   worktreeSetTitle,
   worktreeLabel,
   type Repo,
   type Worktree,
-  type DirtySummary,
-  type PermissionMode,
+  type PrStatus,
+  type WorktreeStatus,
 } from "../lib/ipc";
 import {
   appStore,
@@ -23,6 +22,7 @@ import {
   closePane,
   prunePanes,
   applyWorktreeTitle,
+  setWorktreePrStatus,
 } from "../lib/store";
 import {
   FolderGit2,
@@ -30,14 +30,11 @@ import {
   X,
   FolderPlus,
   FolderOpen,
-  Shield,
-  ShieldOff,
   Pencil,
 } from "lucide-solid";
 
 export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
   const [expanded, setExpanded] = createSignal<Record<number, boolean>>({});
-  const [dirty, setDirty] = createSignal<Record<number, DirtySummary>>({});
   // Worktree id whose title is being edited inline, plus the draft text.
   const [editingId, setEditingId] = createSignal<number | null>(null);
   const [editDraft, setEditDraft] = createSignal("");
@@ -65,9 +62,24 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
 
   onMount(async () => {
     await refresh();
-    const timer = setInterval(pollDirty, 10_000);
-    onCleanup(() => clearInterval(timer));
+    // Paint PR badges on launch; the backend poller pushes updates after this.
+    void refreshAllPr();
   });
+
+  /// One-shot pass to seed PR statuses so badges show immediately on launch,
+  /// without waiting up to a full backend poll interval. Ongoing changes arrive
+  /// via the `worktree:pr_status` event listener in App.tsx.
+  async function refreshAllPr() {
+    for (const list of Object.values(appStore.worktreesByRepo)) {
+      for (const w of list) {
+        try {
+          setWorktreePrStatus(w.id, await worktreeRefreshPrStatus(w.id));
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
 
   async function refresh() {
     const repos = await reposList();
@@ -84,31 +96,6 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
     setAppStore("worktreesByRepo", nextWorktrees);
     setExpanded(nextExpanded);
     prunePanes();
-    pollDirty();
-  }
-
-  let polling = false;
-  async function pollDirty() {
-    // On a repo with many worktrees a single run can exceed the 10s interval.
-    // Without this guard, overlapping runs race and an older result can stomp
-    // a fresher one via setDirty.
-    if (polling) return;
-    polling = true;
-    try {
-      const next: Record<number, DirtySummary> = {};
-      for (const list of Object.values(appStore.worktreesByRepo)) {
-        for (const w of list) {
-          try {
-            next[w.id] = await worktreeDirty(w.id);
-          } catch {
-            // ignore
-          }
-        }
-      }
-      setDirty(next);
-    } finally {
-      polling = false;
-    }
   }
 
   async function onAddRepo() {
@@ -148,34 +135,6 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
     await refresh();
   }
 
-  async function onTogglePermissionMode(w: Worktree) {
-    const next: PermissionMode =
-      w.permission_mode === "bypassPermissions" ? "default" : "bypassPermissions";
-    const isOpen = appStore.openPaneIds.includes(w.id);
-    const verb = next === "bypassPermissions" ? "auto-approve" : "prompt for";
-    const msg =
-      `Switch "${w.branch}" to ${verb} permissions?\n\n` +
-      (isOpen
-        ? `The current Claude session in this workspace will be killed; reopening the pane starts a fresh session with the new mode.`
-        : `Next time you open this workspace, Claude will start with the new mode.`);
-    if (!confirm(msg)) return;
-    try {
-      await worktreeSetPermissionMode(w.id, next);
-      // Tear down the local pane state too so the next open re-runs session_open.
-      if (isOpen) closePane(w.id);
-      // Optimistically reflect the new mode in the sidebar.
-      const list = appStore.worktreesByRepo[w.repo_id] ?? [];
-      setAppStore(
-        "worktreesByRepo",
-        w.repo_id,
-        list.map((x) => (x.id === w.id ? { ...x, permission_mode: next } : x)),
-      );
-    } catch (e) {
-      console.error("worktreeSetPermissionMode failed", e);
-      alert(`Couldn't change permission mode:\n${String(e)}`);
-    }
-  }
-
   async function onRemoveWorktree(w: Worktree) {
     if (
       !confirm(
@@ -200,11 +159,94 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
   }
 
-  function dirtyDotColor(d?: DirtySummary): string | null {
-    if (!d) return null;
-    if (d.staged > 0) return "var(--color-warn)";
-    if (d.unstaged > 0 || d.untracked > 0) return "var(--color-accent)";
-    return null;
+  /// Whose turn it is, as a Tailwind class pair. warn = your move, accent = in
+  /// progress / waiting on others, success = ready to merge, dim = no active
+  /// review loop. Written literally so the JIT generates them.
+  const PILL_TONES = {
+    warn: "text-[var(--color-warn)] bg-[var(--color-warn)]/12",
+    accent: "text-[var(--color-accent)] bg-[var(--color-accent)]/12",
+    success: "text-[var(--color-success)] bg-[var(--color-success)]/12",
+    dim: "text-[var(--color-fg-dim)] bg-[var(--color-fg-dim)]/12",
+  };
+
+  type Pill = { label: string; tooltip: string; cls: string; pulse?: boolean };
+
+  /// The single per-row status pill. Live agent activity wins (the most
+  /// immediate "is the ball in my court" signal); otherwise fall back to the PR
+  /// lifecycle. Null = nothing to show.
+  function rowPill(agent: WorktreeStatus | undefined, pr?: PrStatus): Pill | null {
+    if (agent === "needs_input")
+      return {
+        label: "Needs you",
+        tooltip: "Claude is waiting for your input",
+        cls: PILL_TONES.warn,
+        pulse: true,
+      };
+    if (agent === "working")
+      return {
+        label: "Working",
+        tooltip: "Claude is working…",
+        cls: PILL_TONES.accent,
+      };
+    return pr ? prPill(pr) : null;
+  }
+
+  /// PR lifecycle status → pill.
+  function prPill(s: PrStatus): Pill {
+    const map: Record<
+      PrStatus["state"],
+      { label: string; tooltip: string; tone: keyof typeof PILL_TONES }
+    > = {
+      ready_to_submit: {
+        label: "Push PR",
+        tooltip: "Ready to submit — push & open a PR",
+        tone: "dim",
+      },
+      draft: {
+        label: "Draft",
+        tooltip: "Draft PR — mark ready when done",
+        tone: "warn",
+      },
+      changes_requested: {
+        label: "Changes",
+        tooltip: "Changes requested — address review feedback",
+        tone: "warn",
+      },
+      ci_failed: {
+        label: "CI failed",
+        tooltip: "CI failed — fix the failing checks",
+        tone: "warn",
+      },
+      conflicts: {
+        label: "Conflicts",
+        tooltip: "Merge conflicts — rebase or resolve",
+        tone: "warn",
+      },
+      comments_to_address: {
+        label: "Comments",
+        tooltip: "Unresolved review comments to address",
+        tone: "warn",
+      },
+      monitoring_ci: {
+        label: "CI",
+        tooltip: "Monitoring CI — checks running",
+        tone: "accent",
+      },
+      waiting_review: {
+        label: "Review",
+        tooltip: "Waiting for review",
+        tone: "accent",
+      },
+      ready_to_merge: {
+        label: "Merge",
+        tooltip: "Approved & mergeable — ready to merge",
+        tone: "success",
+      },
+      merged: { label: "Merged", tooltip: "PR merged", tone: "dim" },
+      closed: { label: "Closed", tooltip: "PR closed", tone: "dim" },
+    };
+    const m = map[s.state];
+    return { label: m.label, tooltip: m.tooltip, cls: PILL_TONES[m.tone] };
   }
 
   async function openInFinder(path: string) {
@@ -287,9 +329,9 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                     >
                       {(w) => {
                         const isActive = () => appStore.activePaneId === w.id;
-                        const isOpen = () => appStore.openPaneIds.includes(w.id);
-                        const dotColor = () => dirtyDotColor(dirty()[w.id]);
                         const status = () => appStore.statusByWorktree[w.id];
+                        const pill = () =>
+                          rowPill(status(), appStore.prStatusByWorktree[w.id]);
                         return (
                           <div
                             class="group flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md cursor-pointer text-[12px] transition"
@@ -304,28 +346,6 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                             }}
                             onClick={() => openPane(w.id)}
                           >
-                            <span class="w-1.5 shrink-0 flex justify-center">
-                              <Show when={status()}>
-                                <span
-                                  class="w-1.5 h-1.5 rounded-full"
-                                  classList={{
-                                    "bg-[var(--color-warn)] animate-pulse":
-                                      status() === "needs_input",
-                                    "bg-[var(--color-accent)]":
-                                      status() === "working",
-                                    "bg-[var(--color-fg-dim)] opacity-50":
-                                      status() === "idle",
-                                  }}
-                                  title={
-                                    status() === "needs_input"
-                                      ? "Waiting for your input"
-                                      : status() === "working"
-                                        ? "Working…"
-                                        : "Idle"
-                                  }
-                                />
-                              </Show>
-                            </span>
                             <div class="flex flex-col min-w-0 flex-1">
                               <Show
                                 when={editingId() === w.id}
@@ -373,43 +393,17 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                                 />
                               </Show>
                             </div>
-                            <Show when={dotColor()}>
-                              <span
-                                class="w-1.5 h-1.5 rounded-full"
-                                style={{ background: dotColor()! }}
-                                title="uncommitted changes"
-                              />
-                            </Show>
-                            <Show when={isOpen() && !isActive()}>
-                              <span
-                                class="w-1 h-1 rounded-full bg-[var(--color-fg-dim)]"
-                                title="open in another pane"
-                              />
-                            </Show>
-                            <button
-                              class="p-0.5 rounded hover:bg-[var(--color-bg)] transition shrink-0"
-                              classList={{
-                                "text-[var(--color-warn)] opacity-90 inline-flex":
-                                  w.permission_mode === "bypassPermissions",
-                                "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] hidden group-hover:inline-flex":
-                                  w.permission_mode !== "bypassPermissions",
-                              }}
-                              title={
-                                w.permission_mode === "bypassPermissions"
-                                  ? "Auto-approving permissions. Click to require prompts."
-                                  : "Prompting for permissions. Click to auto-approve."
-                              }
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onTogglePermissionMode(w);
-                              }}
-                            >
-                              {w.permission_mode === "bypassPermissions" ? (
-                                <ShieldOff size={11} />
-                              ) : (
-                                <Shield size={11} />
+                            <Show when={pill()}>
+                              {(p) => (
+                                <span
+                                  class={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium leading-none truncate max-w-[72px] ${p().cls}`}
+                                  classList={{ "animate-pulse": p().pulse }}
+                                  title={p().tooltip}
+                                >
+                                  {p().label}
+                                </span>
                               )}
-                            </button>
+                            </Show>
                             <div class="hidden group-hover:flex items-center gap-0.5 shrink-0">
                               <button
                                 class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"

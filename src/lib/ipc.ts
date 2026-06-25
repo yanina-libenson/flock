@@ -37,6 +37,26 @@ export interface DirtySummary {
   untracked: number;
 }
 
+/// Where a worktree's task sits in the PR lifecycle (mirrors Rust `TaskState`).
+export type TaskState =
+  | "ready_to_submit"
+  | "draft"
+  | "monitoring_ci"
+  | "ci_failed"
+  | "waiting_review"
+  | "comments_to_address"
+  | "changes_requested"
+  | "conflicts"
+  | "ready_to_merge"
+  | "merged"
+  | "closed";
+
+export interface PrStatus {
+  state: TaskState;
+  number: number | null;
+  url: string | null;
+}
+
 export interface CreateWorktreeArgs {
   repo_id: number;
   branch: string;
@@ -81,6 +101,8 @@ export const worktreeSetPermissionMode = (id: number, mode: PermissionMode) =>
   invoke<void>("worktree_set_permission_mode", { id, mode });
 export const worktreeSetTitle = (id: number, title: string) =>
   invoke<void>("worktree_set_title", { id, title });
+export const worktreeRefreshPrStatus = (id: number) =>
+  invoke<PrStatus | null>("worktree_refresh_pr_status", { id });
 export const worktreeResizeWindow = (id: number, cols: number, rows: number) =>
   invoke<void>("worktree_resize_window", { worktreeId: id, cols, rows });
 
@@ -239,6 +261,13 @@ export interface WorktreeTitleEvent {
   title: string;
 }
 
+/// PR lifecycle status pushed from the backend poller. `status` is null when a
+/// worktree has no PR and nothing to submit — clear the badge.
+export interface WorktreePrStatusEvent {
+  worktree_id: number;
+  status: PrStatus | null;
+}
+
 /// The monitor hibernated this worktree's session to free memory. Its tmux
 /// session + `claude` are gone; reopening the pane resumes the conversation
 /// from disk. `reason` is "idle" (parked at the prompt) or "memory" (RSS
@@ -270,6 +299,11 @@ export const onWorktreeTitle = (
   cb: (e: WorktreeTitleEvent) => void,
 ): Promise<UnlistenFn> =>
   listen<WorktreeTitleEvent>("worktree:title", (e) => cb(e.payload));
+
+export const onWorktreePrStatus = (
+  cb: (e: WorktreePrStatusEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<WorktreePrStatusEvent>("worktree:pr_status", (e) => cb(e.payload));
 
 export const onWorktreeHibernated = (
   cb: (e: WorktreeHibernatedEvent) => void,

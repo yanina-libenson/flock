@@ -1,6 +1,6 @@
 import { createStore } from "solid-js/store";
 import { createEffect, createSignal } from "solid-js";
-import type { Repo, Worktree, WorktreeStatus } from "./ipc";
+import type { PrStatus, Repo, Worktree, WorktreeStatus } from "./ipc";
 
 export interface AppStoreState {
   repos: Repo[];
@@ -21,6 +21,9 @@ export interface AppStoreState {
   /// as a banner when the user reopens the reaped pane. Set on the "memory"
   /// hibernated event, cleared when the user dismisses the banner.
   hibernationNoteByWorktree: Record<number, string>;
+  /// PR lifecycle status per worktree id, from the backend PR poller. Absent =
+  /// no PR and nothing to submit (no badge shown).
+  prStatusByWorktree: Record<number, PrStatus>;
 }
 
 const PERSIST_KEY = "flock.panes.v1";
@@ -53,6 +56,7 @@ const [store, setStore] = createStore<AppStoreState>({
     persisted.activePaneId !== null ? [persisted.activePaneId] : [],
   statusByWorktree: {},
   hibernationNoteByWorktree: {},
+  prStatusByWorktree: {},
 });
 
 // Persist on any change to pane state.
@@ -180,6 +184,24 @@ export function clearWorktreeStatus(worktreeId: number) {
     delete next[worktreeId];
     return next;
   });
+}
+
+/// Apply a PR lifecycle status pushed from the backend poller. A null status
+/// clears the badge (no PR / nothing to submit).
+export function setWorktreePrStatus(
+  worktreeId: number,
+  status: PrStatus | null,
+) {
+  if (status === null) {
+    setStore("prStatusByWorktree", (prev) => {
+      if (!(worktreeId in prev)) return prev;
+      const next = { ...prev };
+      delete next[worktreeId];
+      return next;
+    });
+  } else {
+    setStore("prStatusByWorktree", worktreeId, status);
+  }
 }
 
 /// Apply a title pushed from the backend monitor to the matching worktree,
