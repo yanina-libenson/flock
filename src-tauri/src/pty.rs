@@ -160,10 +160,26 @@ impl PtyManager {
         // killed (the frontend toggle handles that by killing before
         // re-attaching). On *re-attach* to an existing session the prompt arg
         // is moot — claude is already running.
-        let claude = claude_invocation(permission_mode, initial_prompt);
+        //
+        // Crash resilience: when the tmux session is gone (server killed under
+        // memory pressure, machine reboot, OOM), `new-session -A` creates a
+        // *fresh* session — which would start claude empty and silently drop
+        // the conversation. Flock keeps no on-disk copy of the live session, so
+        // instead we resume Claude Code's own transcript: if a prior session
+        // file exists for this worktree's cwd and we're not seeding a brand-new
+        // task prompt, bake in `--resume <id>` so the reopened pane continues
+        // where it left off. When the session is still live this is moot (the
+        // claude arg is ignored on attach).
+        let resume_id = if initial_prompt.is_none() && !tmux_list_sessions().contains(&worktree_id) {
+            latest_session_id(cwd)
+        } else {
+            None
+        };
+        let claude = claude_invocation(permission_mode, initial_prompt, resume_id.as_deref());
         let env_flags = build_env_flags(env_vars);
+        let session_cmd = session_command(&claude, &shell);
         let tmux_cmd = format!(
-            "exec tmux -L {socket} -f {conf} new-session -A -D{env_flags} -s {name} -c {cwd} {claude}",
+            "exec tmux -L {socket} -f {conf} new-session -A -D{env_flags} -s {name} -c {cwd} {session_cmd}",
             socket = shell_escape(TMUX_SOCKET),
             conf = shell_escape(&conf_path.to_string_lossy()),
             name = shell_escape(&session_name),
@@ -314,21 +330,60 @@ fn shell_escape(s: &str) -> String {
 }
 
 /// Build the `claude` invocation: base command + optional `--permission-mode`
-/// + optional initial prompt (passed as a positional argument, which Claude
-/// Code runs as the session's first turn). All user-supplied parts are shell-
-/// escaped because the result is embedded in a `sh -c` string.
-fn claude_invocation(permission_mode: &str, initial_prompt: Option<&str>) -> String {
+/// + optional `--resume <id>` (continue a prior on-disk conversation) + optional
+/// initial prompt (passed as a positional argument, which Claude Code runs as
+/// the session's first turn). All user-supplied parts are shell-escaped because
+/// the result is embedded in a `sh -c` string. `resume_id` and `initial_prompt`
+/// are mutually exclusive in practice — resume continues an existing session
+/// (no new first turn), seeding a prompt starts a fresh task.
+fn claude_invocation(
+    permission_mode: &str,
+    initial_prompt: Option<&str>,
+    resume_id: Option<&str>,
+) -> String {
     let mut cmd = if permission_mode == "default" || permission_mode.is_empty() {
         "claude".to_string()
     } else {
         format!("claude --permission-mode {}", shell_escape(permission_mode))
     };
+    if let Some(id) = resume_id {
+        if !id.is_empty() {
+            cmd = format!("{cmd} --resume {}", shell_escape(id));
+        }
+    }
     if let Some(p) = initial_prompt {
         if !p.is_empty() {
             cmd = format!("{cmd} {}", shell_escape(p));
         }
     }
     cmd
+}
+
+/// Wrap the `claude` command as the tmux session's shell-command so that when
+/// claude exits, the pane **falls back to an interactive login shell** in the
+/// same worktree dir instead of the session dying. Without this, `claude` is
+/// the session's root process — exiting it ends the session and the pane goes
+/// dead, leaving nowhere to run shell commands (or `claude --resume`). With it,
+/// `/exit` drops you to a normal prompt, exactly like running claude inside a
+/// terminal.
+///
+/// The result is shell-escaped to a single token: tmux receives it verbatim as
+/// the shell-command and runs `sh -c "<claude>; exec <shell> -i -l"`.
+fn session_command(claude: &str, shell: &str) -> String {
+    let inner = format!("{claude}; exec {} -i -l", shell_escape(shell));
+    shell_escape(&inner)
+}
+
+/// The most recent Claude Code session id for a worktree's cwd, or None if it
+/// has never run claude there. The transcript filename stem *is* the session id
+/// (`<id>.jsonl`), so this is what `claude --resume <id>` expects. Reuses the
+/// transcript module's cwd→slug + newest-file logic so the Reader view and the
+/// resume-on-reattach path agree on which session is "current".
+fn latest_session_id(cwd: &Path) -> Option<String> {
+    let file = crate::transcript::session_file_for(&cwd.to_string_lossy())?;
+    file.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
 }
 
 /// `-e KEY=VAL` flags for per-environment vars (see env_profiles). Each pair is
@@ -355,10 +410,11 @@ pub fn start_detached(
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let session_name = tmux_session_name(worktree_id);
     let conf_path = tmux_config_path()?;
-    let claude = claude_invocation(permission_mode, initial_prompt);
+    let claude = claude_invocation(permission_mode, initial_prompt, None);
     let env_flags = build_env_flags(env_vars);
+    let session_cmd = session_command(&claude, &shell);
     let tmux_cmd = format!(
-        "tmux -L {socket} -f {conf} new-session -d{env_flags} -s {name} -c {cwd} {claude}",
+        "tmux -L {socket} -f {conf} new-session -d{env_flags} -s {name} -c {cwd} {session_cmd}",
         socket = shell_escape(TMUX_SOCKET),
         conf = shell_escape(&conf_path.to_string_lossy()),
         name = shell_escape(&session_name),
@@ -552,4 +608,57 @@ pub fn tmux_available() -> bool {
         .output()
         .map(|o| o.status.success() && !o.stdout.is_empty())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claude_invocation;
+
+    #[test]
+    fn plain_attach_has_no_resume_or_prompt() {
+        assert_eq!(
+            claude_invocation("bypassPermissions", None, None),
+            "claude --permission-mode 'bypassPermissions'"
+        );
+        // default mode → bare `claude`, no --permission-mode flag.
+        assert_eq!(claude_invocation("default", None, None), "claude");
+    }
+
+    #[test]
+    fn resume_id_is_baked_in_after_permission_mode() {
+        assert_eq!(
+            claude_invocation("bypassPermissions", None, Some("abc-123")),
+            "claude --permission-mode 'bypassPermissions' --resume 'abc-123'"
+        );
+    }
+
+    #[test]
+    fn initial_prompt_is_a_trailing_positional() {
+        assert_eq!(
+            claude_invocation("default", Some("fix the bug"), None),
+            "claude 'fix the bug'"
+        );
+    }
+
+    #[test]
+    fn empty_resume_id_is_ignored() {
+        assert_eq!(
+            claude_invocation("default", None, Some("")),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn session_command_wraps_claude_with_shell_fallback() {
+        use super::session_command;
+        // One escaped token (tmux gets it verbatim), and unwrapping it yields
+        // `<claude>; exec <shell> -i -l` so the pane survives claude exiting.
+        let tok = session_command("claude --permission-mode 'bypassPermissions'", "/bin/zsh");
+        assert!(tok.starts_with('\'') && tok.ends_with('\''));
+        let inner = &tok[1..tok.len() - 1].replace("'\\''", "'");
+        assert_eq!(
+            inner,
+            "claude --permission-mode 'bypassPermissions'; exec '/bin/zsh' -i -l"
+        );
+    }
 }

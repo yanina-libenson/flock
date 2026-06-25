@@ -463,8 +463,10 @@ pub fn env_config_set(config: env_profiles::EnvConfig) -> AppResult<()> {
 /// flag — without this the old `claude` keeps running with the old mode
 /// (tmux `new-session -A` attaches to existing sessions verbatim).
 ///
-/// Callers should warn the user that this discards the current Claude
-/// conversation in that workspace.
+/// The conversation itself survives: `session_open` reattaches with
+/// `claude --resume <id>` (the killed session is gone, so the resume-on-
+/// reattach path fires), so the workspace comes back with its history intact
+/// under the new permission mode.
 #[tauri::command]
 pub fn worktree_set_permission_mode(
     state: State<'_, AppState>,
