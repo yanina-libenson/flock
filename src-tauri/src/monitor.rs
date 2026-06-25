@@ -40,6 +40,23 @@ const PUSH_COOLDOWN: Duration = Duration::from_secs(300);
 /// control back to the user and been left alone.
 const HIBERNATE_AFTER: Duration = Duration::from_secs(15 * 60);
 
+/// Aggregate resident-memory budget across all live Flock `claude` sessions.
+/// When their combined RSS exceeds this, the monitor reaps (hibernates) the
+/// heaviest non-focused sessions until back under budget — even ones actively
+/// `working`. This is the backstop the idle-prompt gate structurally can't
+/// provide: a session stuck in a polling loop ("monitor the CI") is perpetually
+/// `working`, never shows the idle prompt, and grows its conversation to
+/// multiple GB; ten of those is how Flock reached ~30GB. Reaping is safe-ish —
+/// the transcript is on disk, so reopening resumes via `claude --resume` — but
+/// it loses the in-flight turn, so the budget is set high enough to only fire
+/// under genuine pressure. Tune to the machine's RAM.
+const RSS_BUDGET_KB: u64 = 12 * 1024 * 1024; // 12 GB
+
+/// How often to run the memory-budget check. Memory grows slowly relative to the
+/// 2s status poll, and the check shells out to `ps` over the whole process
+/// table, so it gets its own slower cadence.
+const RSS_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeStatus {
@@ -63,6 +80,12 @@ pub struct WorktreeTitleEvent {
 #[derive(Serialize, Clone)]
 pub struct WorktreeHibernatedEvent {
     pub worktree_id: i64,
+    /// Why it was reaped: `"idle"` (parked at the prompt past the threshold) or
+    /// `"memory"` (aggregate RSS budget). The frontend surfaces a banner for
+    /// `"memory"` so the resumed session explains why it was killed.
+    pub reason: String,
+    /// Human detail for the banner, e.g. `"3.2 GB"` of RSS freed. None for idle.
+    pub detail: Option<String>,
 }
 
 /// How long to wait for the one-shot `claude -p` title summarizer before
@@ -88,6 +111,8 @@ pub fn spawn(app: AppHandle) {
         // When each session first went idle-at-prompt — the clock for
         // hibernation. Cleared the moment a session stops being idle.
         let mut idle_since: HashMap<i64, Instant> = HashMap::new();
+        // Last time the aggregate-memory budget was checked (own slow cadence).
+        let mut last_rss_check = Instant::now();
 
         loop {
             std::thread::sleep(POLL_INTERVAL);
@@ -154,7 +179,7 @@ pub fn spawn(app: AppHandle) {
                 if status == WorktreeStatus::Idle && is_at_idle_prompt(&captured) {
                     let since = *idle_since.entry(id).or_insert(now);
                     if now.duration_since(since) >= HIBERNATE_AFTER && active != Some(id) {
-                        hibernate(&app, id);
+                        hibernate(&app, id, "idle", None);
                         prev.remove(&id);
                         last_status.remove(&id);
                         titled.remove(&id);
@@ -170,8 +195,87 @@ pub fn spawn(app: AppHandle) {
                 }
                 prev.insert(id, captured);
             }
+
+            // Aggregate-memory backstop, on its own slow cadence: reap the
+            // heaviest non-focused sessions when total RSS blows the budget.
+            // Catches the looping-monitor leak the idle gate above can't.
+            if now.duration_since(last_rss_check) >= RSS_CHECK_INTERVAL {
+                last_rss_check = now;
+                enforce_memory_budget(&app, &last_status, active);
+            }
         }
     });
+}
+
+/// Reap the heaviest non-focused sessions when aggregate RSS exceeds
+/// `RSS_BUDGET_KB`. Skips the focused pane and any session waiting on the user
+/// (`needs_input`) — the two a user would notice vanishing; `working` and `idle`
+/// sessions resume cleanly from the on-disk transcript. Cleanup of the reaped
+/// ids from the monitor's per-session maps falls to the next tick's `retain`,
+/// once the killed tmux session drops out of `tmux_list_sessions`.
+fn enforce_memory_budget(
+    app: &AppHandle,
+    last_status: &HashMap<i64, WorktreeStatus>,
+    active: Option<i64>,
+) {
+    let rss = pty::session_rss_kb();
+    let total: u64 = rss.values().sum();
+    for id in reap_targets(&rss, last_status, active, RSS_BUDGET_KB) {
+        let kb = rss.get(&id).copied().unwrap_or(0);
+        eprintln!(
+            "flock: RSS budget exceeded ({}MB > {}MB) — hibernating worktree {} ({}MB)",
+            total / 1024,
+            RSS_BUDGET_KB / 1024,
+            id,
+            kb / 1024
+        );
+        hibernate(app, id, "memory", Some(human_gb(kb)));
+    }
+}
+
+/// Format a KB count as a short human size for the hibernation banner.
+fn human_gb(kb: u64) -> String {
+    let gb = kb as f64 / 1024.0 / 1024.0;
+    if gb >= 1.0 {
+        format!("{gb:.1} GB")
+    } else {
+        format!("{} MB", kb / 1024)
+    }
+}
+
+/// Pick which sessions to reap to bring total RSS under `budget_kb`. Heaviest
+/// first (frees the most per reap), excluding the focused pane and any session
+/// waiting on the user. Returns empty when already under budget or when no
+/// eligible session can close the gap. Pure — the side effects live in the
+/// caller.
+fn reap_targets(
+    rss: &HashMap<i64, u64>,
+    last_status: &HashMap<i64, WorktreeStatus>,
+    active: Option<i64>,
+    budget_kb: u64,
+) -> Vec<i64> {
+    let total: u64 = rss.values().sum();
+    if total <= budget_kb {
+        return Vec::new();
+    }
+    let mut candidates: Vec<(i64, u64)> = rss
+        .iter()
+        .filter(|(id, _)| active != Some(**id))
+        .filter(|(id, _)| last_status.get(id) != Some(&WorktreeStatus::NeedsInput))
+        .map(|(id, kb)| (*id, *kb))
+        .collect();
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let mut targets = Vec::new();
+    let mut freed = 0u64;
+    for (id, kb) in candidates {
+        if total - freed <= budget_kb {
+            break;
+        }
+        targets.push(id);
+        freed += kb;
+    }
+    targets
 }
 
 /// True when the screen shows Claude's idle input prompt (`❯` + NBSP) with no
@@ -187,15 +291,20 @@ fn is_at_idle_prompt(screen: &str) -> bool {
 /// Hibernate a worktree: kill its tmux session (and the `claude` inside it,
 /// freeing memory), then tell the frontend so it can drop the pane to a dormant
 /// tab. Reopening the pane reattaches with `claude --resume`, restoring the
-/// conversation from disk.
-fn hibernate(app: &AppHandle, id: i64) {
+/// conversation from disk. `reason`/`detail` ride along so the frontend can tell
+/// the user why a session vanished (see WorktreeHibernatedEvent).
+fn hibernate(app: &AppHandle, id: i64, reason: &str, detail: Option<String>) {
     if let Some(state) = app.try_state::<AppState>() {
         let _ = state.pty.kill(id);
     }
     pty::tmux_kill_session(id);
     let _ = app.emit(
         "worktree:hibernated",
-        WorktreeHibernatedEvent { worktree_id: id },
+        WorktreeHibernatedEvent {
+            worktree_id: id,
+            reason: reason.to_string(),
+            detail,
+        },
     );
 }
 
@@ -508,6 +617,41 @@ mod tests {
         assert!(!is_at_idle_prompt("Pick one:\n❯ 1. Yes\n  2. No\n"));
         // Trailing question (stable) → NOT hibernatable.
         assert!(!is_at_idle_prompt("⏺ Ship it?\n\n❯\u{00a0}\n"));
+    }
+
+    fn rss(pairs: &[(i64, u64)]) -> HashMap<i64, u64> {
+        pairs.iter().copied().collect()
+    }
+
+    #[test]
+    fn under_budget_reaps_nothing() {
+        let r = rss(&[(1, 1000), (2, 2000)]);
+        assert!(reap_targets(&r, &HashMap::new(), None, 10_000).is_empty());
+    }
+
+    #[test]
+    fn reaps_heaviest_first_until_under_budget() {
+        // total 9000, budget 4000 → reaping the heaviest (4000) leaves 5000,
+        // still over, so the next-heaviest (3000) joins → 2000, under budget.
+        let r = rss(&[(1, 4000), (2, 3000), (3, 2000)]);
+        assert_eq!(reap_targets(&r, &HashMap::new(), None, 4000), vec![1, 2]);
+    }
+
+    #[test]
+    fn never_reaps_the_focused_pane_even_if_heaviest() {
+        // worktree 1 is the biggest but focused → skipped; 2 then 3 get reaped.
+        let r = rss(&[(1, 9000), (2, 3000), (3, 2000)]);
+        assert_eq!(reap_targets(&r, &HashMap::new(), Some(1), 5000), vec![2, 3]);
+    }
+
+    #[test]
+    fn never_reaps_a_session_waiting_on_the_user() {
+        let r = rss(&[(1, 6000), (2, 5000)]);
+        let mut st = HashMap::new();
+        st.insert(1, WorktreeStatus::NeedsInput);
+        // 1 is protected; only 2 is eligible (frees 5000, total 11000→6000>5000,
+        // but no other candidate remains, so we reap what we can).
+        assert_eq!(reap_targets(&r, &st, None, 5000), vec![2]);
     }
 
     #[test]

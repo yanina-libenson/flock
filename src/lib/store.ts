@@ -17,6 +17,10 @@ export interface AppStoreState {
   /// Live agent status per worktree id, pushed from the backend monitor.
   /// Absent = no live session (never opened, or exited).
   statusByWorktree: Record<number, WorktreeStatus>;
+  /// One-shot notice per worktree explaining a memory-driven hibernation, shown
+  /// as a banner when the user reopens the reaped pane. Set on the "memory"
+  /// hibernated event, cleared when the user dismisses the banner.
+  hibernationNoteByWorktree: Record<number, string>;
 }
 
 const PERSIST_KEY = "flock.panes.v1";
@@ -48,6 +52,7 @@ const [store, setStore] = createStore<AppStoreState>({
   activatedPaneIds:
     persisted.activePaneId !== null ? [persisted.activePaneId] : [],
   statusByWorktree: {},
+  hibernationNoteByWorktree: {},
 });
 
 // Persist on any change to pane state.
@@ -138,15 +143,28 @@ export function setActivePane(worktreeId: number | null) {
   }));
 }
 
-/// The backend monitor hibernated this worktree's idle session to free memory.
+/// The backend monitor hibernated this worktree's session to free memory.
 /// Drop it to a dormant tab: unmount its pane (frees the xterm) and clear its
 /// status dot. The tab stays in `openPaneIds`; clicking it re-activates →
 /// remounts → reattaches with `claude --resume`, restoring the conversation.
-export function hibernatePane(worktreeId: number) {
+/// `note`, when present (the "memory" reason), is stashed so the reopened pane
+/// shows a banner explaining the kill.
+export function hibernatePane(worktreeId: number, note?: string) {
   setStore("activatedPaneIds", (ids) =>
     ids.filter((id) => id !== worktreeId),
   );
   clearWorktreeStatus(worktreeId);
+  if (note) setStore("hibernationNoteByWorktree", worktreeId, note);
+}
+
+/// Dismiss the hibernation banner for a worktree (user acknowledged it).
+export function clearHibernationNote(worktreeId: number) {
+  setStore("hibernationNoteByWorktree", (prev) => {
+    if (!(worktreeId in prev)) return prev;
+    const next = { ...prev };
+    delete next[worktreeId];
+    return next;
+  });
 }
 
 export function setWorktreeStatus(worktreeId: number, status: WorktreeStatus) {

@@ -189,10 +189,18 @@ function App() {
       applyWorktreeTitle(e.worktree_id, e.title),
     );
     const exitUnlisten = onPtyExit((e) => clearWorktreeStatus(e.worktree_id));
-    // Monitor reaped an idle session to save memory — drop its pane to a
-    // dormant tab. Re-activating it (clicking the tab) reattaches and resumes.
+    // Monitor reaped a session to save memory — drop its pane to a dormant
+    // tab. Re-activating it (clicking the tab) reattaches and resumes. A
+    // "memory" reap carries a note so the reopened pane explains the kill.
     const hibernateUnlisten = onWorktreeHibernated((e) =>
-      hibernatePane(e.worktree_id),
+      hibernatePane(
+        e.worktree_id,
+        e.reason === "memory"
+          ? `Flock hibernated this session to free memory${
+              e.detail ? ` (was using ${e.detail})` : ""
+            }. Resumed from the on-disk transcript.`
+          : undefined,
+      ),
     );
     // Clicking a notification jumps to its worktree. Primary: onAction (when it
     // fires). Reliable fallback: the window regaining focus while a jump is

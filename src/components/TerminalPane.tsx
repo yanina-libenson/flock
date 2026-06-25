@@ -13,7 +13,7 @@ import {
   worktreeResizeWindow,
   type Worktree,
 } from "../lib/ipc";
-import { appStore, closePane } from "../lib/store";
+import { appStore, clearHibernationNote, closePane } from "../lib/store";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { IDisposable } from "@xterm/xterm";
 
@@ -280,6 +280,20 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
     >
       <Show when={working()}>
         <div class="flock-working-bar" />
+      </Show>
+      <Show when={appStore.hibernationNoteByWorktree[props.worktree.id]}>
+        {(note) => (
+          <div class="absolute top-0 inset-x-0 z-10 flex items-start gap-2 px-3 py-2 text-[11px] bg-[var(--color-warn)]/15 text-[var(--color-warn)] border-b border-[var(--color-warn)]/30 pointer-events-auto">
+            <span class="flex-1 leading-snug">{note()}</span>
+            <button
+              class="shrink-0 px-1.5 rounded hover:bg-[var(--color-warn)]/25 transition"
+              title="Dismiss"
+              onClick={() => clearHibernationNote(props.worktree.id)}
+            >
+              ✕
+            </button>
+          </div>
+        )}
       </Show>
       <div
         ref={(el) => (containerRef = el)}

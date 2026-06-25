@@ -239,11 +239,14 @@ export interface WorktreeTitleEvent {
   title: string;
 }
 
-/// The monitor hibernated this worktree's session (idle too long) to free
-/// memory. Its tmux session + `claude` are gone; reopening the pane resumes
-/// the conversation from disk.
+/// The monitor hibernated this worktree's session to free memory. Its tmux
+/// session + `claude` are gone; reopening the pane resumes the conversation
+/// from disk. `reason` is "idle" (parked at the prompt) or "memory" (RSS
+/// budget); `detail` is a human size (e.g. "3.2 GB") for the memory case.
 export interface WorktreeHibernatedEvent {
   worktree_id: number;
+  reason: string;
+  detail?: string | null;
 }
 
 /// What to show for a worktree: its auto-generated title when present, else

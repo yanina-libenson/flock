@@ -498,6 +498,94 @@ pub fn tmux_list_sessions() -> Vec<i64> {
         .collect()
 }
 
+/// Total resident memory (KB) of each Flock session's process subtree, keyed by
+/// worktree id. The subtree root is the tmux pane's pid (the `sh -c "claude;
+/// exec shell"` wrapper); we sum it plus every descendant — the `claude` process
+/// and its MCP/node children, which is where the memory actually lives. Returns
+/// empty when tmux is missing or no server is running. Two shells per call
+/// (`tmux list-panes` + a full `ps`), so the caller (the monitor's memory-budget
+/// reaper) runs it on a slow cadence, not the 2s status poll.
+pub fn session_rss_kb() -> HashMap<i64, u64> {
+    let mut out = HashMap::new();
+    let Some(bin) = tmux_bin() else {
+        return out;
+    };
+    // worktree id -> pane root pid
+    let panes = std::process::Command::new(bin)
+        .args([
+            "-L",
+            TMUX_SOCKET,
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name} #{pane_pid}",
+        ])
+        .output();
+    let Ok(panes) = panes else {
+        return out;
+    };
+    if !panes.status.success() {
+        return out;
+    }
+    let roots: Vec<(i64, i32)> = String::from_utf8_lossy(&panes.stdout)
+        .lines()
+        .filter_map(|l| {
+            let (name, pid) = l.split_once(' ')?;
+            let id = name.strip_prefix("flock-")?.parse::<i64>().ok()?;
+            let pid = pid.trim().parse::<i32>().ok()?;
+            Some((id, pid))
+        })
+        .collect();
+    if roots.is_empty() {
+        return out;
+    }
+
+    // Whole process table: pid, ppid, rss(KB). Build per-pid RSS + a ppid->kids
+    // adjacency so each root's subtree can be summed.
+    let ps = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,rss="])
+        .output();
+    let Ok(ps) = ps else {
+        return out;
+    };
+    let mut rss: HashMap<i32, u64> = HashMap::new();
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    for line in String::from_utf8_lossy(&ps.stdout).lines() {
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(ppid), Some(r)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let (Ok(pid), Ok(ppid), Ok(r)) =
+            (pid.parse::<i32>(), ppid.parse::<i32>(), r.parse::<u64>())
+        else {
+            continue;
+        };
+        rss.insert(pid, r);
+        children.entry(ppid).or_default().push(pid);
+    }
+
+    // Iterative DFS per root (process trees are shallow, but a visited guard
+    // keeps a pathological table from looping). Reparented descendants whose
+    // ppid no longer points into the subtree are missed — acceptable; the heavy
+    // memory is `claude` itself, a direct child of the pane.
+    for (id, root) in roots {
+        let mut total: u64 = 0;
+        let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let mut stack = vec![root];
+        while let Some(pid) = stack.pop() {
+            if !seen.insert(pid) {
+                continue;
+            }
+            total += rss.get(&pid).copied().unwrap_or(0);
+            if let Some(kids) = children.get(&pid) {
+                stack.extend(kids.iter().copied());
+            }
+        }
+        out.insert(id, total);
+    }
+    out
+}
+
 /// Capture the rendered screen of a worktree's tmux session, or None if the
 /// session is gone. `-p` prints the visible pane as plain text — the actual
 /// rendered cells with no escape sequences — which is exactly what the
