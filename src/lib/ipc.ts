@@ -94,6 +94,19 @@ export const sessionOpen = (args: OpenSessionArgs) =>
   invoke<void>("session_open", { args });
 export const sessionWrite = (worktreeId: number, b64: string) =>
   invoke<void>("session_write", { worktreeId, b64 });
+/// Write UTF-8 text to a session's PTY (encodes to the base64 the backend
+/// expects). Used for synthesized input like dropped file paths.
+export const sessionWriteText = (worktreeId: number, text: string) => {
+  const bytes = new TextEncoder().encode(text);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(
+      ...(bytes.subarray(i, i + chunk) as unknown as number[]),
+    );
+  }
+  return sessionWrite(worktreeId, btoa(bin));
+};
 export const sessionResize = (worktreeId: number, cols: number, rows: number) =>
   invoke<void>("session_resize", { worktreeId, cols, rows });
 export const sessionClose = (worktreeId: number) =>

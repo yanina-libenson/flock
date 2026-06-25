@@ -34,11 +34,13 @@ import {
   onWorktreeHibernated,
   onPtyExit,
   setActiveWorktree,
+  sessionWriteText,
   remoteStart,
   worktreeLabel,
   type Repo,
   type Worktree,
 } from "./lib/ipc";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   isPermissionGranted,
   requestPermission,
@@ -203,6 +205,21 @@ function App() {
     const focusUnlisten = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
       if (focused && pendingJump) jumpTo(lastNotifiedWorktree);
     });
+    // Drag a file (e.g. an image) onto the window → write its path into the
+    // active session's input, like dropping a file into a terminal. Tauri v2
+    // intercepts OS file drops (the DOM never sees them), so we handle its
+    // event and forward the path(s) to the PTY. Paths with spaces/specials are
+    // single-quoted so each arrives as one token.
+    const quotePath = (p: string) =>
+      /[^\w@%+=:,./-]/.test(p) ? `'${p.replace(/'/g, "'\\''")}'` : p;
+    const dragUnlisten = getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type !== "drop") return;
+      const id = appStore.activePaneId;
+      if (id === null) return;
+      const paths = event.payload.paths ?? [];
+      if (paths.length === 0) return;
+      sessionWriteText(id, paths.map(quotePath).join(" ") + " ").catch(() => {});
+    });
     onCleanup(() => {
       statusUnlisten.then((f) => f());
       titleUnlisten.then((f) => f());
@@ -210,6 +227,7 @@ function App() {
       hibernateUnlisten.then((f) => f());
       actionUnlisten.then((l) => l.unregister());
       focusUnlisten.then((f) => f());
+      dragUnlisten.then((f) => f());
     });
 
     const handler = (e: KeyboardEvent) => {
