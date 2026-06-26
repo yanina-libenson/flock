@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -307,14 +308,45 @@ fn classify_check(item: &Value) -> CheckRollup {
     }
 }
 
+/// Absolute path to the `gh` binary, resolved once. A bundled macOS app
+/// launches from Finder/dock with a minimal PATH that omits Homebrew, so a bare
+/// `Command::new("gh")` fails to spawn and every PR check silently returns no
+/// badge. We find the real location instead.
+fn gh_bin() -> &'static str {
+    static GH: OnceLock<String> = OnceLock::new();
+    GH.get_or_init(|| {
+        for c in ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"] {
+            if Path::new(c).exists() {
+                return c.to_string();
+            }
+        }
+        // Last resort: ask the user's login shell where gh lives (mirrors how
+        // monitor.rs reaches `claude` past the GUI's stripped PATH).
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        if let Ok(out) = Command::new(shell).args(["-ilc", "command -v gh"]).output() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() {
+                return p;
+            }
+        }
+        "gh".to_string()
+    })
+}
+
 /// Run `gh` in a worktree. Returns None only when the process can't be spawned
 /// (gh not installed); a non-zero exit comes back as a non-success `Output` so
-/// callers can inspect stderr (e.g. "no pull requests found").
+/// callers can inspect stderr (e.g. "no pull requests found"). PATH is widened
+/// so gh's own child `git` calls resolve under the bundled app's minimal PATH.
 fn gh(path: &Path, args: &[&str]) -> Option<Output> {
-    Command::new("gh")
+    let augmented = match std::env::var("PATH") {
+        Ok(p) => format!("/opt/homebrew/bin:/usr/local/bin:{p}"),
+        Err(_) => "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin".to_string(),
+    };
+    Command::new(gh_bin())
         .current_dir(path)
         .env("GH_PROMPT_DISABLED", "1")
         .env("NO_COLOR", "1")
+        .env("PATH", augmented)
         .args(args)
         .output()
         .ok()
