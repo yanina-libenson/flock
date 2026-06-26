@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn slug_encoding() {
         // Sanity: the cwd→slug transform Claude uses.
-        let slug = "/Users/y/Code/Thanx/.flock-worktrees/x".replace(['/', '.'], "-");
-        assert_eq!(slug, "-Users-y-Code-Thanx--flock-worktrees-x");
+        let slug = "/Users/y/Code/work/.flock-worktrees/x".replace(['/', '.'], "-");
+        assert_eq!(slug, "-Users-y-Code-work--flock-worktrees-x");
     }
 }

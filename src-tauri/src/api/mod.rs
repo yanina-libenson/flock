@@ -2,7 +2,7 @@
 //!
 //! An axum server, opt-in via the desktop Settings toggle, that exposes the
 //! worktree list + live status and serves the installable PWA shell. Security
-//! posture (Thanx policy): binds `127.0.0.1` (always) + the Tailscale IP
+//! posture: binds `127.0.0.1` (always) + the Tailscale IP
 //! (best-effort) only — never `0.0.0.0`, so untrusted LANs can't reach it even
 //! with the token. All `/api/*` routes require the master token (Bearer header
 //! or `?token=` for EventSource, which can't set headers).

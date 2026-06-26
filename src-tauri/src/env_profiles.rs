@@ -6,8 +6,8 @@
 //! environment by longest-prefix match against the *repo's* registered path
 //! (not the worktree checkout) and injects its vars via `tmux -e`.
 //!
-//! This lets a `~/Code/Thanx` folder share one environment while individual
-//! repos under `~/Code/Personal` override with their own — new repos under a
+//! This lets a `~/Code/work` folder share one environment while individual
+//! repos under `~/Code/personal` override with their own — new repos under a
 //! bound folder inherit automatically.
 //!
 //! Tokens live here (0600 in the data dir), never in a repo and never
@@ -121,7 +121,7 @@ mod tests {
             ],
             bindings: vec![
                 Binding {
-                    path: "/Users/y/Code/Thanx".into(),
+                    path: "/Users/y/Code/work".into(),
                     env: "Work".into(),
                 },
                 Binding {
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn folder_binding_is_inherited() {
-        let v = resolve_vars(&cfg(), "/Users/y/Code/Thanx/some-work-repo");
+        let v = resolve_vars(&cfg(), "/Users/y/Code/work/some-work-repo");
         assert!(v.is_empty()); // Work has no vars (no Render)
     }
 
