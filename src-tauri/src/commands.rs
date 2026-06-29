@@ -583,9 +583,16 @@ notes, but the actual code changes happen in the agents you spawn.\n\n\
 Registered repos you can spawn agents into:\n{repo_list}\n\n{tools}\n\n\
 How to work: break the user's goal into per-repo tasks, spawn agents with \
 task_create (in parallel when independent), follow their progress with task_read, \
-and unblock any that need input with task_input. Don't sit idle — poll task_status \
-to see who needs you. Give each agent a crisp, self-contained prompt; it can't see \
-this conversation."
+and unblock any that need input with task_input. Give each agent a crisp, \
+self-contained prompt; it can't see this conversation.\n\n\
+Waiting on your fleet: once you've spawned your agents and have nothing to do until \
+one of them moves, END YOUR TURN. Flock wakes you automatically the moment a child \
+finishes its turn or needs input — you'll get a 🔔 message naming the child and \
+what changed, then you check it with task_read/task_status. Do NOT schedule wakeup \
+timers to poll your children in a loop: re-reading agents that haven't moved burns \
+tokens for nothing, and Flock already tracks them for you. The only fallback wakeup \
+worth setting is a single LONG one as a safety net for something Flock can't see (an \
+external wait) — never a short timer re-armed every cycle to poll a child."
     )
 }
 
