@@ -289,6 +289,11 @@ async fn stream(Path(id): Path<i64>) -> impl IntoResponse {
 struct InputBody {
     text: Option<String>,
     key: Option<String>,
+    /// When sending `text`, also press Enter to submit it as a turn. Without
+    /// this, text is typed into the composer but left unsent (so callers can
+    /// build up input or follow with a special key). Ignored for `key`.
+    #[serde(default)]
+    submit: Option<bool>,
 }
 
 /// Map a frontend key name to a tmux key token. Allowlisted — an unknown key
@@ -324,9 +329,22 @@ async fn input(Path(id): Path<i64>, Json(body): Json<InputBody>) -> StatusCode {
     } else {
         return StatusCode::BAD_REQUEST;
     };
-    let ok = tokio::task::spawn_blocking(move || crate::pty::tmux_send(id, literal, &payload))
-        .await
-        .unwrap_or(false);
+    // Only literal text can be auto-submitted; a bare key is already its own
+    // action. The Enter goes as a separate send-keys after a short pause so the
+    // TUI has finished ingesting the typed text before it's submitted (without
+    // the gap, a fast Enter can be swallowed or land as a newline).
+    let submit = literal && body.submit.unwrap_or(false);
+    let ok = tokio::task::spawn_blocking(move || {
+        let sent = crate::pty::tmux_send(id, literal, &payload);
+        if sent && submit {
+            std::thread::sleep(Duration::from_millis(120));
+            crate::pty::tmux_send(id, false, "Enter")
+        } else {
+            sent
+        }
+    })
+    .await
+    .unwrap_or(false);
     if ok {
         StatusCode::NO_CONTENT
     } else {

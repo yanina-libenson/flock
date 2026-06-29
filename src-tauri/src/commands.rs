@@ -545,10 +545,10 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool) -> String {
     };
     let tools = if has_mcp {
         "You have the Flock MCP tools:\n\
-         - task_create(repo, prompt): spawn an agent in a fresh worktree of `repo`. It appears in Flock's UI and is linked to you as a child (your fleet).\n\
+         - task_create(repo, prompt): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet).\n\
          - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input).\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
-         - task_input(id, text|key): send input to a child — answer a question, redirect it, or unblock it.\n\
+         - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
          - kb_search / kb_read / kb_ingest: your durable memory across sessions."
     } else {
         "The Flock MCP tools could not be auto-wired. Ask the user to enable Remote access in Flock settings and add the Flock MCP, then restart you."

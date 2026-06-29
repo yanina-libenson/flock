@@ -124,18 +124,26 @@ const TOOLS = [
   {
     name: "task_input",
     description:
-      "Send input to a worktree's agent: literal text, or a special key (enter, escape, tab, shift-tab, up, down, left, right, backspace, ctrl-c).",
+      "Send input to a worktree's agent. To send a MESSAGE the agent will act on, pass `text` with `submit: true` — that types it AND presses Enter. Plain `text` (no submit) only types into the composer and leaves it UNSENT, so the agent won't act until something presses Enter. You can also send a special key alone (enter, escape, tab, shift-tab, up, down, left, right, backspace, ctrl-c). NOTE: for an agent's INITIAL task, prefer task_create's `prompt` — it runs automatically as the first turn; use task_input for follow-ups and answering questions.",
     inputSchema: {
       type: "object",
       properties: {
         id: { type: "number", description: "Worktree id (from task_list)" },
         text: { type: "string", description: "Literal text to type" },
-        key: { type: "string", description: "A special key name" },
+        submit: {
+          type: "boolean",
+          description: "When sending text, also press Enter to submit it (default false). Use this to actually send a message.",
+        },
+        key: { type: "string", description: "A special key name (sent on its own)" },
       },
       required: ["id"],
     },
     handler: (a) =>
-      apiCall("POST", `/api/worktrees/${a.id}/input`, a.text != null ? { text: a.text } : { key: a.key }),
+      apiCall(
+        "POST",
+        `/api/worktrees/${a.id}/input`,
+        a.text != null ? { text: a.text, submit: a.submit === true } : { key: a.key },
+      ),
   },
   {
     name: "schedule_create",
