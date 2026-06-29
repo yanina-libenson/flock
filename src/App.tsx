@@ -9,7 +9,6 @@ import {
 } from "solid-js";
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
-import { TabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/TerminalPane";
 import { NewWorktreeModal } from "./components/NewWorktreeModal";
 import { NewOrchestratorModal } from "./components/NewOrchestratorModal";
@@ -55,6 +54,7 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   GitBranch,
+  Network,
   Settings as SettingsIcon,
   PanelLeftClose,
   PanelLeftOpen,
@@ -89,6 +89,13 @@ function App() {
     const w = worktreesById().get(id);
     if (!w) return null;
     return appStore.repos.find((r) => r.id === w.repo_id) ?? null;
+  });
+
+  // The worktree (or orchestrator) of the active pane — its full title is shown
+  // in the top bar, since we don't render per-tab chips anymore.
+  const activeWorktree = createMemo(() => {
+    const id = appStore.activePaneId;
+    return id == null ? null : (worktreesById().get(id) ?? null);
   });
 
   onMount(() => {
@@ -328,9 +335,33 @@ function App() {
             <PanelLeftClose size={15} />
           </Show>
         </button>
-        {/* Tabs, right after the toggle. */}
-        <div class="flex items-center gap-1 min-w-0 overflow-x-auto">
-          <TabBar worktreesById={worktreesById} />
+        {/* Active session title — full, since we no longer render per-tab
+            chips. Truncates only when the whole bar is full; hover shows the
+            complete title. Empty bar space stays draggable. */}
+        <div class="flex items-center gap-2 min-w-0 flex-1 self-stretch">
+          <Show when={activeWorktree()}>
+            {(w) => (
+              <div class="flex items-center gap-1.5 min-w-0">
+                {w().kind === "orchestrator" ? (
+                  <Network
+                    size={13}
+                    class="shrink-0 text-[var(--color-accent)]"
+                  />
+                ) : (
+                  <GitBranch
+                    size={13}
+                    class="shrink-0 text-[var(--color-fg-dim)]"
+                  />
+                )}
+                <span
+                  class="truncate text-[12.5px] font-medium text-[var(--color-fg)]"
+                  title={worktreeLabel(w())}
+                >
+                  {worktreeLabel(w())}
+                </span>
+              </div>
+            )}
+          </Show>
           <Show when={activeRepo()}>
             <button
               class="no-drag shrink-0 p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
@@ -341,8 +372,6 @@ function App() {
             </button>
           </Show>
         </div>
-        {/* Draggable gap, then the controls cluster on the right. */}
-        <div class="flex-1 self-stretch" />
         <WaitingIndicator />
         <button
           class="no-drag p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition shrink-0"
