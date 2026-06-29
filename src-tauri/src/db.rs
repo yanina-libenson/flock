@@ -337,6 +337,22 @@ impl Db {
         Ok(out)
     }
 
+    /// The fleet of an orchestrator: every worktree whose parent_id points at
+    /// it. Used to cascade a teardown when the orchestrator is removed.
+    pub fn list_children(&self, parent_id: i64) -> AppResult<Vec<Worktree>> {
+        let c = self.c()?;
+        let mut stmt = c.prepare(
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id
+             FROM worktrees WHERE parent_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![parent_id], Self::row_to_worktree)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     pub fn update_worktree_permission_mode(&self, id: i64, mode: &str) -> AppResult<()> {
         self.c()?.execute(
             "UPDATE worktrees SET permission_mode = ?1 WHERE id = ?2",
@@ -581,14 +597,19 @@ mod tests {
     use rusqlite::{params, Connection};
 
     fn temp_db() -> Db {
+        // A process-wide counter guarantees a distinct path per call: two tests
+        // on different threads can read the same nanosecond clock, and a shared
+        // path means the second `open_at` hits "database is locked".
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut p = std::env::temp_dir();
         let uniq = format!(
-            "flock-test-{}-{}.db",
+            "flock-test-{}-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         );
         p.push(uniq);
         Db::open_at(&p).expect("open temp db")
@@ -643,6 +664,35 @@ mod tests {
         let got = db.get_worktree(child.id).unwrap();
         assert_eq!(got.parent_id, None);
         assert!(db.get_worktree(orch.id).is_err());
+    }
+
+    #[test]
+    fn list_children_returns_only_the_fleet() {
+        let db = temp_db();
+        let repo = db.insert_repo("acme", "/tmp/acme3").unwrap();
+        let orch = db
+            .insert_worktree(repo.id, "cairo", "/tmp/orch3", None, "bypassPermissions", "orchestrator", None)
+            .unwrap();
+        let c1 = db
+            .insert_worktree(repo.id, "flock/a", "/tmp/c1", None, "bypassPermissions", "worktree", Some(orch.id))
+            .unwrap();
+        let c2 = db
+            .insert_worktree(repo.id, "flock/b", "/tmp/c2", None, "bypassPermissions", "worktree", Some(orch.id))
+            .unwrap();
+        // An unrelated standalone worktree must not show up in the fleet.
+        db.insert_worktree(repo.id, "flock/loose", "/tmp/loose", None, "bypassPermissions", "worktree", None)
+            .unwrap();
+
+        let fleet = db.list_children(orch.id).unwrap();
+        assert_eq!(fleet.len(), 2);
+        assert!(fleet.iter().any(|w| w.id == c1.id));
+        assert!(fleet.iter().any(|w| w.id == c2.id));
+
+        // A childless orchestrator has an empty fleet.
+        let lonely = db
+            .insert_worktree(repo.id, "tokyo", "/tmp/orch_lonely", None, "bypassPermissions", "orchestrator", None)
+            .unwrap();
+        assert!(db.list_children(lonely.id).unwrap().is_empty());
     }
 
     /// Linchpin: the bundled SQLite must ship FTS5, and our search shape

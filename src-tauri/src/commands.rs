@@ -267,6 +267,30 @@ pub fn worktrees_list(state: State<'_, AppState>, repo_id: i64) -> AppResult<Vec
     state.db.list_worktrees(repo_id)
 }
 
+/// Tear down a single worktree: kill its tmux session + PTY client, drop its
+/// resume-on-input lock, remove its git worktree (or scratch dir, for an
+/// orchestrator), and delete its DB row. `force` is passed to
+/// `git::remove_worktree` so callers can delete even dirty/unpushed trees.
+fn teardown_worktree(state: &State<'_, AppState>, w: &Worktree, force: bool) -> AppResult<()> {
+    // Tear down the tmux session and the PTY client before removing the
+    // worktree directory, otherwise tmux's pane cwd points at a vanishing dir
+    // and the server logs get noisy.
+    state.pty.kill(w.id).ok();
+    pty::tmux_kill_session(w.id);
+    // Drop the worktree's resume-on-input lock — it's gone for good now.
+    state.input_locks.lock().unwrap().remove(&w.id);
+    if w.kind == "orchestrator" {
+        // An orchestrator isn't a git worktree — it's a plain scratch dir. Just
+        // remove the directory.
+        let _ = std::fs::remove_dir_all(Path::new(&w.path));
+    } else {
+        let repo = state.db.get_repo(w.repo_id)?;
+        let _ = git::remove_worktree(Path::new(&repo.path), Path::new(&w.path), force);
+    }
+    state.db.delete_worktree(w.id)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn worktree_remove(
     state: State<'_, AppState>,
@@ -274,24 +298,18 @@ pub fn worktree_remove(
     force: bool,
 ) -> AppResult<()> {
     let w = state.db.get_worktree(id)?;
-    // Tear down the tmux session and the PTY client before removing the
-    // worktree directory, otherwise tmux's pane cwd points at a vanishing dir
-    // and the server logs get noisy.
-    state.pty.kill(id).ok();
-    pty::tmux_kill_session(id);
-    // Drop the worktree's resume-on-input lock — it's gone for good now.
-    state.input_locks.lock().unwrap().remove(&id);
+    // Removing an orchestrator cascades to its fleet: every child worktree gets
+    // the full teardown first. We force-remove children (deleting even
+    // uncommitted/unpushed work) per the product decision — the sidebar warns
+    // about this before confirming. The DB's ON DELETE SET NULL stays as a
+    // safety net, but this explicit loop is what actually cleans up the child
+    // git worktrees and tmux sessions, which a SQL cascade alone can't do.
     if w.kind == "orchestrator" {
-        // An orchestrator isn't a git worktree — it's a plain scratch dir. Just
-        // remove the directory. Its fleet survives: the DB's ON DELETE SET NULL
-        // orphans children rather than cascading the delete to them.
-        let _ = std::fs::remove_dir_all(Path::new(&w.path));
-    } else {
-        let repo = state.db.get_repo(w.repo_id)?;
-        let _ = git::remove_worktree(Path::new(&repo.path), Path::new(&w.path), force);
+        for child in state.db.list_children(id)? {
+            teardown_worktree(&state, &child, true)?;
+        }
     }
-    state.db.delete_worktree(id)?;
-    Ok(())
+    teardown_worktree(&state, &w, force)
 }
 
 #[tauri::command]

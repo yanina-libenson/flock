@@ -159,12 +159,16 @@ export function Sidebar(props: {
 
   async function onRemoveWorktree(w: Worktree) {
     if (w.kind === "orchestrator") {
-      if (
-        !confirm(
-          `Remove orchestrator "${worktreeLabel(w)}"?\n\nIts session ends, but the agents it spawned keep running — they just lose their link to it.`,
-        )
-      )
-        return;
+      const childCount = fleetOf(w.id).length;
+      const msg =
+        childCount > 0
+          ? `Remove orchestrator "${worktreeLabel(w)}" and its ${childCount} ` +
+            `worktree${childCount === 1 ? "" : "s"}?\n\n` +
+            `This removes all ${childCount} worktree${childCount === 1 ? "" : "s"} in its fleet, ` +
+            `including any with uncommitted or unpushed changes — that work will be lost. ` +
+            `This can't be undone.`
+          : `Remove orchestrator "${worktreeLabel(w)}"?\n\nIts session ends, but the agents it spawned keep running — they just lose their link to it.`;
+      if (!confirm(msg)) return;
       await worktreeRemove(w.id, false);
       closePane(w.id);
       await refresh();
