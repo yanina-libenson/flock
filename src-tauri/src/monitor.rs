@@ -114,6 +114,21 @@ pub fn spawn(app: AppHandle) {
         // Last time the aggregate-memory budget was checked (own slow cadence).
         let mut last_rss_check = Instant::now();
 
+        // Cold-start baseline: prime each live session's last screen so the
+        // first status tick diffs against a real previous frame, not an empty
+        // one. Without this, every quiet session's first read is "changed →
+        // working" (nothing to diff), then settles to idle a tick later — a
+        // phantom working→idle that would wake the parent for a turn that
+        // finished before launch (the #28 cold-start noise). Wakes are *also*
+        // gated on `bootstrapped` below (flipped after the first full tick) as a
+        // belt-and-braces guard, so only genuine post-launch edges ever wake.
+        for id in pty::tmux_list_sessions() {
+            if let Some(screen) = pty::tmux_capture_pane(id) {
+                prev.insert(id, screen);
+            }
+        }
+        let mut bootstrapped = false;
+
         loop {
             std::thread::sleep(POLL_INTERVAL);
 
@@ -182,6 +197,7 @@ pub fn spawn(app: AppHandle) {
                             let parent_status =
                                 child.parent_id.and_then(|p| last_status.get(&p).copied());
                             if let Some((parent_id, reason)) = wake_decision(
+                                bootstrapped,
                                 prev,
                                 status,
                                 child.parent_id,
@@ -219,6 +235,11 @@ pub fn spawn(app: AppHandle) {
                 }
                 prev.insert(id, captured);
             }
+
+            // The baseline is now established (this first tick seeded last_status
+            // from screens primed before the loop). From here on, status edges
+            // are genuine and may wake parents.
+            bootstrapped = true;
 
             // Aggregate-memory backstop, on its own slow cadence: reap the
             // heaviest non-focused sessions when total RSS blows the budget.
@@ -435,13 +456,23 @@ enum WakeReason {
 /// child has no parent, the edge doesn't qualify, or the parent shouldn't be
 /// disturbed — so the caller never wakes the parent off the parent's own edge,
 /// which is what keeps this loop-free.
+///
+/// `bootstrapped` gates the whole thing: until the monitor has established its
+/// baseline (first tick done), no edge wakes anyone — the statuses seen at
+/// launch predate us (a child left idle/needs_input from a prior run, or the
+/// `None → working → idle` settle when a quiet pane is first read), so waking on
+/// them would fire for turns that finished before launch.
 fn wake_decision(
+    bootstrapped: bool,
     prev_child: Option<WorktreeStatus>,
     child: WorktreeStatus,
     parent_id: Option<i64>,
     parent_alive: bool,
     parent_status: Option<WorktreeStatus>,
 ) -> Option<(i64, WakeReason)> {
+    if !bootstrapped {
+        return None;
+    }
     let parent_id = parent_id?;
     // Parent must be reachable-and-idle, or dead (we resume it). Leave a working
     // or needs_input parent alone.
@@ -757,13 +788,13 @@ mod tests {
         use WorktreeStatus::*;
         // working → needs_input with an idle parent → one wake.
         assert_eq!(
-            wake_decision(Some(Working), NeedsInput, Some(5), true, Some(Idle)),
+            wake_decision(true, Some(Working), NeedsInput, Some(5), true, Some(Idle)),
             Some((5, WakeReason::NeedsInput))
         );
         // Next tick is stable at needs_input (prev == needs_input) → no wake,
         // so a single edge produces exactly one wake.
         assert_eq!(
-            wake_decision(Some(NeedsInput), NeedsInput, Some(5), true, Some(Idle)),
+            wake_decision(true, Some(NeedsInput), NeedsInput, Some(5), true, Some(Idle)),
             None
         );
     }
@@ -772,21 +803,27 @@ mod tests {
     fn working_to_idle_edge_wakes_parent() {
         use WorktreeStatus::*;
         assert_eq!(
-            wake_decision(Some(Working), Idle, Some(5), true, Some(Idle)),
+            wake_decision(true, Some(Working), Idle, Some(5), true, Some(Idle)),
             Some((5, WakeReason::FinishedTurn))
         );
         // idle → idle is not an edge (and the monitor wouldn't call it); even if
         // called, a stable idle child must not wake.
-        assert_eq!(wake_decision(Some(Idle), Idle, Some(5), true, Some(Idle)), None);
+        assert_eq!(
+            wake_decision(true, Some(Idle), Idle, Some(5), true, Some(Idle)),
+            None
+        );
         // None → idle (first sighting parked at idle) is not a finished turn.
-        assert_eq!(wake_decision(None, Idle, Some(5), true, Some(Idle)), None);
+        assert_eq!(wake_decision(true, None, Idle, Some(5), true, Some(Idle)), None);
     }
 
     #[test]
     fn child_without_parent_never_wakes() {
         use WorktreeStatus::*;
-        assert_eq!(wake_decision(Some(Working), NeedsInput, None, false, None), None);
-        assert_eq!(wake_decision(Some(Working), Idle, None, false, None), None);
+        assert_eq!(
+            wake_decision(true, Some(Working), NeedsInput, None, false, None),
+            None
+        );
+        assert_eq!(wake_decision(true, Some(Working), Idle, None, false, None), None);
     }
 
     #[test]
@@ -794,16 +831,16 @@ mod tests {
         use WorktreeStatus::*;
         // Parent mid-turn → left alone (it'll see the child when it finishes).
         assert_eq!(
-            wake_decision(Some(Working), NeedsInput, Some(5), true, Some(Working)),
+            wake_decision(true, Some(Working), NeedsInput, Some(5), true, Some(Working)),
             None
         );
         assert_eq!(
-            wake_decision(Some(Working), Idle, Some(5), true, Some(Working)),
+            wake_decision(true, Some(Working), Idle, Some(5), true, Some(Working)),
             None
         );
         // A needs_input parent (itself waiting on the user) is also left alone.
         assert_eq!(
-            wake_decision(Some(Working), NeedsInput, Some(5), true, Some(NeedsInput)),
+            wake_decision(true, Some(Working), NeedsInput, Some(5), true, Some(NeedsInput)),
             None
         );
     }
@@ -814,8 +851,46 @@ mod tests {
         // Parent not in the live set (hibernated/reaped) → wake so deliver_input
         // resumes it. No tracked status for a dead parent.
         assert_eq!(
-            wake_decision(Some(Working), NeedsInput, Some(5), false, None),
+            wake_decision(true, Some(Working), NeedsInput, Some(5), false, None),
             Some((5, WakeReason::NeedsInput))
+        );
+    }
+
+    #[test]
+    fn cold_start_first_tick_never_wakes() {
+        use WorktreeStatus::*;
+        // During bootstrap (bootstrapped = false), no transition observed at
+        // launch wakes the parent — including the None → working → idle settle
+        // a quiet pane shows on first read, and a child found already parked in
+        // needs_input from a prior run. Parent idle and "wakeable" in every case
+        // to prove it's the bootstrap gate doing the suppressing, not the
+        // parent-state guard.
+        assert_eq!(
+            wake_decision(false, None, Working, Some(5), true, Some(Idle)),
+            None
+        );
+        assert_eq!(
+            wake_decision(false, Some(Working), Idle, Some(5), true, Some(Idle)),
+            None
+        );
+        assert_eq!(
+            wake_decision(false, None, NeedsInput, Some(5), true, Some(Idle)),
+            None
+        );
+        assert_eq!(
+            wake_decision(false, Some(Working), NeedsInput, Some(5), false, None),
+            None
+        );
+    }
+
+    #[test]
+    fn genuine_transition_after_bootstrap_wakes() {
+        use WorktreeStatus::*;
+        // The same working → idle edge that was suppressed at launch DOES wake
+        // once the baseline is established.
+        assert_eq!(
+            wake_decision(true, Some(Working), Idle, Some(5), true, Some(Idle)),
+            Some((5, WakeReason::FinishedTurn))
         );
     }
 
