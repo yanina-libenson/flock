@@ -105,6 +105,32 @@ export function toggleSidebar() {
   });
 }
 
+/// Which list leads the sidebar: orchestrators (default) or repos. Both lists
+/// are always shown — this controls which one is on top (the primary). Lets you
+/// flip between an orchestrator-first and a repo-first layout. Persisted.
+export type SidebarMode = "orchestrators" | "repos";
+const SIDEBAR_MODE_KEY = "flock.sidebar.mode.v1";
+const [sidebarMode, setSidebarModeSig] = createSignal<SidebarMode>(
+  (() => {
+    try {
+      return localStorage.getItem(SIDEBAR_MODE_KEY) === "repos"
+        ? "repos"
+        : "orchestrators";
+    } catch {
+      return "orchestrators";
+    }
+  })(),
+);
+export { sidebarMode };
+export function setSidebarMode(mode: SidebarMode) {
+  setSidebarModeSig(mode);
+  try {
+    localStorage.setItem(SIDEBAR_MODE_KEY, mode);
+  } catch {
+    /* ignore quota errors */
+  }
+}
+
 /// Add a pane to the activated set (mount it / attach claude) if not already in.
 function withActivated(ids: number[], worktreeId: number): number[] {
   return ids.includes(worktreeId) ? ids : [...ids, worktreeId];

@@ -24,15 +24,18 @@ import {
   prunePanes,
   applyWorktreeTitle,
   setWorktreePrStatus,
+  sidebarMode,
+  setSidebarMode,
 } from "../lib/store";
 import {
   FolderGit2,
   Plus,
   X,
-  FolderPlus,
   FolderOpen,
   Pencil,
   Network,
+  ChevronRight,
+  ChevronDown,
 } from "lucide-solid";
 
 export function Sidebar(props: {
@@ -416,153 +419,241 @@ export function Sidebar(props: {
     );
   };
 
-  return (
-    <aside class="w-64 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-elevated)]/40 flex flex-col overflow-hidden">
-      <div class="flex-1 overflow-y-auto py-1">
-        {/* Orchestrators — repo-less Claudes that direct a fleet of agents. */}
-        <div class="flex items-center justify-between px-3 py-2">
-          <span class="text-[10px] font-semibold tracking-[0.14em] uppercase text-[var(--color-fg-dim)]">
-            Orchestrators
-          </span>
+  /// Section header: an uppercase label + an action button. The secondary
+  /// section (not primary) gets a top divider so the two stacks read distinctly.
+  const SectionHeader = (hp: {
+    label: string;
+    primary: boolean;
+    actionTitle: string;
+    onAction: () => void;
+    accentHover?: boolean;
+  }) => (
+    <div
+      class="flex items-center justify-between px-3 py-2"
+      classList={{ "mt-1 border-t border-[var(--color-border)]": !hp.primary }}
+    >
+      <span class="text-[10px] font-semibold tracking-[0.14em] uppercase text-[var(--color-fg-dim)]">
+        {hp.label}
+      </span>
+      <button
+        class="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-muted)] transition"
+        classList={{
+          "hover:text-[var(--color-accent)]": hp.accentHover,
+          "hover:text-[var(--color-fg)]": !hp.accentHover,
+        }}
+        title={hp.actionTitle}
+        onClick={(e) => {
+          e.stopPropagation();
+          hp.onAction();
+        }}
+      >
+        <Plus size={14} />
+      </button>
+    </div>
+  );
+
+  const OrchestratorsSection = (sp: { primary: boolean }) => (
+    <>
+      <SectionHeader
+        label="Orchestrators"
+        primary={sp.primary}
+        actionTitle="New orchestrator"
+        onAction={() => props.onCreateOrchestrator()}
+        accentHover
+      />
+      <Show
+        when={appStore.orchestrators.length > 0}
+        fallback={
           <button
-            class="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] transition"
-            title="New orchestrator"
+            class="mx-2 mb-1 w-[calc(100%-1rem)] flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-[11.5px] text-[var(--color-fg-dim)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-fg-muted)] transition"
             onClick={() => props.onCreateOrchestrator()}
           >
-            <Plus size={14} />
+            <Network size={13} class="shrink-0 opacity-60" />
+            <span>Spin up a Claude that orchestrates many repos.</span>
           </button>
-        </div>
-        <Show
-          when={appStore.orchestrators.length > 0}
-          fallback={
-            <button
-              class="mx-2 mb-1 w-[calc(100%-1rem)] flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-[11.5px] text-[var(--color-fg-dim)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-fg-muted)] transition"
-              onClick={() => props.onCreateOrchestrator()}
-            >
-              <Network size={13} class="shrink-0 opacity-60" />
-              <span>Spin up a Claude that orchestrates many repos.</span>
-            </button>
-          }
-        >
-          <For each={appStore.orchestrators}>
-            {(o) => {
-              const fleet = () => fleetOf(o.id);
-              return (
-                <div class="mb-1">
-                  <div class="flex items-stretch">
-                    <button
-                      class="pl-2 pr-0.5 flex items-center text-[var(--color-accent)] hover:text-[var(--color-fg)] transition"
-                      title={isOrchExpanded(o.id) ? "Collapse fleet" : "Expand fleet"}
-                      onClick={() => toggleOrch(o.id)}
-                    >
-                      <Network size={13} class="shrink-0" />
-                    </button>
-                    <div class="flex-1 min-w-0">
-                      <WorktreeRow
-                        w={o}
-                        subtitle={`${fleet().length} agent${fleet().length === 1 ? "" : "s"}`}
-                      />
-                    </div>
-                  </div>
-                  <Show when={isOrchExpanded(o.id)}>
-                    <div class="ml-4 border-l border-[var(--color-border)] pl-1">
-                      <For
-                        each={fleet()}
-                        fallback={
-                          <div class="px-3 py-1.5 text-[11px] text-[var(--color-fg-dim)]">
-                            no agents yet
-                          </div>
-                        }
-                      >
-                        {(c) => (
-                          <WorktreeRow
-                            w={c}
-                            subtitle={`${repoName(c.repo_id)} · ${c.branch}`}
-                          />
-                        )}
-                      </For>
-                    </div>
-                  </Show>
-                </div>
-              );
-            }}
-          </For>
-        </Show>
-
-        {/* Repositories */}
-        <div class="flex items-center justify-between px-3 py-2 mt-1 border-t border-[var(--color-border)]">
-          <span class="text-[10px] font-semibold tracking-[0.14em] uppercase text-[var(--color-fg-dim)]">
-            Repositories
-          </span>
-          <button
-            class="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] transition"
-            title="Add repository"
-            onClick={onAddRepo}
-          >
-            <FolderPlus size={14} />
-          </button>
-        </div>
-        <Show
-          when={appStore.repos.length > 0}
-          fallback={
-            <div class="px-4 py-8 text-center text-[var(--color-fg-dim)] text-[12px]">
-              <FolderGit2 size={24} class="mx-auto mb-3 opacity-40" />
-              <div>No repositories yet.</div>
-              <button
-                class="mt-3 px-3 py-1.5 text-[11px] font-medium rounded-md bg-[var(--color-accent)]/20 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/30 transition"
-                onClick={onAddRepo}
-              >
-                Add repository
-              </button>
-            </div>
-          }
-        >
-          <For each={appStore.repos}>
-            {(r) => (
+        }
+      >
+        <For each={appStore.orchestrators}>
+          {(o) => {
+            const fleet = () => fleetOf(o.id);
+            return (
               <div class="mb-1">
-                <div class="group flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md hover:bg-[var(--color-bg-hover)]">
+                <div class="flex items-stretch">
                   <button
-                    class="flex-1 flex items-center gap-2 text-left text-[13px] font-medium text-[var(--color-fg)]"
-                    onClick={() => toggleExpand(r.id)}
+                    class="pl-2 pr-0.5 flex items-center text-[var(--color-accent)] hover:text-[var(--color-fg)] transition"
+                    title={isOrchExpanded(o.id) ? "Collapse fleet" : "Expand fleet"}
+                    onClick={() => toggleOrch(o.id)}
                   >
-                    <FolderGit2
-                      size={14}
-                      class="text-[var(--color-accent)] shrink-0"
+                    <Show
+                      when={isOrchExpanded(o.id)}
+                      fallback={<ChevronRight size={13} class="shrink-0" />}
+                    >
+                      <ChevronDown size={13} class="shrink-0" />
+                    </Show>
+                  </button>
+                  <div class="flex-1 min-w-0">
+                    <WorktreeRow
+                      w={o}
+                      subtitle={`${fleet().length} agent${fleet().length === 1 ? "" : "s"}`}
                     />
-                    <span class="truncate">{r.name}</span>
-                  </button>
-                  <button
-                    class="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
-                    title="Remove from Flock"
-                    onClick={() => onRemoveRepo(r)}
-                  >
-                    <X size={12} />
-                  </button>
-                  <button
-                    class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] transition"
-                    title="New worktree"
-                    onClick={() => props.onCreateWorktree(r)}
-                  >
-                    <Plus size={13} />
-                  </button>
+                  </div>
                 </div>
-                <Show when={expanded()[r.id]}>
-                  <div class="ml-1.5 border-l border-[var(--color-border)] pl-1">
+                <Show when={isOrchExpanded(o.id)}>
+                  <div class="ml-4 border-l border-[var(--color-border)] pl-1">
                     <For
-                      each={appStore.worktreesByRepo[r.id] ?? []}
+                      each={fleet()}
                       fallback={
                         <div class="px-3 py-1.5 text-[11px] text-[var(--color-fg-dim)]">
-                          no worktrees
+                          no agents yet
                         </div>
                       }
                     >
-                      {(w) => <WorktreeRow w={w} />}
+                      {(c) => (
+                        <WorktreeRow
+                          w={c}
+                          subtitle={`${repoName(c.repo_id)} · ${c.branch}`}
+                        />
+                      )}
                     </For>
                   </div>
                 </Show>
               </div>
-            )}
-          </For>
+            );
+          }}
+        </For>
+      </Show>
+    </>
+  );
+
+  const ReposSection = (sp: { primary: boolean }) => (
+    <>
+      <SectionHeader
+        label="Repositories"
+        primary={sp.primary}
+        actionTitle="Add repository"
+        onAction={onAddRepo}
+      />
+      <Show
+        when={appStore.repos.length > 0}
+        fallback={
+          <div class="px-4 py-8 text-center text-[var(--color-fg-dim)] text-[12px]">
+            <FolderGit2 size={24} class="mx-auto mb-3 opacity-40" />
+            <div>No repositories yet.</div>
+            <button
+              class="mt-3 px-3 py-1.5 text-[11px] font-medium rounded-md bg-[var(--color-accent)]/20 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/30 transition"
+              onClick={onAddRepo}
+            >
+              Add repository
+            </button>
+          </div>
+        }
+      >
+        <For each={appStore.repos}>
+          {(r) => (
+            <div class="mb-1">
+              <div class="group flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md hover:bg-[var(--color-bg-hover)]">
+                <button
+                  class="flex-1 flex items-center gap-1.5 text-left text-[13px] font-medium text-[var(--color-fg)] min-w-0"
+                  onClick={() => toggleExpand(r.id)}
+                >
+                  <Show
+                    when={expanded()[r.id]}
+                    fallback={
+                      <ChevronRight
+                        size={13}
+                        class="shrink-0 text-[var(--color-fg-dim)]"
+                      />
+                    }
+                  >
+                    <ChevronDown
+                      size={13}
+                      class="shrink-0 text-[var(--color-fg-dim)]"
+                    />
+                  </Show>
+                  <FolderGit2
+                    size={14}
+                    class="text-[var(--color-accent)] shrink-0"
+                  />
+                  <span class="truncate">{r.name}</span>
+                </button>
+                <button
+                  class="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
+                  title="Remove from Flock"
+                  onClick={() => onRemoveRepo(r)}
+                >
+                  <X size={12} />
+                </button>
+                <button
+                  class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] transition"
+                  title="New worktree"
+                  onClick={() => props.onCreateWorktree(r)}
+                >
+                  <Plus size={13} />
+                </button>
+              </div>
+              <Show when={expanded()[r.id]}>
+                <div class="ml-1.5 border-l border-[var(--color-border)] pl-1">
+                  <For
+                    each={appStore.worktreesByRepo[r.id] ?? []}
+                    fallback={
+                      <div class="px-3 py-1.5 text-[11px] text-[var(--color-fg-dim)]">
+                        no worktrees
+                      </div>
+                    }
+                  >
+                    {(w) => <WorktreeRow w={w} />}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          )}
+        </For>
+      </Show>
+    </>
+  );
+
+  /// One segment of the view toggle.
+  const ModeButton = (mp: {
+    mode: "orchestrators" | "repos";
+    label: string;
+    icon: typeof Network;
+  }) => (
+    <button
+      class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium transition"
+      classList={{
+        "bg-[var(--color-bg)] text-[var(--color-fg)] border border-[var(--color-border-strong)]":
+          sidebarMode() === mp.mode,
+        "text-[var(--color-fg-muted)] hover:bg-[var(--color-bg-hover)] border border-transparent":
+          sidebarMode() !== mp.mode,
+      }}
+      title={`Lead the sidebar with ${mp.label.toLowerCase()}`}
+      onClick={() => setSidebarMode(mp.mode)}
+    >
+      <mp.icon size={12} class="shrink-0" />
+      {mp.label}
+    </button>
+  );
+
+  return (
+    <aside class="w-64 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-elevated)]/40 flex flex-col overflow-hidden">
+      {/* View toggle: which list leads — orchestrators or repos. */}
+      <div class="flex gap-1 p-1.5 border-b border-[var(--color-border)]">
+        <ModeButton mode="orchestrators" label="Orchestrators" icon={Network} />
+        <ModeButton mode="repos" label="Repos" icon={FolderGit2} />
+      </div>
+
+      <div class="flex-1 overflow-y-auto py-1">
+        <Show
+          when={sidebarMode() === "orchestrators"}
+          fallback={
+            <>
+              <ReposSection primary={true} />
+              <OrchestratorsSection primary={false} />
+            </>
+          }
+        >
+          <OrchestratorsSection primary={true} />
+          <ReposSection primary={false} />
         </Show>
       </div>
     </aside>
