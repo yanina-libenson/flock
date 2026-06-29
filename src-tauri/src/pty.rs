@@ -170,6 +170,25 @@ impl PtyManager {
         // task prompt, bake in `--resume <id>` so the reopened pane continues
         // where it left off. When the session is still live this is moot (the
         // claude arg is ignored on attach).
+        // Env-profile vars (e.g. the per-folder `GH_CONFIG_DIR` that selects the
+        // right `gh`/GitHub account) are baked into a tmux session only at
+        // creation — `new-session -A` ignores `-e` when it attaches to an
+        // existing session. So a session created before its profile was set up,
+        // or before the profile changed, stays frozen with the stale/missing
+        // value: most visibly, the wrong GitHub account. Detect that drift and
+        // kill the session here so it's recreated below with the current env.
+        // Claude resumes from its own transcript (the resume logic just after),
+        // so the conversation isn't lost.
+        if tmux_list_sessions().contains(&worktree_id)
+            && session_env_drifted(worktree_id, env_vars)
+        {
+            eprintln!(
+                "flock: env drift on {} — recreating session to apply the current profile",
+                tmux_session_name(worktree_id)
+            );
+            tmux_kill_session(worktree_id);
+        }
+
         let resume_id = if initial_prompt.is_none() && !tmux_list_sessions().contains(&worktree_id) {
             latest_session_id(cwd)
         } else {
@@ -447,6 +466,39 @@ pub fn tmux_kill_session(worktree_id: i64) {
     let _ = std::process::Command::new(shell)
         .args(["-i", "-l", "-c", &cmd])
         .output();
+}
+
+/// True when a live tmux session for this worktree exists but its environment
+/// no longer matches the env-profile vars we'd inject now (e.g. a per-folder
+/// `GH_CONFIG_DIR` added or changed after the session was first created).
+/// `new-session -A` bakes `-e` vars in only at creation, so without recreating
+/// the session the stale value sticks. Empty `env_vars` → nothing to compare.
+fn session_env_drifted(worktree_id: i64, env_vars: &[(String, String)]) -> bool {
+    if env_vars.is_empty() {
+        return false;
+    }
+    let Some(bin) = tmux_bin() else {
+        return false;
+    };
+    let name = tmux_session_name(worktree_id);
+    env_vars.iter().any(|(k, v)| {
+        let out = std::process::Command::new(bin)
+            .args(["-L", TMUX_SOCKET, "show-environment", "-t", &name, k])
+            .output();
+        match out {
+            // tmux prints `KEY=value` (set) or `-KEY` (explicitly unset); a var
+            // the session never received exits non-zero. Any non-match is drift.
+            Ok(o) if o.status.success() => {
+                !tmux_env_line_matches(k, v, &String::from_utf8_lossy(&o.stdout))
+            }
+            _ => true,
+        }
+    })
+}
+
+/// Whether tmux's `show-environment KEY` output sets `key` to exactly `value`.
+fn tmux_env_line_matches(key: &str, value: &str, output: &str) -> bool {
+    output.trim() == format!("{key}={value}")
 }
 
 /// Absolute path to the `tmux` binary, resolved once via the login shell
@@ -748,5 +800,18 @@ mod tests {
             inner,
             "claude --permission-mode 'bypassPermissions'; exec '/bin/zsh' -i -l"
         );
+    }
+
+    #[test]
+    fn tmux_env_line_match_detects_drift() {
+        use super::tmux_env_line_matches;
+        let k = "GH_CONFIG_DIR";
+        let v = "/Users/y/.config/gh-personal";
+        // Exact match (tmux may add a trailing newline).
+        assert!(tmux_env_line_matches(k, v, "GH_CONFIG_DIR=/Users/y/.config/gh-personal\n"));
+        // Wrong value → drift.
+        assert!(!tmux_env_line_matches(k, v, "GH_CONFIG_DIR=/Users/y/.config/gh-thanx"));
+        // Explicitly-unset form tmux prints with a leading dash → drift.
+        assert!(!tmux_env_line_matches(k, v, "-GH_CONFIG_DIR"));
     }
 }
