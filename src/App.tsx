@@ -58,7 +58,6 @@ import {
   Settings as SettingsIcon,
   PanelLeftClose,
   PanelLeftOpen,
-  Plus,
 } from "lucide-solid";
 
 function App() {
@@ -80,15 +79,6 @@ function App() {
     // Orchestrators are pane-openable too (tabs, labels, drag-drop target).
     for (const o of appStore.orchestrators) m.set(o.id, o);
     return m;
-  });
-
-  // Repo of the active tab — what the "+" (new tab) button creates against.
-  const activeRepo = createMemo(() => {
-    const id = appStore.activePaneId;
-    if (id == null) return null;
-    const w = worktreesById().get(id);
-    if (!w) return null;
-    return appStore.repos.find((r) => r.id === w.repo_id) ?? null;
   });
 
   // The worktree (or orchestrator) of the active pane — its full title is shown
@@ -335,41 +325,45 @@ function App() {
             <PanelLeftClose size={15} />
           </Show>
         </button>
-        {/* Active session title — full, since we no longer render per-tab
-            chips. Truncates only when the whole bar is full; hover shows the
-            complete title. Empty bar space stays draggable. */}
-        <div class="flex items-center gap-2 min-w-0 flex-1 self-stretch">
+        {/* Active session — full title, since there are no per-tab chips.
+            A live status dot (working / needs-you), the type icon, then the
+            title. Truncates only when the bar fills; hover shows the full
+            title. Empty bar space stays draggable. */}
+        <div class="flex items-center gap-2.5 min-w-0 flex-1 self-stretch pl-1">
           <Show when={activeWorktree()}>
-            {(w) => (
-              <div class="flex items-center gap-1.5 min-w-0">
-                {w().kind === "orchestrator" ? (
-                  <Network
-                    size={13}
-                    class="shrink-0 text-[var(--color-accent)]"
-                  />
-                ) : (
-                  <GitBranch
-                    size={13}
-                    class="shrink-0 text-[var(--color-fg-dim)]"
-                  />
-                )}
-                <span
-                  class="truncate text-[12.5px] font-medium text-[var(--color-fg)]"
-                  title={worktreeLabel(w())}
-                >
-                  {worktreeLabel(w())}
-                </span>
-              </div>
-            )}
-          </Show>
-          <Show when={activeRepo()}>
-            <button
-              class="no-drag shrink-0 p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
-              title={`New worktree in ${activeRepo()!.name}`}
-              onClick={() => setModalRepo(activeRepo())}
-            >
-              <Plus size={15} />
-            </button>
+            {(w) => {
+              const st = () => appStore.statusByWorktree[w().id];
+              return (
+                <div class="flex items-center gap-2 min-w-0">
+                  <Show when={st() === "working" || st() === "needs_input"}>
+                    <span
+                      class="shrink-0 w-1.5 h-1.5 rounded-full animate-pulse"
+                      classList={{
+                        "bg-[var(--color-accent)]": st() === "working",
+                        "bg-[var(--color-warn)]": st() === "needs_input",
+                      }}
+                    />
+                  </Show>
+                  {w().kind === "orchestrator" ? (
+                    <Network
+                      size={14}
+                      class="shrink-0 text-[var(--color-accent)]"
+                    />
+                  ) : (
+                    <GitBranch
+                      size={14}
+                      class="shrink-0 text-[var(--color-fg-dim)]"
+                    />
+                  )}
+                  <span
+                    class="truncate text-[13px] font-medium tracking-tight text-[var(--color-fg)]"
+                    title={worktreeLabel(w())}
+                  >
+                    {worktreeLabel(w())}
+                  </span>
+                </div>
+              );
+            }}
           </Show>
         </div>
         <WaitingIndicator />

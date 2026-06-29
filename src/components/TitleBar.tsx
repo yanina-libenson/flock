@@ -7,7 +7,7 @@ import type { JSX } from "solid-js";
 export function TitleBar(props: { padLeft: number; children?: JSX.Element }) {
   return (
     <div
-      class="drag-region flex items-center gap-1.5 h-10 shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)]/70 backdrop-blur-lg"
+      class="drag-region flex items-center gap-1.5 h-10 shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)]"
       style={{ "padding-left": `${props.padLeft}px`, "padding-right": "8px" }}
     >
       {props.children}

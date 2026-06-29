@@ -7,20 +7,22 @@
 }
 
 :root {
-  /* Modern dark palette (OKLCH) */
-  --color-bg: oklch(0.18 0.012 270);
-  --color-bg-elevated: oklch(0.22 0.014 270);
-  --color-bg-hover: oklch(0.26 0.016 270);
-  --color-border: oklch(0.30 0.018 270);
-  --color-border-strong: oklch(0.38 0.022 270);
-  --color-fg: oklch(0.96 0.005 270);
-  --color-fg-muted: oklch(0.70 0.012 270);
-  --color-fg-dim: oklch(0.52 0.012 270);
+  /* Neutral dark palette (OKLCH) — iTerm-style near-black chrome, zero hue tint
+     on the backgrounds/text so only the semantic colors below carry any color. */
+  --color-bg: oklch(0.13 0 0);
+  --color-bg-elevated: oklch(0.17 0 0);
+  --color-bg-hover: oklch(0.24 0 0);
+  --color-border: oklch(0.26 0 0);
+  --color-border-strong: oklch(0.36 0 0);
+  --color-fg: oklch(0.95 0 0);
+  --color-fg-muted: oklch(0.68 0 0);
+  --color-fg-dim: oklch(0.48 0 0);
 
-  --color-accent: oklch(0.72 0.18 240);
-  --color-accent-muted: oklch(0.56 0.14 240);
+  /* The only colors in the chrome — used for selection + status, nothing else. */
+  --color-accent: oklch(0.72 0.17 240);
+  --color-accent-muted: oklch(0.56 0.13 240);
   --color-success: oklch(0.72 0.17 150);
-  --color-warn: oklch(0.78 0.16 80);
+  --color-warn: oklch(0.80 0.15 80);
   --color-danger: oklch(0.68 0.20 25);
 }
 

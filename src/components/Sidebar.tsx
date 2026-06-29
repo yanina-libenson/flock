@@ -1,4 +1,4 @@
-import { For, Show, createSignal, onMount } from "solid-js";
+import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -304,42 +304,69 @@ export function Sidebar(props: {
     return out;
   };
 
-  /// One worktree row — used both under a repo and inside an orchestrator's
-  /// fleet. `subtitle`, when given, replaces the default branch caption (the
-  /// fleet uses it to show "repo · branch").
-  const WorktreeRow = (rowProps: { w: Worktree; subtitle?: string }) => {
+  // Shared row geometry so group rows (repo / orchestrator) and leaf rows
+  // (worktree / agent) line up exactly. `mx-1.5` margin + the children wrapper's
+  // `ml-[18px]` guide line give one consistent indent step at every level.
+  const ROW =
+    "group/row relative flex items-center gap-2 mx-1.5 px-2 py-[5px] rounded-md cursor-pointer transition-colors";
+  const CHILDREN_WRAP =
+    "ml-[18px] mt-0.5 mb-1 pl-0 border-l border-[var(--color-border)]";
+
+  /// A small count chip (worktrees in a repo, agents in a fleet).
+  const CountChip = (p: { n: number }) => (
+    <span class="shrink-0 min-w-[1.25rem] text-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold tabular-nums text-[var(--color-fg-dim)] bg-[var(--color-fg)]/10">
+      {p.n}
+    </span>
+  );
+
+  /// One worktree row — a leaf (worktree / fleet agent) or, with `leading`+`icon`,
+  /// an orchestrator group row. `subtitle` overrides the default branch caption
+  /// (the fleet passes "repo · branch").
+  const WorktreeRow = (rowProps: {
+    w: Worktree;
+    subtitle?: string;
+    leading?: JSX.Element;
+    icon?: typeof Network;
+    badge?: number;
+  }) => {
     const w = rowProps.w;
+    const Icon = rowProps.icon;
     const isActive = () => appStore.activePaneId === w.id;
     const status = () => appStore.statusByWorktree[w.id];
     const pill = () => rowPill(status(), appStore.prStatusByWorktree[w.id]);
     const subtitle = () =>
-      rowProps.subtitle ?? (w.title && w.title.trim() ? w.branch : null);
+      rowProps.subtitle ??
+      (w.kind !== "orchestrator" && w.title && w.title.trim() ? w.branch : null);
     return (
       <div
-        class="group flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md cursor-pointer text-[12px] transition"
+        class={ROW}
         classList={{
-          "bg-[var(--color-accent)]/15 text-[var(--color-fg)]": isActive(),
+          "bg-[var(--color-accent)]/12 text-[var(--color-fg)] shadow-[inset_2px_0_0_var(--color-accent)]":
+            isActive(),
           "hover:bg-[var(--color-bg-hover)]": !isActive(),
           "text-[var(--color-fg-muted)]":
             !isActive() && status() !== "needs_input",
-          "text-[var(--color-fg)] font-medium":
-            !isActive() && status() === "needs_input",
+          "text-[var(--color-fg)]": !isActive() && status() === "needs_input",
         }}
         onClick={() => openPane(w.id)}
       >
-        <div class="flex flex-col min-w-0 flex-1">
+        {rowProps.leading}
+        {Icon && (
+          <Icon size={14} class="shrink-0 text-[var(--color-accent)]" />
+        )}
+        <div class="flex flex-col min-w-0 flex-1 leading-tight">
           <Show
             when={editingId() === w.id}
             fallback={
               <>
                 <span
-                  class="truncate text-[13px] font-medium text-[var(--color-fg)] leading-snug"
+                  class="truncate text-[12.5px] font-medium text-[var(--color-fg)]"
                   title={worktreeLabel(w)}
                 >
                   {worktreeLabel(w)}
                 </span>
                 <Show when={subtitle()}>
-                  <span class="truncate text-[10px] font-mono text-[var(--color-fg-dim)] leading-tight">
+                  <span class="truncate text-[10.5px] font-mono text-[var(--color-fg-dim)] mt-px">
                     {subtitle()}
                   </span>
                 </Show>
@@ -372,10 +399,17 @@ export function Sidebar(props: {
             />
           </Show>
         </div>
+        {/* Trailing cluster: count chip, status pill, hover actions. Actions
+            replace the chip+pill on hover so a narrow row never crowds. */}
+        <Show when={rowProps.badge !== undefined}>
+          <span class="group-hover/row:hidden">
+            <CountChip n={rowProps.badge!} />
+          </span>
+        </Show>
         <Show when={pill()}>
           {(p) => (
             <span
-              class={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium leading-none truncate max-w-[72px] ${p().cls}`}
+              class={`group-hover/row:hidden shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium leading-none truncate max-w-[72px] ${p().cls}`}
               classList={{ "animate-pulse": p().pulse }}
               title={p().tooltip}
             >
@@ -383,64 +417,63 @@ export function Sidebar(props: {
             </span>
           )}
         </Show>
-        <div class="hidden group-hover:flex items-center gap-0.5 shrink-0">
+        <div class="hidden group-hover/row:flex items-center gap-0.5 shrink-0">
           <button
-            class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+            class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
             title="Rename (edit title)"
             onClick={(e) => {
               e.stopPropagation();
               startEditTitle(w);
             }}
           >
-            <Pencil size={11} />
+            <Pencil size={12} />
           </button>
           <button
-            class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+            class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
             title="Reveal in Finder"
             onClick={(e) => {
               e.stopPropagation();
               openInFinder(w.path);
             }}
           >
-            <FolderOpen size={11} />
+            <FolderOpen size={12} />
           </button>
           <button
-            class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
-            title={w.kind === "orchestrator" ? "Remove orchestrator" : "Remove worktree"}
+            class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
+            title={
+              w.kind === "orchestrator" ? "Remove orchestrator" : "Remove worktree"
+            }
             onClick={(e) => {
               e.stopPropagation();
               onRemoveWorktree(w);
             }}
           >
-            <X size={11} />
+            <X size={12} />
           </button>
         </div>
       </div>
     );
   };
 
-  /// Section header: an uppercase label + an action button. The secondary
-  /// section (not primary) gets a top divider so the two stacks read distinctly.
+  /// Section header: uppercase label, an item count, and an action (+) button.
   const SectionHeader = (hp: {
     label: string;
-    primary: boolean;
+    count: number;
     actionTitle: string;
     onAction: () => void;
-    accentHover?: boolean;
   }) => (
-    <div
-      class="flex items-center justify-between px-3 py-2"
-      classList={{ "mt-1 border-t border-[var(--color-border)]": !hp.primary }}
-    >
-      <span class="text-[10px] font-semibold tracking-[0.14em] uppercase text-[var(--color-fg-dim)]">
+    <div class="flex items-center gap-2 px-3 pt-3 pb-1.5">
+      <span class="text-[10px] font-semibold tracking-[0.16em] uppercase text-[var(--color-fg-dim)]">
         {hp.label}
       </span>
+      <Show when={hp.count > 0}>
+        <span class="text-[10px] font-medium tabular-nums text-[var(--color-fg-dim)]/70">
+          {hp.count}
+        </span>
+      </Show>
+      <div class="flex-1" />
       <button
-        class="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-muted)] transition"
-        classList={{
-          "hover:text-[var(--color-accent)]": hp.accentHover,
-          "hover:text-[var(--color-fg)]": !hp.accentHover,
-        }}
+        class="p-1 -mr-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] transition"
         title={hp.actionTitle}
         onClick={(e) => {
           e.stopPropagation();
@@ -452,23 +485,30 @@ export function Sidebar(props: {
     </div>
   );
 
-  const OrchestratorsSection = (sp: { primary: boolean }) => (
-    <>
+  const Chevron = (p: { open: boolean }) => (
+    <span class="shrink-0 text-[var(--color-fg-dim)]">
+      <Show when={p.open} fallback={<ChevronRight size={14} />}>
+        <ChevronDown size={14} />
+      </Show>
+    </span>
+  );
+
+  const OrchestratorsSection = () => (
+    <div>
       <SectionHeader
         label="Orchestrators"
-        primary={sp.primary}
+        count={appStore.orchestrators.length}
         actionTitle="New orchestrator"
         onAction={() => props.onCreateOrchestrator()}
-        accentHover
       />
       <Show
         when={appStore.orchestrators.length > 0}
         fallback={
           <button
-            class="mx-2 mb-1 w-[calc(100%-1rem)] flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-[11.5px] text-[var(--color-fg-dim)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-fg-muted)] transition"
+            class="mx-1.5 my-1 flex w-[calc(100%-0.75rem)] items-center gap-2 rounded-md px-2 py-2 text-left text-[11.5px] text-[var(--color-fg-dim)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-fg-muted)] transition"
             onClick={() => props.onCreateOrchestrator()}
           >
-            <Network size={13} class="shrink-0 opacity-60" />
+            <Network size={14} class="shrink-0 opacity-60" />
             <span>Spin up a Claude that orchestrates many repos.</span>
           </button>
         }
@@ -477,33 +517,31 @@ export function Sidebar(props: {
           {(o) => {
             const fleet = () => fleetOf(o.id);
             return (
-              <div class="mb-1">
-                <div class="flex items-stretch">
-                  <button
-                    class="pl-2 pr-0.5 flex items-center text-[var(--color-accent)] hover:text-[var(--color-fg)] transition"
-                    title={isOrchExpanded(o.id) ? "Collapse fleet" : "Expand fleet"}
-                    onClick={() => toggleOrch(o.id)}
-                  >
-                    <Show
-                      when={isOrchExpanded(o.id)}
-                      fallback={<ChevronRight size={13} class="shrink-0" />}
+              <div>
+                <WorktreeRow
+                  w={o}
+                  subtitle=""
+                  icon={Network}
+                  badge={fleet().length}
+                  leading={
+                    <button
+                      class="-ml-1 shrink-0 rounded p-0.5 text-[var(--color-fg-dim)] hover:bg-[var(--color-bg)] hover:text-[var(--color-fg)] transition"
+                      title={isOrchExpanded(o.id) ? "Collapse fleet" : "Expand fleet"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleOrch(o.id);
+                      }}
                     >
-                      <ChevronDown size={13} class="shrink-0" />
-                    </Show>
-                  </button>
-                  <div class="flex-1 min-w-0">
-                    <WorktreeRow
-                      w={o}
-                      subtitle={`${fleet().length} agent${fleet().length === 1 ? "" : "s"}`}
-                    />
-                  </div>
-                </div>
+                      <Chevron open={isOrchExpanded(o.id)} />
+                    </button>
+                  }
+                />
                 <Show when={isOrchExpanded(o.id)}>
-                  <div class="ml-4 border-l border-[var(--color-border)] pl-1">
+                  <div class={CHILDREN_WRAP}>
                     <For
                       each={fleet()}
                       fallback={
-                        <div class="px-3 py-1.5 text-[11px] text-[var(--color-fg-dim)]">
+                        <div class="px-3 py-1.5 text-[11px] italic text-[var(--color-fg-dim)]">
                           no agents yet
                         </div>
                       }
@@ -522,14 +560,14 @@ export function Sidebar(props: {
           }}
         </For>
       </Show>
-    </>
+    </div>
   );
 
-  const ReposSection = (sp: { primary: boolean }) => (
-    <>
+  const ReposSection = () => (
+    <div>
       <SectionHeader
         label="Repositories"
-        primary={sp.primary}
+        count={appStore.repos.length}
         actionTitle="Add repository"
         onAction={onAddRepo}
       />
@@ -549,67 +587,70 @@ export function Sidebar(props: {
         }
       >
         <For each={appStore.repos}>
-          {(r) => (
-            <div class="mb-1">
-              <div class="group flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md hover:bg-[var(--color-bg-hover)]">
-                <button
-                  class="flex-1 flex items-center gap-1.5 text-left text-[13px] font-medium text-[var(--color-fg)] min-w-0"
+          {(r) => {
+            const list = () => appStore.worktreesByRepo[r.id] ?? [];
+            return (
+              <div>
+                <div
+                  class={`${ROW} text-[var(--color-fg)] hover:bg-[var(--color-bg-hover)]`}
                   onClick={() => toggleExpand(r.id)}
                 >
-                  <Show
-                    when={expanded()[r.id]}
-                    fallback={
-                      <ChevronRight
-                        size={13}
-                        class="shrink-0 text-[var(--color-fg-dim)]"
-                      />
-                    }
-                  >
-                    <ChevronDown
-                      size={13}
-                      class="shrink-0 text-[var(--color-fg-dim)]"
-                    />
-                  </Show>
+                  <Chevron open={!!expanded()[r.id]} />
                   <FolderGit2
                     size={14}
-                    class="text-[var(--color-accent)] shrink-0"
+                    class="shrink-0 text-[var(--color-accent)]"
                   />
-                  <span class="truncate">{r.name}</span>
-                </button>
-                <button
-                  class="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
-                  title="Remove from Flock"
-                  onClick={() => onRemoveRepo(r)}
-                >
-                  <X size={12} />
-                </button>
-                <button
-                  class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] transition"
-                  title="New worktree"
-                  onClick={() => props.onCreateWorktree(r)}
-                >
-                  <Plus size={13} />
-                </button>
-              </div>
-              <Show when={expanded()[r.id]}>
-                <div class="ml-1.5 border-l border-[var(--color-border)] pl-1">
-                  <For
-                    each={appStore.worktreesByRepo[r.id] ?? []}
-                    fallback={
-                      <div class="px-3 py-1.5 text-[11px] text-[var(--color-fg-dim)]">
-                        no worktrees
-                      </div>
-                    }
-                  >
-                    {(w) => <WorktreeRow w={w} />}
-                  </For>
+                  <span class="flex-1 truncate text-[12.5px] font-medium">
+                    {r.name}
+                  </span>
+                  <Show when={list().length > 0}>
+                    <span class="group-hover/row:hidden">
+                      <CountChip n={list().length} />
+                    </span>
+                  </Show>
+                  <div class="hidden group-hover/row:flex items-center gap-0.5 shrink-0">
+                    <button
+                      class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] transition"
+                      title="New worktree"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onCreateWorktree(r);
+                      }}
+                    >
+                      <Plus size={13} />
+                    </button>
+                    <button
+                      class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
+                      title="Remove from Flock"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRemoveRepo(r);
+                      }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
                 </div>
-              </Show>
-            </div>
-          )}
+                <Show when={expanded()[r.id]}>
+                  <div class={CHILDREN_WRAP}>
+                    <For
+                      each={list()}
+                      fallback={
+                        <div class="px-3 py-1.5 text-[11px] italic text-[var(--color-fg-dim)]">
+                          no worktrees
+                        </div>
+                      }
+                    >
+                      {(w) => <WorktreeRow w={w} />}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+            );
+          }}
         </For>
       </Show>
-    </>
+    </div>
   );
 
   /// One segment of the view toggle.
@@ -617,43 +658,38 @@ export function Sidebar(props: {
     mode: "orchestrators" | "repos";
     label: string;
     icon: typeof Network;
-  }) => (
-    <button
-      class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium transition"
-      classList={{
-        "bg-[var(--color-bg)] text-[var(--color-fg)] border border-[var(--color-border-strong)]":
-          sidebarMode() === mp.mode,
-        "text-[var(--color-fg-muted)] hover:bg-[var(--color-bg-hover)] border border-transparent":
-          sidebarMode() !== mp.mode,
-      }}
-      title={`Lead the sidebar with ${mp.label.toLowerCase()}`}
-      onClick={() => setSidebarMode(mp.mode)}
-    >
-      <mp.icon size={12} class="shrink-0" />
-      {mp.label}
-    </button>
-  );
+  }) => {
+    const Icon = mp.icon;
+    return (
+      <button
+        class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium transition"
+        classList={{
+          "bg-[var(--color-bg)] text-[var(--color-fg)] shadow-sm": sidebarMode() === mp.mode,
+          "text-[var(--color-fg-dim)] hover:text-[var(--color-fg-muted)]":
+            sidebarMode() !== mp.mode,
+        }}
+        title={`Show ${mp.label.toLowerCase()}`}
+        onClick={() => setSidebarMode(mp.mode)}
+      >
+        <Icon size={12} class="shrink-0" />
+        {mp.label}
+      </button>
+    );
+  };
 
   return (
-    <aside class="w-64 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-elevated)]/40 flex flex-col overflow-hidden">
-      {/* View toggle: which list leads — orchestrators or repos. */}
-      <div class="flex gap-1 p-1.5 border-b border-[var(--color-border)]">
-        <ModeButton mode="orchestrators" label="Orchestrators" icon={Network} />
-        <ModeButton mode="repos" label="Repos" icon={FolderGit2} />
+    <aside class="w-64 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-elevated)] flex flex-col overflow-hidden">
+      {/* View toggle: orchestrators or repos. The two views are exclusive. */}
+      <div class="p-2 border-b border-[var(--color-border)]">
+        <div class="flex gap-1 p-0.5 rounded-lg bg-[var(--color-bg)]/60">
+          <ModeButton mode="orchestrators" label="Orchestrators" icon={Network} />
+          <ModeButton mode="repos" label="Repos" icon={FolderGit2} />
+        </div>
       </div>
 
-      <div class="flex-1 overflow-y-auto py-1">
-        <Show
-          when={sidebarMode() === "orchestrators"}
-          fallback={
-            <>
-              <ReposSection primary={true} />
-              <OrchestratorsSection primary={false} />
-            </>
-          }
-        >
-          <OrchestratorsSection primary={true} />
-          <ReposSection primary={false} />
+      <div class="flex-1 overflow-y-auto pb-2">
+        <Show when={sidebarMode() === "orchestrators"} fallback={<ReposSection />}>
+          <OrchestratorsSection />
         </Show>
       </div>
     </aside>
