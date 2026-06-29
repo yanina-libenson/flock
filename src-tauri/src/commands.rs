@@ -278,6 +278,8 @@ pub fn worktree_remove(
     // and the server logs get noisy.
     state.pty.kill(id).ok();
     pty::tmux_kill_session(id);
+    // Drop the worktree's resume-on-input lock — it's gone for good now.
+    state.input_locks.lock().unwrap().remove(&id);
     if w.kind == "orchestrator" {
         // An orchestrator isn't a git worktree — it's a plain scratch dir. Just
         // remove the directory. Its fleet survives: the DB's ON DELETE SET NULL
@@ -440,6 +442,7 @@ pub fn start_task_core(
         &w.permission_mode,
         &env_vars,
         Some(prompt),
+        None,
         None,
     )?;
     state.db.touch_worktree(w.id)?;
@@ -627,7 +630,7 @@ pub fn start_orchestrator_core(
 
     let path_string = path.to_string_lossy().into_owned();
     let env_vars = env_profiles::resolve_vars(&env_profiles::load(), &path_string);
-    pty::start_detached(w.id, &path, pm, &env_vars, Some(prompt), Some(&sys))?;
+    pty::start_detached(w.id, &path, pm, &env_vars, Some(prompt), Some(&sys), None)?;
     state.db.touch_worktree(w.id)?;
     let _ = app.emit("worktree:created", &w);
     Ok(w)

@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 /// Dedicated tmux socket name — isolates Flock's sessions from any tmux the
@@ -409,8 +410,9 @@ fn session_command(claude: &str, shell: &str) -> String {
 /// has never run claude there. The transcript filename stem *is* the session id
 /// (`<id>.jsonl`), so this is what `claude --resume <id>` expects. Reuses the
 /// transcript module's cwd→slug + newest-file logic so the Reader view and the
-/// resume-on-reattach path agree on which session is "current".
-fn latest_session_id(cwd: &Path) -> Option<String> {
+/// resume-on-reattach path agree on which session is "current". None doubles as
+/// the "no resumable session" signal for the REST resume-on-input path.
+pub fn latest_session_id(cwd: &Path) -> Option<String> {
     let file = crate::transcript::session_file_for(&cwd.to_string_lossy())?;
     file.file_stem()
         .and_then(|s| s.to_str())
@@ -437,10 +439,17 @@ fn build_env_flags(env_vars: &[(String, String)]) -> String {
 }
 
 /// Start a worktree's claude session **detached** (no PTY client), optionally
-/// seeding an initial prompt. Used by the orchestration path so a task can be
-/// spawned headlessly (cron, MCP, REST); a viewer reattaches later via
-/// `attach`, which reconnects to this live tmux session rather than restarting
-/// claude.
+/// seeding an initial prompt or resuming a prior on-disk session. Used by the
+/// orchestration path so a task can be spawned headlessly (cron, MCP, REST); a
+/// viewer reattaches later via `attach`, which reconnects to this live tmux
+/// session rather than restarting claude.
+///
+/// `resume_id` bakes in `--resume <id>` so a session whose tmux died (monitor
+/// hibernation, memory reaping, reboot) can be brought back from Claude Code's
+/// transcript without losing the conversation — the headless counterpart to
+/// `attach`'s resume-on-reattach. `initial_prompt` and `resume_id` are mutually
+/// exclusive in practice (seed a new task vs. continue an existing one).
+#[allow(clippy::too_many_arguments)]
 pub fn start_detached(
     worktree_id: i64,
     cwd: &Path,
@@ -448,19 +457,20 @@ pub fn start_detached(
     env_vars: &[(String, String)],
     initial_prompt: Option<&str>,
     append_system_prompt: Option<&str>,
+    resume_id: Option<&str>,
 ) -> AppResult<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let session_name = tmux_session_name(worktree_id);
     let conf_path = tmux_config_path()?;
-    let claude = claude_invocation(permission_mode, initial_prompt, None, append_system_prompt);
-    let env_flags = build_env_flags(&with_worktree_id(env_vars, worktree_id));
-    let session_cmd = session_command(&claude, &shell);
-    let tmux_cmd = format!(
-        "tmux -L {socket} -f {conf} new-session -d{env_flags} -s {name} -c {cwd} {session_cmd}",
-        socket = shell_escape(TMUX_SOCKET),
-        conf = shell_escape(&conf_path.to_string_lossy()),
-        name = shell_escape(&session_name),
-        cwd = shell_escape(&cwd.to_string_lossy()),
+    let tmux_cmd = detached_tmux_cmd(
+        worktree_id,
+        &cwd.to_string_lossy(),
+        permission_mode,
+        env_vars,
+        initial_prompt,
+        append_system_prompt,
+        resume_id,
+        &shell,
+        &conf_path.to_string_lossy(),
     );
     let out = std::process::Command::new(shell)
         .args(["-i", "-l", "-c", &tmux_cmd])
@@ -473,6 +483,59 @@ pub fn start_detached(
         )));
     }
     Ok(())
+}
+
+/// Build the detached `tmux new-session -d …` command string. Pure (no env / IO)
+/// so the resume + prompt wiring can be asserted in tests.
+#[allow(clippy::too_many_arguments)]
+fn detached_tmux_cmd(
+    worktree_id: i64,
+    cwd: &str,
+    permission_mode: &str,
+    env_vars: &[(String, String)],
+    initial_prompt: Option<&str>,
+    append_system_prompt: Option<&str>,
+    resume_id: Option<&str>,
+    shell: &str,
+    conf_path: &str,
+) -> String {
+    let session_name = tmux_session_name(worktree_id);
+    let claude = claude_invocation(permission_mode, initial_prompt, resume_id, append_system_prompt);
+    let env_flags = build_env_flags(&with_worktree_id(env_vars, worktree_id));
+    let session_cmd = session_command(&claude, shell);
+    format!(
+        "tmux -L {socket} -f {conf} new-session -d{env_flags} -s {name} -c {cwd} {session_cmd}",
+        socket = shell_escape(TMUX_SOCKET),
+        conf = shell_escape(conf_path),
+        name = shell_escape(&session_name),
+        cwd = shell_escape(cwd),
+    )
+}
+
+/// U+00A0 — the NBSP Claude renders after `❯` on its idle input line. Same
+/// discriminator the monitor keys off (see `monitor::PROMPT_NBSP`); duplicated
+/// here as a one-liner to keep pty ↔ monitor decoupled.
+const READY_PROMPT_NBSP: &str = "❯\u{00a0}";
+
+/// Poll a freshly-resumed session until Claude has drawn its input UI, so
+/// headless input isn't typed into a still-booting TUI and silently dropped.
+/// Looks for Claude's input prompt (`❯` + NBSP) or its input-box border (`╭`).
+/// Returns true once ready, false on timeout — on timeout the caller sends
+/// anyway (the session *is* live, so it's a best-effort late send, never a
+/// 502). Polls ~4×/sec.
+pub fn wait_until_ready(worktree_id: i64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(screen) = tmux_capture_pane(worktree_id) {
+            if screen.contains(READY_PROMPT_NBSP) || screen.contains('╭') {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 /// Kill a Flock tmux session by worktree id. Called when a worktree is
@@ -836,6 +899,45 @@ mod tests {
             inner,
             "claude --permission-mode 'bypassPermissions'; exec '/bin/zsh' -i -l"
         );
+    }
+
+    #[test]
+    fn detached_cmd_bakes_resume_when_resuming() {
+        use super::detached_tmux_cmd;
+        // Resume path (REST resume-on-input): `--resume <id>`, no initial prompt.
+        let cmd = detached_tmux_cmd(
+            7,
+            "/work/dir",
+            "bypassPermissions",
+            &[],
+            None,
+            None,
+            Some("sess-abc"),
+            "/bin/zsh",
+            "/conf",
+        );
+        assert!(cmd.contains("new-session -d"));
+        assert!(cmd.contains("-s 'flock-7'"));
+        assert!(cmd.contains("-c '/work/dir'"));
+        // The claude command is shell-escaped into one token, so `--resume` and
+        // the id survive but the inner quoting differs (the exact `--resume
+        // '<id>'` form is asserted in `resume_id_is_baked_in_after_permission_mode`).
+        assert!(cmd.contains("--resume"));
+        assert!(cmd.contains("sess-abc"));
+        // Normal task-spawn path: an initial prompt, never a resume flag.
+        let plain = detached_tmux_cmd(
+            7,
+            "/work/dir",
+            "bypassPermissions",
+            &[],
+            Some("do it"),
+            None,
+            None,
+            "/bin/zsh",
+            "/conf",
+        );
+        assert!(!plain.contains("--resume"));
+        assert!(plain.contains("'do it'"));
     }
 
     #[test]
