@@ -13,12 +13,24 @@ pub struct Msg {
     pub text: String,
 }
 
+/// Claude's cwd → project-dir slug: every `/`, `.`, and whitespace char becomes
+/// `-` (char-for-char). The whitespace case matters for paths like the
+/// orchestrator scratch dir under `~/Library/Application Support/…` — without
+/// it the slug keeps the space and we'd miss the transcript entirely (so resume
+/// and the Reader silently break for any cwd with a space).
+pub fn cwd_slug(path: &str) -> String {
+    path.chars()
+        .map(|c| if c == '/' || c == '.' || c.is_whitespace() { '-' } else { c })
+        .collect()
+}
+
 /// Locate the active session file for a worktree: Claude encodes the cwd as a
-/// slug (every `/` and `.` → `-`) under `~/.claude/projects`. The newest
-/// `.jsonl` in that dir is the live session.
+/// slug under `~/.claude/projects`. The newest `.jsonl` in that dir is the live
+/// session.
 pub fn session_file_for(worktree_path: &str) -> Option<PathBuf> {
-    let slug = worktree_path.replace(['/', '.'], "-");
-    let dir = dirs::home_dir()?.join(".claude/projects").join(slug);
+    let dir = dirs::home_dir()?
+        .join(".claude/projects")
+        .join(cwd_slug(worktree_path));
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(&dir).ok()?.flatten() {
         let path = entry.path();
@@ -100,7 +112,15 @@ mod tests {
     #[test]
     fn slug_encoding() {
         // Sanity: the cwd→slug transform Claude uses.
-        let slug = "/Users/y/Code/work/.flock-worktrees/x".replace(['/', '.'], "-");
-        assert_eq!(slug, "-Users-y-Code-work--flock-worktrees-x");
+        assert_eq!(
+            super::cwd_slug("/Users/y/Code/work/.flock-worktrees/x"),
+            "-Users-y-Code-work--flock-worktrees-x"
+        );
+        // Spaces become dashes too — the orchestrator scratch dir lives under
+        // "Application Support", and resume/Reader depend on this matching.
+        assert_eq!(
+            super::cwd_slug("/Users/y/Library/Application Support/Flock/orchestrators/kyoto"),
+            "-Users-y-Library-Application-Support-Flock-orchestrators-kyoto"
+        );
     }
 }
