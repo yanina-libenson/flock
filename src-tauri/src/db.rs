@@ -129,7 +129,6 @@ impl Db {
             );
 
             CREATE INDEX IF NOT EXISTS idx_worktrees_repo ON worktrees(repo_id);
-            CREATE INDEX IF NOT EXISTS idx_worktrees_parent ON worktrees(parent_id);
 
             CREATE TABLE IF NOT EXISTS schedules (
               id         INTEGER PRIMARY KEY,
@@ -176,6 +175,12 @@ impl Db {
             "ALTER TABLE worktrees ADD COLUMN parent_id INTEGER REFERENCES worktrees(id) ON DELETE SET NULL",
             [],
         );
+        // Index on parent_id must come AFTER the defensive ALTER above: on a DB
+        // that predates the column, creating it inside the schema batch fails
+        // (no such column) before the ALTER ever runs.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_worktrees_parent ON worktrees(parent_id);",
+        )?;
         Ok(Self { conn: Mutex::new(conn) })
     }
 
