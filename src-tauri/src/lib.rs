@@ -5,6 +5,7 @@ mod env_profiles;
 mod error;
 mod git;
 mod kb;
+mod mcp;
 mod monitor;
 mod pr;
 mod pty;
@@ -34,6 +35,7 @@ pub fn run() {
             pr::spawn(app.handle().clone());
             schedule::spawn(app.handle().clone());
             kb::start_indexing(app.handle().clone());
+            mcp::prewarm(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -55,6 +57,8 @@ pub fn run() {
             commands::env_config_get,
             commands::env_config_set,
             commands::task_create,
+            commands::orchestrator_create,
+            commands::orchestrators_list,
             commands::schedule_create,
             commands::schedule_list,
             commands::schedule_set_enabled,

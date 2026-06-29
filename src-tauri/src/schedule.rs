@@ -114,12 +114,14 @@ pub fn spawn(app: AppHandle) {
                 .or_else(|| Some(format!("scheduled: {}", s.spec)));
             // Fire the task. Errors are logged but must not stall the loop.
             if let Err(e) = crate::commands::start_task_core(
+                &app,
                 &state,
                 s.repo_id,
                 &s.prompt,
                 None,
                 None,
                 title,
+                None,
                 None,
             ) {
                 eprintln!("flock: schedule {} fire failed: {e}", s.id);

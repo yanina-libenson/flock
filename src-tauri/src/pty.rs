@@ -128,6 +128,7 @@ impl PtyManager {
         permission_mode: &str,
         env_vars: &[(String, String)],
         initial_prompt: Option<&str>,
+        append_system_prompt: Option<&str>,
     ) -> AppResult<()> {
         // Evict any prior attach for this worktree. `kill()` marks the old
         // attach silent so its reader thread's tail `pty:exit` emit is
@@ -194,8 +195,13 @@ impl PtyManager {
         } else {
             None
         };
-        let claude = claude_invocation(permission_mode, initial_prompt, resume_id.as_deref());
-        let env_flags = build_env_flags(env_vars);
+        let claude = claude_invocation(
+            permission_mode,
+            initial_prompt,
+            resume_id.as_deref(),
+            append_system_prompt,
+        );
+        let env_flags = build_env_flags(&with_worktree_id(env_vars, worktree_id));
         let session_cmd = session_command(&claude, &shell);
         let tmux_cmd = format!(
             "exec tmux -L {socket} -f {conf} new-session -A -D{env_flags} -s {name} -c {cwd} {session_cmd}",
@@ -359,12 +365,18 @@ fn claude_invocation(
     permission_mode: &str,
     initial_prompt: Option<&str>,
     resume_id: Option<&str>,
+    append_system_prompt: Option<&str>,
 ) -> String {
     let mut cmd = if permission_mode == "default" || permission_mode.is_empty() {
         "claude".to_string()
     } else {
         format!("claude --permission-mode {}", shell_escape(permission_mode))
     };
+    if let Some(sp) = append_system_prompt {
+        if !sp.is_empty() {
+            cmd = format!("{cmd} --append-system-prompt {}", shell_escape(sp));
+        }
+    }
     if let Some(id) = resume_id {
         if !id.is_empty() {
             cmd = format!("{cmd} --resume {}", shell_escape(id));
@@ -405,6 +417,16 @@ fn latest_session_id(cwd: &Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Every Flock session gets `FLOCK_WORKTREE_ID` injected so the process (and
+/// any MCP server it spawns) can self-identify — e.g. the Flock MCP reads it to
+/// tag tasks it spawns with their parent worktree. Appended to the profile env
+/// vars without disturbing them (drift detection still keys off the profile set).
+fn with_worktree_id(env_vars: &[(String, String)], worktree_id: i64) -> Vec<(String, String)> {
+    let mut all = env_vars.to_vec();
+    all.push(("FLOCK_WORKTREE_ID".to_string(), worktree_id.to_string()));
+    all
+}
+
 /// `-e KEY=VAL` flags for per-environment vars (see env_profiles). Each pair is
 /// shell-escaped as a unit.
 fn build_env_flags(env_vars: &[(String, String)]) -> String {
@@ -425,12 +447,13 @@ pub fn start_detached(
     permission_mode: &str,
     env_vars: &[(String, String)],
     initial_prompt: Option<&str>,
+    append_system_prompt: Option<&str>,
 ) -> AppResult<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let session_name = tmux_session_name(worktree_id);
     let conf_path = tmux_config_path()?;
-    let claude = claude_invocation(permission_mode, initial_prompt, None);
-    let env_flags = build_env_flags(env_vars);
+    let claude = claude_invocation(permission_mode, initial_prompt, None, append_system_prompt);
+    let env_flags = build_env_flags(&with_worktree_id(env_vars, worktree_id));
     let session_cmd = session_command(&claude, &shell);
     let tmux_cmd = format!(
         "tmux -L {socket} -f {conf} new-session -d{env_flags} -s {name} -c {cwd} {session_cmd}",
@@ -757,17 +780,17 @@ mod tests {
     #[test]
     fn plain_attach_has_no_resume_or_prompt() {
         assert_eq!(
-            claude_invocation("bypassPermissions", None, None),
+            claude_invocation("bypassPermissions", None, None, None),
             "claude --permission-mode 'bypassPermissions'"
         );
         // default mode → bare `claude`, no --permission-mode flag.
-        assert_eq!(claude_invocation("default", None, None), "claude");
+        assert_eq!(claude_invocation("default", None, None, None), "claude");
     }
 
     #[test]
     fn resume_id_is_baked_in_after_permission_mode() {
         assert_eq!(
-            claude_invocation("bypassPermissions", None, Some("abc-123")),
+            claude_invocation("bypassPermissions", None, Some("abc-123"), None),
             "claude --permission-mode 'bypassPermissions' --resume 'abc-123'"
         );
     }
@@ -775,7 +798,7 @@ mod tests {
     #[test]
     fn initial_prompt_is_a_trailing_positional() {
         assert_eq!(
-            claude_invocation("default", Some("fix the bug"), None),
+            claude_invocation("default", Some("fix the bug"), None, None),
             "claude 'fix the bug'"
         );
     }
@@ -783,7 +806,20 @@ mod tests {
     #[test]
     fn empty_resume_id_is_ignored() {
         assert_eq!(
-            claude_invocation("default", None, Some("")),
+            claude_invocation("default", None, Some(""), None),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn append_system_prompt_after_permission_mode() {
+        assert_eq!(
+            claude_invocation("bypassPermissions", Some("go"), None, Some("you orchestrate")),
+            "claude --permission-mode 'bypassPermissions' --append-system-prompt 'you orchestrate' 'go'"
+        );
+        // Empty system prompt is ignored.
+        assert_eq!(
+            claude_invocation("default", None, None, Some("")),
             "claude"
         );
     }

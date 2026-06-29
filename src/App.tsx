@@ -12,6 +12,7 @@ import { Sidebar } from "./components/Sidebar";
 import { TabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/TerminalPane";
 import { NewWorktreeModal } from "./components/NewWorktreeModal";
+import { NewOrchestratorModal } from "./components/NewOrchestratorModal";
 import { SettingsModal, remoteEnabledPref } from "./components/SettingsModal";
 import {
   appStore,
@@ -22,6 +23,7 @@ import {
   clearWorktreeStatus,
   setWorktreePrStatus,
   applyWorktreeTitle,
+  addWorktree,
   hibernatePane,
   jumpToNextNeedingInput,
   worktreesNeedingInput,
@@ -34,6 +36,7 @@ import {
   onWorktreeTitle,
   onWorktreePrStatus,
   onWorktreeHibernated,
+  onWorktreeCreated,
   onPtyExit,
   setActiveWorktree,
   sessionWriteText,
@@ -60,6 +63,7 @@ import {
 
 function App() {
   const [modalRepo, setModalRepo] = createSignal<Repo | null>(null);
+  const [showOrchestrator, setShowOrchestrator] = createSignal(false);
   const [showSettings, setShowSettings] = createSignal(false);
   // null = still checking; true/false once we know.
   const [tmuxOk, setTmuxOk] = createSignal<boolean | null>(null);
@@ -73,6 +77,8 @@ function App() {
       const list = appStore.worktreesByRepo[Number(repoId)] ?? [];
       for (const w of list) m.set(w.id, w);
     }
+    // Orchestrators are pane-openable too (tabs, labels, drag-drop target).
+    for (const o of appStore.orchestrators) m.set(o.id, o);
     return m;
   });
 
@@ -191,6 +197,10 @@ function App() {
       applyWorktreeTitle(e.worktree_id, e.title),
     );
     const exitUnlisten = onPtyExit((e) => clearWorktreeStatus(e.worktree_id));
+    // A worktree appeared out-of-band (spawned by an orchestrator, the MCP,
+    // cron, or the REST API) — add it live so it shows in the sidebar without a
+    // manual refresh.
+    const createdUnlisten = onWorktreeCreated((w) => addWorktree(w));
     const prStatusUnlisten = onWorktreePrStatus((e) =>
       setWorktreePrStatus(e.worktree_id, e.status),
     );
@@ -237,6 +247,7 @@ function App() {
       statusUnlisten.then((f) => f());
       titleUnlisten.then((f) => f());
       exitUnlisten.then((f) => f());
+      createdUnlisten.then((f) => f());
       prStatusUnlisten.then((f) => f());
       hibernateUnlisten.then((f) => f());
       actionUnlisten.then((l) => l.unregister());
@@ -343,7 +354,10 @@ function App() {
       </TitleBar>
       <div class="flex flex-1 min-h-0">
         <Show when={sidebarVisible()}>
-          <Sidebar onCreateWorktree={(r) => setModalRepo(r)} />
+          <Sidebar
+            onCreateWorktree={(r) => setModalRepo(r)}
+            onCreateOrchestrator={() => setShowOrchestrator(true)}
+          />
         </Show>
         <main class="flex-1 flex flex-col min-w-0">
           <Show
@@ -377,6 +391,9 @@ function App() {
           repo={modalRepo()!}
           onClose={() => setModalRepo(null)}
         />
+      </Show>
+      <Show when={showOrchestrator()}>
+        <NewOrchestratorModal onClose={() => setShowOrchestrator(false)} />
       </Show>
       <Show when={showSettings()}>
         <SettingsModal onClose={() => setShowSettings(false)} />

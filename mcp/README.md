@@ -29,6 +29,7 @@ with `FLOCK_TOKEN` / `FLOCK_API_URL` env vars if needed.
 | `task_create`     | Create a worktree + start Claude on it with an initial prompt       |
 | `task_list`       | List worktrees with live status (working / idle / needs_input)      |
 | `task_status`     | Counts of agents by status                                          |
+| `task_read`       | Read an agent's conversation transcript (follow what a child is doing) |
 | `task_input`      | Send text or a key (enter/escape/tab/arrows/ctrl-c) to an agent     |
 | `schedule_create` | Schedule a recurring task (`@every 30m` / `@every 1d` / `HH:MM`)    |
 | `schedule_list`   | List scheduled tasks                                                |
@@ -38,8 +39,12 @@ with `FLOCK_TOKEN` / `FLOCK_API_URL` env vars if needed.
 | `kb_ingest`       | Write/update a note (and the vault file) — save durable learnings   |
 | `kb_delete`       | Delete a note from the index and the vault                          |
 
-An orchestrator agent can `task_create` to fan work out, poll `task_list` to
-watch progress, and `task_input` to nudge an agent that's waiting.
+An orchestrator agent can `task_create` to fan work out across repos, poll
+`task_list` / `task_status` to watch progress, `task_read` to follow what each
+child is doing, and `task_input` to nudge one that's waiting. When the agent runs
+inside a Flock session, `task_create` auto-links the new worktree to it (via the
+injected `FLOCK_WORKTREE_ID`) so it shows up as part of that orchestrator's fleet
+— see Flock's first-class **Orchestrator** sessions.
 
 ## Knowledge base
 

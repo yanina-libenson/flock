@@ -80,6 +80,12 @@ const TOOLS = [
         branch: a.branch,
         base: a.base,
         title: a.title,
+        // Self-identify as the parent so the spawned worktree links into this
+        // orchestrator's fleet. Flock injects FLOCK_WORKTREE_ID into every
+        // session; absent (e.g. run standalone) → no parent linkage.
+        parent_id: process.env.FLOCK_WORKTREE_ID
+          ? Number(process.env.FLOCK_WORKTREE_ID)
+          : undefined,
       }),
   },
   {
@@ -93,6 +99,27 @@ const TOOLS = [
     description: "Summary counts of agents by status across all worktrees.",
     inputSchema: { type: "object", properties: {} },
     handler: () => apiCall("GET", "/api/status"),
+  },
+  {
+    name: "task_read",
+    description:
+      "Read a worktree agent's conversation transcript — the clean message history (user + assistant turns), parsed from the session. Use this to follow what a child agent you spawned is actually doing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number", description: "Worktree id (from task_list)" },
+        since: {
+          type: "number",
+          description: "Byte offset already seen; only newer messages are returned (incremental). Omit for the latest slice.",
+        },
+      },
+      required: ["id"],
+    },
+    handler: (a) =>
+      apiCall(
+        "GET",
+        `/api/worktrees/${a.id}/transcript${a.since ? `?since=${a.since}` : ""}`,
+      ),
   },
   {
     name: "task_input",

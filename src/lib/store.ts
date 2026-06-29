@@ -5,6 +5,10 @@ import type { PrStatus, Repo, Worktree, WorktreeStatus } from "./ipc";
 export interface AppStoreState {
   repos: Repo[];
   worktreesByRepo: Record<number, Worktree[]>;
+  /// Orchestrator sessions (kind='orchestrator'), shown in their own sidebar
+  /// section. Their spawned children live in worktreesByRepo under their real
+  /// repo; the fleet view filters those by parent_id.
+  orchestrators: Worktree[];
   openPaneIds: number[];
   activePaneId: number | null;
   /// Subset of openPaneIds that have been activated this session — the only
@@ -48,6 +52,7 @@ const persisted = loadPersisted();
 const [store, setStore] = createStore<AppStoreState>({
   repos: [],
   worktreesByRepo: {},
+  orchestrators: [],
   openPaneIds: persisted.openPaneIds,
   activePaneId: persisted.activePaneId,
   // Seed only the restored active pane: every other open tab stays dormant
@@ -171,6 +176,24 @@ export function clearHibernationNote(worktreeId: number) {
   });
 }
 
+/// Add a worktree pushed from the backend (worktree:created) into the store,
+/// live. Orchestrators land in their own list; everything else lands under its
+/// repo (so a spawned child appears under its repo and, via parent_id, in the
+/// spawning orchestrator's fleet). Deduped by id so a desktop-initiated create
+/// that also emits the event doesn't double-insert.
+export function addWorktree(w: Worktree) {
+  if (w.kind === "orchestrator") {
+    setStore("orchestrators", (prev) =>
+      prev.some((o) => o.id === w.id) ? prev : [...prev, w],
+    );
+    return;
+  }
+  setStore("worktreesByRepo", w.repo_id, (prev) => {
+    const list = prev ?? [];
+    return list.some((x) => x.id === w.id) ? list : [...list, w];
+  });
+}
+
 export function setWorktreeStatus(worktreeId: number, status: WorktreeStatus) {
   setStore("statusByWorktree", worktreeId, status);
 }
@@ -217,11 +240,15 @@ export function applyWorktreeTitle(worktreeId: number, title: string) {
       return;
     }
   }
+  const oIdx = store.orchestrators.findIndex((w) => w.id === worktreeId);
+  if (oIdx >= 0) setStore("orchestrators", oIdx, "title", title);
 }
 
-/// All worktree ids in sidebar order (repos, then worktrees within each).
+/// All worktree ids in sidebar order (orchestrators first, then repos and their
+/// worktrees). Used for ⌘J cycling through agents that need you.
 function orderedWorktreeIds(): number[] {
   const ids: number[] = [];
+  for (const o of store.orchestrators) ids.push(o.id);
   for (const r of store.repos) {
     for (const w of store.worktreesByRepo[r.id] ?? []) ids.push(w.id);
   }
@@ -255,6 +282,7 @@ export function prunePanes() {
     for (const list of Object.values(s.worktreesByRepo)) {
       for (const w of list) knownIds.add(w.id);
     }
+    for (const o of s.orchestrators) knownIds.add(o.id);
     const openPaneIds = s.openPaneIds.filter((id) => knownIds.has(id));
     const activePaneId =
       s.activePaneId !== null && knownIds.has(s.activePaneId)

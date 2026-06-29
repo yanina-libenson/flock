@@ -19,6 +19,11 @@ export interface Worktree {
   created_at: number;
   last_used: number | null;
   permission_mode: PermissionMode;
+  /// "worktree" (normal git worktree) or "orchestrator" (repo-less fleet
+  /// director living in a Flock scratch dir).
+  kind: string;
+  /// The orchestrator worktree that spawned this one, if any. null otherwise.
+  parent_id: number | null;
 }
 
 export type PermissionMode =
@@ -236,6 +241,23 @@ export interface CreateTaskArgs {
 export const taskCreate = (args: CreateTaskArgs) =>
   invoke<Worktree>("task_create", { args });
 
+// ---------- Orchestrator sessions ----------
+
+export interface CreateOrchestratorArgs {
+  prompt: string;
+  title?: string | null;
+  permission_mode?: PermissionMode | null;
+}
+
+/// Spawn a repo-less orchestrator session (Flock MCP auto-wired). Returns the
+/// new worktree so the UI can open it.
+export const orchestratorCreate = (args: CreateOrchestratorArgs) =>
+  invoke<Worktree>("orchestrator_create", { args });
+
+/// Every orchestrator session, for the sidebar's Orchestrators section.
+export const orchestratorsList = () =>
+  invoke<Worktree[]>("orchestrators_list");
+
 // ---------- Events ----------
 
 export interface PtyOutput {
@@ -309,3 +331,12 @@ export const onWorktreeHibernated = (
   cb: (e: WorktreeHibernatedEvent) => void,
 ): Promise<UnlistenFn> =>
   listen<WorktreeHibernatedEvent>("worktree:hibernated", (e) => cb(e.payload));
+
+/// A worktree was created out-of-band (by an orchestrator, the MCP, cron, or
+/// the REST API) — the backend pushes the full row so the sidebar can add it
+/// live, without a manual refresh. The desktop's own create flows add the row
+/// directly, so this mainly surfaces spawned/fleet worktrees.
+export const onWorktreeCreated = (
+  cb: (w: Worktree) => void,
+): Promise<UnlistenFn> =>
+  listen<Worktree>("worktree:created", (e) => cb(e.payload));

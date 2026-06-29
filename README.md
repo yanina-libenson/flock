@@ -74,7 +74,8 @@ A single status pill per worktree, color-coded by whose turn it is:
 - Point Flock at an **Obsidian vault**; it indexes your notes into **SQLite FTS5** and serves them over **MCP** (`kb_search`, `kb_read`, `kb_ingest`, …). Your agents get a persistent, searchable memory across sessions.
 
 ### 🤖 Orchestration & scheduling
-- **MCP server** (`mcp/flock-mcp.mjs`): other agents (or Claude itself) can `task_create`, `task_list`, `task_status`, `task_input`, and manage schedules — a stdio bridge to Flock's REST API.
+- **Orchestrator sessions** — a first-class, **repo-less Claude** whose job is to direct a fleet. It runs in a Flock scratch space with the Flock MCP auto-wired, spawns worktrees across *any* of your registered repos, and watches + unblocks them. Its **fleet** shows nested beneath it in the sidebar (each child with its live status pill); click any to drop into it. New worktrees appear **live**, no refresh.
+- **MCP server** (`mcp/flock-mcp.mjs`): other agents (or Claude itself) can `task_create`, `task_list`, `task_status`, `task_read`, `task_input`, and manage schedules — a stdio bridge to Flock's REST API. Spawned tasks auto-link to the orchestrator that created them (via an injected `FLOCK_WORKTREE_ID`).
 - **Scheduled tasks**: fire a fresh prompted task on a cron-like spec (`@every 30m`, `@every 2h`, `HH:MM`).
 - **Headless task creation**: spawn a worktree + prompted Claude without ever touching the UI.
 
@@ -141,6 +142,7 @@ Then: add a repo (the sidebar `+`), create a worktree, and Claude starts in it. 
 | `db.rs` | SQLite (repos, worktrees, schedules) |
 | `api/mod.rs` | opt-in axum server: REST + SSE for the mobile PWA, token auth, Tailscale binding |
 | `schedule.rs` | cron-spec task firing |
+| `mcp.rs` | self-contained install of Flock's own MCP server (data dir) so orchestrator sessions get the `task_*` tools auto-wired |
 | `kb.rs` | Obsidian vault → FTS5 index, exposed over MCP |
 | `env_profiles.rs` | per-folder env-var injection |
 | `transcript.rs` | reads Claude session JSONL for the PWA Reader |

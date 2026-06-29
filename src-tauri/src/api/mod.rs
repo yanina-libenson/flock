@@ -342,6 +342,9 @@ struct CreateTaskBody {
     base: Option<String>,
     title: Option<String>,
     permission_mode: Option<String>,
+    /// Orchestrator worktree id that's spawning this task, so the child links
+    /// back into its fleet. Sent by the Flock MCP (from FLOCK_WORKTREE_ID).
+    parent_id: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -371,6 +374,7 @@ async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>
     let res = tokio::task::spawn_blocking(move || {
         let st = app.state::<AppState>();
         crate::commands::start_task_core(
+            &app,
             &st,
             repo_id,
             &body.prompt,
@@ -378,6 +382,7 @@ async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>
             body.base,
             body.title,
             body.permission_mode,
+            body.parent_id,
         )
     })
     .await;
@@ -449,7 +454,8 @@ async fn schedule_run_h(State(ctx): State<ApiCtx>, Path(id): Path<i64>) -> Respo
             .clone()
             .filter(|t| !t.trim().is_empty())
             .or_else(|| Some(format!("scheduled: {}", s.spec)));
-        let w = crate::commands::start_task_core(&st, s.repo_id, &s.prompt, None, None, title, None)?;
+        let w =
+            crate::commands::start_task_core(&app, &st, s.repo_id, &s.prompt, None, None, title, None, None)?;
         if let Some(spec) = crate::schedule::parse_spec(&s.spec) {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

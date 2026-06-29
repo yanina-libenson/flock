@@ -6,6 +6,7 @@ import {
   reposList,
   repoRemove,
   worktreesList,
+  orchestratorsList,
   worktreeRemove,
   worktreeRefreshPrStatus,
   worktreeSetTitle,
@@ -31,10 +32,21 @@ import {
   FolderPlus,
   FolderOpen,
   Pencil,
+  Network,
 } from "lucide-solid";
 
-export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
+export function Sidebar(props: {
+  onCreateWorktree: (repo: Repo) => void;
+  onCreateOrchestrator: () => void;
+}) {
   const [expanded, setExpanded] = createSignal<Record<number, boolean>>({});
+  // Per-orchestrator fleet expand state. Default (absent) = expanded.
+  const [orchExpanded, setOrchExpanded] = createSignal<Record<number, boolean>>(
+    {},
+  );
+  const isOrchExpanded = (id: number) => orchExpanded()[id] !== false;
+  const toggleOrch = (id: number) =>
+    setOrchExpanded((p) => ({ ...p, [id]: !(p[id] !== false) }));
   // Worktree id whose title is being edited inline, plus the draft text.
   const [editingId, setEditingId] = createSignal<number | null>(null);
   const [editDraft, setEditDraft] = createSignal("");
@@ -95,6 +107,13 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
     }
     setAppStore("worktreesByRepo", nextWorktrees);
     setExpanded(nextExpanded);
+    // Orchestrators live in an internal repo hidden from the list above; load
+    // them separately into their own section.
+    try {
+      setAppStore("orchestrators", await orchestratorsList());
+    } catch (e) {
+      console.error("orchestratorsList failed", e);
+    }
     prunePanes();
   }
 
@@ -136,6 +155,18 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
   }
 
   async function onRemoveWorktree(w: Worktree) {
+    if (w.kind === "orchestrator") {
+      if (
+        !confirm(
+          `Remove orchestrator "${worktreeLabel(w)}"?\n\nIts session ends, but the agents it spawned keep running — they just lose their link to it.`,
+        )
+      )
+        return;
+      await worktreeRemove(w.id, false);
+      closePane(w.id);
+      await refresh();
+      return;
+    }
     if (
       !confirm(
         `Remove worktree "${w.branch}"?\nThis deletes the worktree directory at\n${w.path}`,
@@ -257,22 +288,220 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
     }
   }
 
+  const repoName = (repoId: number) =>
+    appStore.repos.find((r) => r.id === repoId)?.name ?? "repo";
+
+  /// The fleet of a given orchestrator: every worktree whose parent_id points
+  /// at it, across all repos. Reactive (reads the store).
+  const fleetOf = (orchId: number): Worktree[] => {
+    const out: Worktree[] = [];
+    for (const list of Object.values(appStore.worktreesByRepo)) {
+      for (const w of list) if (w.parent_id === orchId) out.push(w);
+    }
+    return out;
+  };
+
+  /// One worktree row — used both under a repo and inside an orchestrator's
+  /// fleet. `subtitle`, when given, replaces the default branch caption (the
+  /// fleet uses it to show "repo · branch").
+  const WorktreeRow = (rowProps: { w: Worktree; subtitle?: string }) => {
+    const w = rowProps.w;
+    const isActive = () => appStore.activePaneId === w.id;
+    const status = () => appStore.statusByWorktree[w.id];
+    const pill = () => rowPill(status(), appStore.prStatusByWorktree[w.id]);
+    const subtitle = () =>
+      rowProps.subtitle ?? (w.title && w.title.trim() ? w.branch : null);
+    return (
+      <div
+        class="group flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md cursor-pointer text-[12px] transition"
+        classList={{
+          "bg-[var(--color-accent)]/15 text-[var(--color-fg)]": isActive(),
+          "hover:bg-[var(--color-bg-hover)]": !isActive(),
+          "text-[var(--color-fg-muted)]":
+            !isActive() && status() !== "needs_input",
+          "text-[var(--color-fg)] font-medium":
+            !isActive() && status() === "needs_input",
+        }}
+        onClick={() => openPane(w.id)}
+      >
+        <div class="flex flex-col min-w-0 flex-1">
+          <Show
+            when={editingId() === w.id}
+            fallback={
+              <>
+                <span
+                  class="truncate text-[13px] font-medium text-[var(--color-fg)] leading-snug"
+                  title={worktreeLabel(w)}
+                >
+                  {worktreeLabel(w)}
+                </span>
+                <Show when={subtitle()}>
+                  <span class="truncate text-[10px] font-mono text-[var(--color-fg-dim)] leading-tight">
+                    {subtitle()}
+                  </span>
+                </Show>
+              </>
+            }
+          >
+            <input
+              ref={(el) =>
+                queueMicrotask(() => {
+                  el.focus();
+                  el.select();
+                })
+              }
+              class="w-full bg-[var(--color-bg)] border border-[var(--color-border-strong)] rounded px-1 py-0.5 text-[12px] text-[var(--color-fg)] outline-none"
+              value={editDraft()}
+              placeholder={w.branch}
+              onClick={(e) => e.stopPropagation()}
+              onInput={(e) => setEditDraft(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  saveTitle(w);
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setEditingId(null);
+                }
+              }}
+              onBlur={() => saveTitle(w)}
+            />
+          </Show>
+        </div>
+        <Show when={pill()}>
+          {(p) => (
+            <span
+              class={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium leading-none truncate max-w-[72px] ${p().cls}`}
+              classList={{ "animate-pulse": p().pulse }}
+              title={p().tooltip}
+            >
+              {p().label}
+            </span>
+          )}
+        </Show>
+        <div class="hidden group-hover:flex items-center gap-0.5 shrink-0">
+          <button
+            class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+            title="Rename (edit title)"
+            onClick={(e) => {
+              e.stopPropagation();
+              startEditTitle(w);
+            }}
+          >
+            <Pencil size={11} />
+          </button>
+          <button
+            class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+            title="Reveal in Finder"
+            onClick={(e) => {
+              e.stopPropagation();
+              openInFinder(w.path);
+            }}
+          >
+            <FolderOpen size={11} />
+          </button>
+          <button
+            class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
+            title={w.kind === "orchestrator" ? "Remove orchestrator" : "Remove worktree"}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemoveWorktree(w);
+            }}
+          >
+            <X size={11} />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <aside class="w-64 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-elevated)]/40 flex flex-col overflow-hidden">
-      <div class="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
-        <span class="text-[10px] font-semibold tracking-[0.14em] uppercase text-[var(--color-fg-dim)]">
-          Repositories
-        </span>
-        <button
-          class="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] transition"
-          title="Add repository"
-          onClick={onAddRepo}
-        >
-          <FolderPlus size={14} />
-        </button>
-      </div>
-
       <div class="flex-1 overflow-y-auto py-1">
+        {/* Orchestrators — repo-less Claudes that direct a fleet of agents. */}
+        <div class="flex items-center justify-between px-3 py-2">
+          <span class="text-[10px] font-semibold tracking-[0.14em] uppercase text-[var(--color-fg-dim)]">
+            Orchestrators
+          </span>
+          <button
+            class="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-muted)] hover:text-[var(--color-accent)] transition"
+            title="New orchestrator"
+            onClick={() => props.onCreateOrchestrator()}
+          >
+            <Plus size={14} />
+          </button>
+        </div>
+        <Show
+          when={appStore.orchestrators.length > 0}
+          fallback={
+            <button
+              class="mx-2 mb-1 w-[calc(100%-1rem)] flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-[11.5px] text-[var(--color-fg-dim)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-fg-muted)] transition"
+              onClick={() => props.onCreateOrchestrator()}
+            >
+              <Network size={13} class="shrink-0 opacity-60" />
+              <span>Spin up a Claude that orchestrates many repos.</span>
+            </button>
+          }
+        >
+          <For each={appStore.orchestrators}>
+            {(o) => {
+              const fleet = () => fleetOf(o.id);
+              return (
+                <div class="mb-1">
+                  <div class="flex items-stretch">
+                    <button
+                      class="pl-2 pr-0.5 flex items-center text-[var(--color-accent)] hover:text-[var(--color-fg)] transition"
+                      title={isOrchExpanded(o.id) ? "Collapse fleet" : "Expand fleet"}
+                      onClick={() => toggleOrch(o.id)}
+                    >
+                      <Network size={13} class="shrink-0" />
+                    </button>
+                    <div class="flex-1 min-w-0">
+                      <WorktreeRow
+                        w={o}
+                        subtitle={`${fleet().length} agent${fleet().length === 1 ? "" : "s"}`}
+                      />
+                    </div>
+                  </div>
+                  <Show when={isOrchExpanded(o.id)}>
+                    <div class="ml-4 border-l border-[var(--color-border)] pl-1">
+                      <For
+                        each={fleet()}
+                        fallback={
+                          <div class="px-3 py-1.5 text-[11px] text-[var(--color-fg-dim)]">
+                            no agents yet
+                          </div>
+                        }
+                      >
+                        {(c) => (
+                          <WorktreeRow
+                            w={c}
+                            subtitle={`${repoName(c.repo_id)} · ${c.branch}`}
+                          />
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                </div>
+              );
+            }}
+          </For>
+        </Show>
+
+        {/* Repositories */}
+        <div class="flex items-center justify-between px-3 py-2 mt-1 border-t border-[var(--color-border)]">
+          <span class="text-[10px] font-semibold tracking-[0.14em] uppercase text-[var(--color-fg-dim)]">
+            Repositories
+          </span>
+          <button
+            class="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] transition"
+            title="Add repository"
+            onClick={onAddRepo}
+          >
+            <FolderPlus size={14} />
+          </button>
+        </div>
         <Show
           when={appStore.repos.length > 0}
           fallback={
@@ -327,118 +556,7 @@ export function Sidebar(props: { onCreateWorktree: (repo: Repo) => void }) {
                         </div>
                       }
                     >
-                      {(w) => {
-                        const isActive = () => appStore.activePaneId === w.id;
-                        const status = () => appStore.statusByWorktree[w.id];
-                        const pill = () =>
-                          rowPill(status(), appStore.prStatusByWorktree[w.id]);
-                        return (
-                          <div
-                            class="group flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md cursor-pointer text-[12px] transition"
-                            classList={{
-                              "bg-[var(--color-accent)]/15 text-[var(--color-fg)]":
-                                isActive(),
-                              "hover:bg-[var(--color-bg-hover)]": !isActive(),
-                              "text-[var(--color-fg-muted)]":
-                                !isActive() && status() !== "needs_input",
-                              "text-[var(--color-fg)] font-medium":
-                                !isActive() && status() === "needs_input",
-                            }}
-                            onClick={() => openPane(w.id)}
-                          >
-                            <div class="flex flex-col min-w-0 flex-1">
-                              <Show
-                                when={editingId() === w.id}
-                                fallback={
-                                  <>
-                                    <span
-                                      class="truncate text-[13px] font-medium text-[var(--color-fg)] leading-snug"
-                                      title={worktreeLabel(w)}
-                                    >
-                                      {worktreeLabel(w)}
-                                    </span>
-                                    <Show when={w.title && w.title.trim()}>
-                                      <span class="truncate text-[10px] font-mono text-[var(--color-fg-dim)] leading-tight">
-                                        {w.branch}
-                                      </span>
-                                    </Show>
-                                  </>
-                                }
-                              >
-                                <input
-                                  ref={(el) =>
-                                    queueMicrotask(() => {
-                                      el.focus();
-                                      el.select();
-                                    })
-                                  }
-                                  class="w-full bg-[var(--color-bg)] border border-[var(--color-border-strong)] rounded px-1 py-0.5 text-[12px] text-[var(--color-fg)] outline-none"
-                                  value={editDraft()}
-                                  placeholder={w.branch}
-                                  onClick={(e) => e.stopPropagation()}
-                                  onInput={(e) =>
-                                    setEditDraft(e.currentTarget.value)
-                                  }
-                                  onKeyDown={(e) => {
-                                    e.stopPropagation();
-                                    if (e.key === "Enter") {
-                                      e.preventDefault();
-                                      saveTitle(w);
-                                    } else if (e.key === "Escape") {
-                                      e.preventDefault();
-                                      setEditingId(null);
-                                    }
-                                  }}
-                                  onBlur={() => saveTitle(w)}
-                                />
-                              </Show>
-                            </div>
-                            <Show when={pill()}>
-                              {(p) => (
-                                <span
-                                  class={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium leading-none truncate max-w-[72px] ${p().cls}`}
-                                  classList={{ "animate-pulse": p().pulse }}
-                                  title={p().tooltip}
-                                >
-                                  {p().label}
-                                </span>
-                              )}
-                            </Show>
-                            <div class="hidden group-hover:flex items-center gap-0.5 shrink-0">
-                              <button
-                                class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
-                                title="Rename (edit title)"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  startEditTitle(w);
-                                }}
-                              >
-                                <Pencil size={11} />
-                              </button>
-                              <button
-                                class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
-                                title="Reveal in Finder"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openInFinder(w.path);
-                                }}
-                              >
-                                <FolderOpen size={11} />
-                              </button>
-                              <button
-                                class="p-0.5 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-danger)] transition"
-                                title="Remove worktree"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onRemoveWorktree(w);
-                                }}
-                              >
-                                <X size={11} />
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      }}
+                      {(w) => <WorktreeRow w={w} />}
                     </For>
                   </div>
                 </Show>

@@ -30,6 +30,14 @@ pub struct Worktree {
     /// `"default"` → Claude prompts as usual. Any other value Claude accepts
     /// (acceptEdits, plan, …) is also stored verbatim and forwarded.
     pub permission_mode: String,
+    /// `"worktree"` (default) for a normal git worktree, or `"orchestrator"`
+    /// for a repo-less orchestrator session that lives in a Flock scratch dir
+    /// and directs a fleet of agents across repos.
+    pub kind: String,
+    /// The orchestrator worktree that spawned this one, if any. NULL for
+    /// user-created worktrees and for orchestrators themselves. ON DELETE SET
+    /// NULL so removing an orchestrator orphans (but never kills) its fleet.
+    pub parent_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,10 +123,13 @@ impl Db {
               title           TEXT,
               created_at      INTEGER NOT NULL,
               last_used       INTEGER,
-              permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions'
+              permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions',
+              kind            TEXT NOT NULL DEFAULT 'worktree',
+              parent_id       INTEGER REFERENCES worktrees(id) ON DELETE SET NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_worktrees_repo ON worktrees(repo_id);
+            CREATE INDEX IF NOT EXISTS idx_worktrees_parent ON worktrees(parent_id);
 
             CREATE TABLE IF NOT EXISTS schedules (
               id         INTEGER PRIMARY KEY,
@@ -150,11 +161,19 @@ impl Db {
             DROP TABLE IF EXISTS sessions;
             "#,
         )?;
-        // Defensive ALTER for DBs that predate the permission_mode column.
-        // SQLite has no IF NOT EXISTS for ADD COLUMN; the error is fine to
-        // swallow — it only fires when the column is already there.
+        // Defensive ALTERs for DBs that predate a column. SQLite has no IF NOT
+        // EXISTS for ADD COLUMN; the error is fine to swallow — it only fires
+        // when the column is already there.
         let _ = conn.execute(
             "ALTER TABLE worktrees ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE worktrees ADD COLUMN kind TEXT NOT NULL DEFAULT 'worktree'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE worktrees ADD COLUMN parent_id INTEGER REFERENCES worktrees(id) ON DELETE SET NULL",
             [],
         );
         Ok(Self { conn: Mutex::new(conn) })
@@ -229,6 +248,7 @@ impl Db {
 
     // --- Worktrees ---
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_worktree(
         &self,
         repo_id: i64,
@@ -236,13 +256,15 @@ impl Db {
         path: &str,
         title: Option<&str>,
         permission_mode: &str,
+        kind: &str,
+        parent_id: Option<i64>,
     ) -> AppResult<Worktree> {
         let c = self.c()?;
         c.execute(
-            "INSERT INTO worktrees (repo_id, branch, path, title, created_at, permission_mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO worktrees (repo_id, branch, path, title, created_at, permission_mode, kind, parent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(path) DO UPDATE SET branch=excluded.branch, title=excluded.title",
-            params![repo_id, branch, path, title, now(), permission_mode],
+            params![repo_id, branch, path, title, now(), permission_mode, kind, parent_id],
         )?;
         let id = c.query_row(
             "SELECT id FROM worktrees WHERE path = ?1",
@@ -253,24 +275,28 @@ impl Db {
         self.get_worktree(id)
     }
 
+    fn row_to_worktree(row: &rusqlite::Row<'_>) -> rusqlite::Result<Worktree> {
+        Ok(Worktree {
+            id: row.get(0)?,
+            repo_id: row.get(1)?,
+            branch: row.get(2)?,
+            path: row.get(3)?,
+            title: row.get(4)?,
+            created_at: row.get(5)?,
+            last_used: row.get(6)?,
+            permission_mode: row.get(7)?,
+            kind: row.get(8)?,
+            parent_id: row.get(9)?,
+        })
+    }
+
     pub fn get_worktree(&self, id: i64) -> AppResult<Worktree> {
         let c = self.c()?;
         let w = c.query_row(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id
              FROM worktrees WHERE id = ?1",
             params![id],
-            |row| {
-                Ok(Worktree {
-                    id: row.get(0)?,
-                    repo_id: row.get(1)?,
-                    branch: row.get(2)?,
-                    path: row.get(3)?,
-                    title: row.get(4)?,
-                    created_at: row.get(5)?,
-                    last_used: row.get(6)?,
-                    permission_mode: row.get(7)?,
-                })
-            },
+            Self::row_to_worktree,
         )?;
         Ok(w)
     }
@@ -278,21 +304,27 @@ impl Db {
     pub fn list_worktrees(&self, repo_id: i64) -> AppResult<Vec<Worktree>> {
         let c = self.c()?;
         let mut stmt = c.prepare(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id
              FROM worktrees WHERE repo_id = ?1 ORDER BY created_at ASC",
         )?;
-        let rows = stmt.query_map(params![repo_id], |row| {
-            Ok(Worktree {
-                id: row.get(0)?,
-                repo_id: row.get(1)?,
-                branch: row.get(2)?,
-                path: row.get(3)?,
-                title: row.get(4)?,
-                created_at: row.get(5)?,
-                last_used: row.get(6)?,
-                permission_mode: row.get(7)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![repo_id], Self::row_to_worktree)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Every worktree across all repos. Used to render orchestrators (filter
+    /// kind='orchestrator') and their fleets (filter by parent_id) without one
+    /// query per repo.
+    pub fn list_all_worktrees(&self) -> AppResult<Vec<Worktree>> {
+        let c = self.c()?;
+        let mut stmt = c.prepare(
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id
+             FROM worktrees ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_worktree)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -540,7 +572,73 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    use super::Db;
     use rusqlite::{params, Connection};
+
+    fn temp_db() -> Db {
+        let mut p = std::env::temp_dir();
+        let uniq = format!(
+            "flock-test-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        p.push(uniq);
+        Db::open_at(&p).expect("open temp db")
+    }
+
+    #[test]
+    fn worktree_kind_and_parent_roundtrip() {
+        let db = temp_db();
+        let repo = db.insert_repo("acme", "/tmp/acme").unwrap();
+        let orch = db
+            .insert_worktree(repo.id, "kyoto", "/tmp/orch", None, "bypassPermissions", "orchestrator", None)
+            .unwrap();
+        assert_eq!(orch.kind, "orchestrator");
+        assert_eq!(orch.parent_id, None);
+
+        let child = db
+            .insert_worktree(
+                repo.id,
+                "flock/petra",
+                "/tmp/child",
+                Some("a child"),
+                "bypassPermissions",
+                "worktree",
+                Some(orch.id),
+            )
+            .unwrap();
+        assert_eq!(child.kind, "worktree");
+        assert_eq!(child.parent_id, Some(orch.id));
+
+        // Reads see the persisted columns.
+        let got = db.get_worktree(child.id).unwrap();
+        assert_eq!(got.parent_id, Some(orch.id));
+
+        let all = db.list_all_worktrees().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|w| w.id == orch.id && w.kind == "orchestrator"));
+    }
+
+    #[test]
+    fn deleting_orchestrator_orphans_its_fleet() {
+        let db = temp_db();
+        let repo = db.insert_repo("acme", "/tmp/acme2").unwrap();
+        let orch = db
+            .insert_worktree(repo.id, "lima", "/tmp/orch2", None, "bypassPermissions", "orchestrator", None)
+            .unwrap();
+        let child = db
+            .insert_worktree(repo.id, "flock/oslo", "/tmp/child2", None, "bypassPermissions", "worktree", Some(orch.id))
+            .unwrap();
+
+        // ON DELETE SET NULL: the child survives, just loses the link.
+        db.delete_worktree(orch.id).unwrap();
+        let got = db.get_worktree(child.id).unwrap();
+        assert_eq!(got.parent_id, None);
+        assert!(db.get_worktree(orch.id).is_err());
+    }
 
     /// Linchpin: the bundled SQLite must ship FTS5, and our search shape
     /// (MATCH + snippet + rank ordering + DELETE-by-column) must run.

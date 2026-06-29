@@ -16,7 +16,7 @@ fn now_unix() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 // ---------- Repo commands ----------
 
@@ -43,6 +43,8 @@ pub fn repo_add(state: State<'_, AppState>, path: String) -> AppResult<Repo> {
                 &e.path,
                 None,
                 DEFAULT_PERMISSION_MODE,
+                "worktree",
+                None,
             );
         }
     }
@@ -51,7 +53,12 @@ pub fn repo_add(state: State<'_, AppState>, path: String) -> AppResult<Repo> {
 
 #[tauri::command]
 pub fn repos_list(state: State<'_, AppState>) -> AppResult<Vec<Repo>> {
-    state.db.list_repos()
+    Ok(state
+        .db
+        .list_repos()?
+        .into_iter()
+        .filter(|r| !is_internal_repo(r))
+        .collect())
 }
 
 #[tauri::command]
@@ -100,6 +107,14 @@ pub struct CreateWorktreeArgs {
     /// `DEFAULT_PERMISSION_MODE` ("bypassPermissions"). Validated server-side
     /// against the same whitelist as `worktree_set_permission_mode`.
     pub permission_mode: Option<String>,
+    /// "worktree" (default) or "orchestrator". Set internally; the frontend
+    /// never sends it for normal creates.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// The orchestrator that spawned this worktree, if any. Set by the
+    /// orchestration path so the fleet can be reconstructed.
+    #[serde(default)]
+    pub parent_id: Option<i64>,
 }
 
 /// Permission-mode values forwarded to `claude --permission-mode`.
@@ -202,6 +217,8 @@ fn create_worktree_core(db: &Db, args: CreateWorktreeArgs) -> AppResult<Worktree
         path.to_string_lossy().as_ref(),
         args.title.as_deref(),
         permission_mode,
+        args.kind.as_deref().unwrap_or("worktree"),
+        args.parent_id,
     )?;
     Ok(w)
 }
@@ -256,13 +273,20 @@ pub fn worktree_remove(
     force: bool,
 ) -> AppResult<()> {
     let w = state.db.get_worktree(id)?;
-    let repo = state.db.get_repo(w.repo_id)?;
     // Tear down the tmux session and the PTY client before removing the
     // worktree directory, otherwise tmux's pane cwd points at a vanishing dir
     // and the server logs get noisy.
     state.pty.kill(id).ok();
     pty::tmux_kill_session(id);
-    let _ = git::remove_worktree(Path::new(&repo.path), Path::new(&w.path), force);
+    if w.kind == "orchestrator" {
+        // An orchestrator isn't a git worktree — it's a plain scratch dir. Just
+        // remove the directory. Its fleet survives: the DB's ON DELETE SET NULL
+        // orphans children rather than cascading the delete to them.
+        let _ = std::fs::remove_dir_all(Path::new(&w.path));
+    } else {
+        let repo = state.db.get_repo(w.repo_id)?;
+        let _ = git::remove_worktree(Path::new(&repo.path), Path::new(&w.path), force);
+    }
     state.db.delete_worktree(id)?;
     Ok(())
 }
@@ -331,6 +355,7 @@ pub fn session_open(
         &w.permission_mode,
         &env_vars,
         None,
+        None,
     )?;
     state.db.touch_worktree(args.worktree_id)?;
     Ok(())
@@ -352,7 +377,9 @@ pub struct CreateTaskArgs {
 /// loops — cron, MCP, the REST API, or another agent can spawn a task and walk
 /// away; the monitor picks up its status and auto-titles it. Shared by the
 /// `task_create` command and `POST /api/tasks`.
+#[allow(clippy::too_many_arguments)]
 pub fn start_task_core(
+    app: &AppHandle,
     state: &AppState,
     repo_id: i64,
     prompt: &str,
@@ -360,6 +387,7 @@ pub fn start_task_core(
     base: Option<String>,
     title: Option<String>,
     permission_mode: Option<String>,
+    parent_id: Option<i64>,
 ) -> AppResult<Worktree> {
     let leaf = branch.unwrap_or_else(|| branch_from_prompt(prompt));
     // Create the worktree, retrying with a numeric suffix on branch collision
@@ -385,6 +413,8 @@ pub fn start_task_core(
             new_branch: true,
             path: None,
             permission_mode: permission_mode.clone(),
+            kind: None,
+            parent_id,
         };
         match create_worktree_core(&state.db, args) {
             Ok(created) => {
@@ -410,8 +440,13 @@ pub fn start_task_core(
         &w.permission_mode,
         &env_vars,
         Some(prompt),
+        None,
     )?;
     state.db.touch_worktree(w.id)?;
+    // Tell the desktop UI a worktree appeared so it shows up live (under its
+    // repo, and — if parent_id is set — in the spawning orchestrator's fleet)
+    // without waiting for a manual refresh. Mirrors the other worktree:* events.
+    let _ = app.emit("worktree:created", &w);
     Ok(w)
 }
 
@@ -443,11 +478,200 @@ fn branch_from_prompt(prompt: &str) -> String {
     }
 }
 
+// ---------- Orchestrator sessions ----------
+//
+// An orchestrator is a repo-less Claude session that directs a fleet of agents
+// across many repos. It's modeled as a worktree row (kind='orchestrator') so it
+// inherits the whole session stack — monitor, titles, transcript, PWA, input,
+// hibernation — for free. It lives in a Flock-managed scratch dir, owned by an
+// internal "Orchestrators" repo that exists only to satisfy the repo_id FK and
+// is hidden from the normal repo list.
+
+const ORCHESTRATOR_REPO_NAME: &str = "Orchestrators";
+
+/// The scratch area where orchestrator sessions live (one subdir each). A plain
+/// directory — not a git repo.
+fn orchestrators_root() -> AppResult<PathBuf> {
+    let dir = dirs::data_local_dir()
+        .ok_or_else(|| AppError::msg("no data local dir"))?
+        .join("Flock")
+        .join("orchestrators");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Get-or-create the internal repo that owns orchestrator sessions.
+fn ensure_internal_repo(db: &Db) -> AppResult<Repo> {
+    let root = orchestrators_root()?;
+    db.insert_repo(ORCHESTRATOR_REPO_NAME, root.to_string_lossy().as_ref())
+}
+
+/// True for the internal orchestrators repo (matched by its on-disk path), so
+/// the frontend repo list can hide it.
+fn is_internal_repo(repo: &Repo) -> bool {
+    orchestrators_root()
+        .map(|root| Path::new(&repo.path) == root)
+        .unwrap_or(false)
+}
+
+/// Write a project-local `.mcp.json` wiring the Flock MCP into the orchestrator.
+/// No token is stored here — the MCP server reads it from the data dir itself.
+fn write_orchestrator_mcp_config(dir: &Path, mjs: &Path) {
+    let cfg = serde_json::json!({
+        "mcpServers": {
+            "flock": {
+                "command": "node",
+                "args": [mjs.to_string_lossy()],
+            }
+        }
+    });
+    let body = serde_json::to_string_pretty(&cfg).unwrap_or_default();
+    if let Err(e) = std::fs::write(dir.join(".mcp.json"), body) {
+        eprintln!("flock: write .mcp.json for orchestrator: {e}");
+    }
+}
+
+/// The orchestrator's appended system prompt: what it is, the repos it can spawn
+/// into, and how to drive + watch its fleet via the Flock MCP tools.
+fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool) -> String {
+    let repo_list = if repos.is_empty() {
+        "(none registered yet — ask the user to add repos in Flock)".to_string()
+    } else {
+        repos
+            .iter()
+            .map(|r| format!("- {}", r.name))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let tools = if has_mcp {
+        "You have the Flock MCP tools:\n\
+         - task_create(repo, prompt): spawn an agent in a fresh worktree of `repo`. It appears in Flock's UI and is linked to you as a child (your fleet).\n\
+         - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input).\n\
+         - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
+         - task_input(id, text|key): send input to a child — answer a question, redirect it, or unblock it.\n\
+         - kb_search / kb_read / kb_ingest: your durable memory across sessions."
+    } else {
+        "The Flock MCP tools could not be auto-wired. Ask the user to enable Remote access in Flock settings and add the Flock MCP, then restart you."
+    };
+    format!(
+        "You are an ORCHESTRATOR session in Flock. You don't ship code yourself — \
+you direct a fleet of Claude agents, each working in its own git worktree/branch \
+in a real repo. You run in a scratch directory, so use it freely for plans and \
+notes, but the actual code changes happen in the agents you spawn.\n\n\
+Registered repos you can spawn agents into:\n{repo_list}\n\n{tools}\n\n\
+How to work: break the user's goal into per-repo tasks, spawn agents with \
+task_create (in parallel when independent), follow their progress with task_read, \
+and unblock any that need input with task_input. Don't sit idle — poll task_status \
+to see who needs you. Give each agent a crisp, self-contained prompt; it can't see \
+this conversation."
+    )
+}
+
+/// Create an orchestrator session: a repo-less scratch dir with the Flock MCP
+/// auto-wired and an orchestration system prompt. Shared by the command and any
+/// future headless caller.
+pub fn start_orchestrator_core(
+    app: &AppHandle,
+    state: &AppState,
+    prompt: &str,
+    title: Option<String>,
+    permission_mode: Option<String>,
+) -> AppResult<Worktree> {
+    let repo = ensure_internal_repo(&state.db)?;
+    let root = orchestrators_root()?;
+
+    // A unique scratch dir, slugged from the prompt.
+    let leaf = branch_from_prompt(prompt);
+    let mut path = root.join(&leaf);
+    let mut n = 2;
+    while path.exists() {
+        path = root.join(format!("{leaf}-{n}"));
+        n += 1;
+    }
+    std::fs::create_dir_all(&path)?;
+
+    // .claude/settings.local.json with enableAllProjectMcpServers so the project
+    // .mcp.json loads without a prompt.
+    bootstrap_claude_settings(Path::new(&repo.path), &path);
+
+    // Best-effort: install + wire the Flock MCP so the orchestrator can spawn
+    // and watch agents out of the box.
+    let mcp_path = crate::mcp::ensure_installed(app);
+    if let Some(mjs) = &mcp_path {
+        write_orchestrator_mcp_config(&path, mjs);
+    }
+
+    let pm = permission_mode.as_deref().unwrap_or(DEFAULT_PERMISSION_MODE);
+    validate_permission_mode(pm)?;
+
+    let w = state.db.insert_worktree(
+        repo.id,
+        &leaf,
+        path.to_string_lossy().as_ref(),
+        title.as_deref(),
+        pm,
+        "orchestrator",
+        None,
+    )?;
+
+    // The MCP talks to the REST API — make sure it's running.
+    let _ = crate::api::remote_start(app.clone());
+
+    let repos: Vec<Repo> = state
+        .db
+        .list_repos()?
+        .into_iter()
+        .filter(|r| !is_internal_repo(r))
+        .collect();
+    let sys = orchestrator_system_prompt(&repos, mcp_path.is_some());
+
+    let path_string = path.to_string_lossy().into_owned();
+    let env_vars = env_profiles::resolve_vars(&env_profiles::load(), &path_string);
+    pty::start_detached(w.id, &path, pm, &env_vars, Some(prompt), Some(&sys))?;
+    state.db.touch_worktree(w.id)?;
+    let _ = app.emit("worktree:created", &w);
+    Ok(w)
+}
+
+#[derive(Deserialize)]
+pub struct CreateOrchestratorArgs {
+    pub prompt: String,
+    pub title: Option<String>,
+    pub permission_mode: Option<String>,
+}
+
+/// Spawn an orchestrator session from the desktop. Returns the new worktree so
+/// the UI can open it.
+#[tauri::command]
+pub fn orchestrator_create(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    args: CreateOrchestratorArgs,
+) -> AppResult<Worktree> {
+    start_orchestrator_core(&app, &state, &args.prompt, args.title, args.permission_mode)
+}
+
+/// Every orchestrator session (kind='orchestrator'), across the internal repo.
+#[tauri::command]
+pub fn orchestrators_list(state: State<'_, AppState>) -> AppResult<Vec<Worktree>> {
+    Ok(state
+        .db
+        .list_all_worktrees()?
+        .into_iter()
+        .filter(|w| w.kind == "orchestrator")
+        .collect())
+}
+
 /// Spawn a task (worktree + prompted claude) from the desktop. Returns the new
 /// worktree so the UI can open it.
 #[tauri::command]
-pub fn task_create(state: State<'_, AppState>, args: CreateTaskArgs) -> AppResult<Worktree> {
+pub fn task_create(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    args: CreateTaskArgs,
+) -> AppResult<Worktree> {
     start_task_core(
+        &app,
         &state,
         args.repo_id,
         &args.prompt,
@@ -455,6 +679,7 @@ pub fn task_create(state: State<'_, AppState>, args: CreateTaskArgs) -> AppResul
         args.base,
         args.title,
         args.permission_mode,
+        None,
     )
 }
 
@@ -607,14 +832,18 @@ pub fn schedule_delete(state: State<'_, AppState>, id: i64) -> AppResult<()> {
 /// Fire a schedule immediately, out of cycle, and roll its next_run forward so
 /// the regular tick doesn't double-fire.
 #[tauri::command]
-pub fn schedule_run_now(state: State<'_, AppState>, id: i64) -> AppResult<Worktree> {
+pub fn schedule_run_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> AppResult<Worktree> {
     let s = state.db.get_schedule(id)?;
     let title = s
         .title
         .clone()
         .filter(|t| !t.trim().is_empty())
         .or_else(|| Some(format!("scheduled: {}", s.spec)));
-    let w = start_task_core(&state, s.repo_id, &s.prompt, None, None, title, None)?;
+    let w = start_task_core(&app, &state, s.repo_id, &s.prompt, None, None, title, None, None)?;
     if let Some(spec) = schedule::parse_spec(&s.spec) {
         let now = now_unix();
         let _ = state
