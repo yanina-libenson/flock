@@ -308,9 +308,12 @@ export function Sidebar(props: {
   // (worktree / agent) line up exactly. `mx-1.5` margin + the children wrapper's
   // `ml-[18px]` guide line give one consistent indent step at every level.
   const ROW =
-    "group/row relative flex items-center gap-2 mx-1.5 px-2 py-[5px] rounded-md cursor-pointer transition-colors";
+    "group/row relative flex items-center gap-1.5 mx-1 px-2 py-1 rounded-md cursor-pointer transition-colors";
+  // Children sit indented well past the parent's icon, with a guide line that
+  // drops from under it — so the parent visually "contains" them. The rows keep
+  // the full remaining width for their text.
   const CHILDREN_WRAP =
-    "ml-[18px] mt-0.5 mb-1 pl-0 border-l border-[var(--color-border)]";
+    "ml-[30px] mt-0.5 mb-1 border-l border-[var(--color-border)]";
 
   /// A small count chip (worktrees in a repo, agents in a fleet).
   const CountChip = (p: { n: number }) => (
