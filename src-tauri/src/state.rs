@@ -24,11 +24,13 @@ pub struct AppState {
     /// the frontend. The idle-hibernation monitor never reaps this one — you're
     /// looking at it.
     pub active_worktree: Mutex<Option<i64>>,
-    /// Per-worktree async locks serializing the REST resume-on-input path, so
-    /// two near-simultaneous inputs to a dead session resume it exactly once
-    /// (the second waits, then finds it live). Keyed by worktree id; entries are
-    /// created lazily and never removed (one cheap mutex per worktree).
-    pub input_locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-worktree locks serializing input delivery (resume-on-input + the
+    /// monitor's parent-wake), so two near-simultaneous deliveries to a dead
+    /// session resume it exactly once (the second waits, then finds it live).
+    /// Keyed by worktree id; created lazily, dropped on `worktree_remove`. Plain
+    /// `std::sync::Mutex` because every holder lives on a blocking thread
+    /// (spawn_blocking / the monitor's wake thread) — never held across `.await`.
+    pub input_locks: Mutex<HashMap<i64, Arc<Mutex<()>>>>,
 }
 
 impl AppState {

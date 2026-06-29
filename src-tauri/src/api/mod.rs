@@ -316,34 +316,16 @@ fn map_key(key: &str) -> Option<&'static str> {
     })
 }
 
-/// How long to wait for a resumed session's Claude TUI to be ready before
-/// delivering input. Generous on purpose — a cold `claude --resume` reloads
-/// global config plus the transcript. On timeout we send anyway (the session
-/// is live), so this only ever delays a send, never fails it.
-const RESUME_READY_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// Why resume-on-input couldn't deliver. Every variant maps to a *clear* status
-/// with a message — never the opaque 502 that a dead session used to produce.
-enum InputError {
-    /// No worktree row for this id.
-    NotFound,
-    /// Worktree exists but has no persisted Claude session to resume.
-    NoResumable,
-    /// Resuming the session (tmux spawn) failed.
-    Spawn(String),
-    /// Session is live but tmux refused the keystroke — genuinely unexpected.
-    SendFailed,
-}
-
 /// Send input to a session: `{"text": "..."}` types literally, `{"key":"esc"}`
 /// sends a special key. The agent's reply shows up on the SSE stream.
 ///
 /// Resilient to a dead session: if the worktree's tmux session is gone
 /// (hibernated by the monitor, reaped under memory pressure, lost to a reboot),
 /// it is resumed transparently from Claude Code's on-disk transcript
-/// (`claude --resume`) and the input is delivered once the session is ready. So
-/// sending input "just works" whether the session was alive, idle, or dead. A
-/// per-worktree lock makes two near-simultaneous inputs resume it exactly once.
+/// (`claude --resume`) and the input is delivered once the session is ready —
+/// so sending input "just works" whether the session was alive, idle, or dead.
+/// The resume-aware delivery (and its per-worktree lock) lives in
+/// `commands::deliver_input`, shared with the monitor's parent-wake.
 async fn input(
     State(ctx): State<ApiCtx>,
     Path(id): Path<i64>,
@@ -360,72 +342,13 @@ async fn input(
         return (StatusCode::BAD_REQUEST, "missing text or key").into_response();
     };
     // Only literal text can be auto-submitted; a bare key is already its own
-    // action. The Enter goes as a separate send-keys after a short pause so the
-    // TUI has finished ingesting the typed text before it's submitted (without
-    // the gap, a fast Enter can be swallowed or land as a newline).
+    // action.
     let submit = literal && body.submit.unwrap_or(false);
-
-    // Serialize input per worktree so two near-simultaneous calls to a dead
-    // session resume it once (the second waits on the lock, then sees it live
-    // and takes the fast path).
-    let lock = {
-        let st = ctx.app.state::<AppState>();
-        let mut locks = st.input_locks.lock().unwrap();
-        locks
-            .entry(id)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    };
-    let _guard = lock.lock().await;
 
     let app = ctx.app.clone();
     let res = tokio::task::spawn_blocking(move || {
         let st = app.state::<AppState>();
-        // Resume the persisted session if tmux has none live for this worktree.
-        // The live path is left untouched — no resume, no readiness wait.
-        if !crate::pty::tmux_list_sessions().contains(&id) {
-            let w = st.db.get_worktree(id).map_err(|_| InputError::NotFound)?;
-            let cwd = std::path::Path::new(&w.path);
-            let resume_id =
-                crate::pty::latest_session_id(cwd).ok_or(InputError::NoResumable)?;
-            // Resolve env-profile vars by the repo's path, mirroring
-            // `session_open`'s desktop reattach.
-            let env_vars = match st.db.get_repo(w.repo_id) {
-                Ok(repo) => crate::env_profiles::resolve_vars(
-                    &crate::env_profiles::load(),
-                    &repo.path,
-                ),
-                Err(_) => Vec::new(),
-            };
-            // Headless resume — no PTY client (the REST caller has no viewer),
-            // no `--append-system-prompt` (mirrors the desktop reattach; the
-            // conversation comes back via `--resume`).
-            crate::pty::start_detached(
-                id,
-                cwd,
-                &w.permission_mode,
-                &env_vars,
-                None,
-                None,
-                Some(&resume_id),
-            )
-            .map_err(|e| InputError::Spawn(e.to_string()))?;
-            // Wait for Claude's input UI before typing; on timeout, send anyway.
-            crate::pty::wait_until_ready(id, RESUME_READY_TIMEOUT);
-        }
-
-        let sent = crate::pty::tmux_send(id, literal, &payload);
-        let sent = if sent && submit {
-            std::thread::sleep(Duration::from_millis(120));
-            crate::pty::tmux_send(id, false, "Enter")
-        } else {
-            sent
-        };
-        if sent {
-            Ok(())
-        } else {
-            Err(InputError::SendFailed)
-        }
+        crate::commands::deliver_input(&st, id, literal, &payload, submit)
     })
     .await;
 
@@ -438,25 +361,26 @@ async fn input(
     }
 }
 
-/// Map an `InputError` to a clear HTTP response. A dead, unknown, or
+/// Map a `DeliverError` to a clear HTTP response. A dead, unknown, or
 /// unresumable session yields 404 / 409 / 500 with a message — never an opaque
 /// 502 (the pre-fix failure mode that made callers think the API was down).
-fn input_error_response(err: InputError, id: i64) -> Response {
+fn input_error_response(err: crate::commands::DeliverError, id: i64) -> Response {
+    use crate::commands::DeliverError;
     match err {
-        InputError::NotFound => {
+        DeliverError::NotFound => {
             (StatusCode::NOT_FOUND, format!("worktree {id} not found")).into_response()
         }
-        InputError::NoResumable => (
+        DeliverError::NoResumable => (
             StatusCode::CONFLICT,
             format!("worktree {id} has no resumable session"),
         )
             .into_response(),
-        InputError::Spawn(e) => (
+        DeliverError::Spawn(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("worktree {id} resume failed: {e}"),
         )
             .into_response(),
-        InputError::SendFailed => (
+        DeliverError::SendFailed => (
             StatusCode::BAD_GATEWAY,
             format!("worktree {id} input delivery failed"),
         )
@@ -1118,31 +1042,32 @@ mod tests {
 
     #[test]
     fn input_errors_map_to_clear_codes_never_502() {
+        use crate::commands::DeliverError;
         // A dead / unknown / unresumable session must surface a clear status,
         // never the opaque 502 that made the orchestrator escalate to infra.
         assert_eq!(
-            input_error_response(InputError::NotFound, 1).status(),
+            input_error_response(DeliverError::NotFound, 1).status(),
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            input_error_response(InputError::NoResumable, 2).status(),
+            input_error_response(DeliverError::NoResumable, 2).status(),
             StatusCode::CONFLICT
         );
         assert_eq!(
-            input_error_response(InputError::Spawn("boom".into()), 3).status(),
+            input_error_response(DeliverError::Spawn("boom".into()), 3).status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
         for e in [
-            InputError::NotFound,
-            InputError::NoResumable,
-            InputError::Spawn("x".into()),
+            DeliverError::NotFound,
+            DeliverError::NoResumable,
+            DeliverError::Spawn("x".into()),
         ] {
             assert_ne!(input_error_response(e, 9).status(), StatusCode::BAD_GATEWAY);
         }
         // SendFailed (live session, tmux refused the key) is the only residual
         // 502 — genuinely unexpected, not the dead-session path.
         assert_eq!(
-            input_error_response(InputError::SendFailed, 4).status(),
+            input_error_response(DeliverError::SendFailed, 4).status(),
             StatusCode::BAD_GATEWAY
         );
     }

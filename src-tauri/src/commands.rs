@@ -8,7 +8,8 @@ use crate::state::AppState;
 use base64::Engine;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -738,6 +739,88 @@ pub fn worktree_resize_window(worktree_id: i64, cols: u16, rows: u16) -> AppResu
 pub fn worktree_set_title(state: State<'_, AppState>, id: i64, title: String) -> AppResult<()> {
     state.db.update_worktree_title(id, &title)?;
     Ok(())
+}
+
+/// How long to wait for a resumed session's Claude TUI to be ready before
+/// delivering input. Generous — a cold `claude --resume` reloads global config
+/// plus the transcript. On timeout we send anyway (the session is live), so this
+/// only ever delays a delivery, never fails it.
+const RESUME_READY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Why delivering input couldn't reach the agent. Each variant maps to a clear
+/// outcome — never an opaque 502 (see `api::input_error_response`).
+#[derive(Debug)]
+pub enum DeliverError {
+    /// No worktree row for this id.
+    NotFound,
+    /// Worktree exists but has no persisted Claude session to resume.
+    NoResumable,
+    /// Resuming the session (tmux spawn) failed.
+    Spawn(String),
+    /// Session is live but tmux refused the keystroke — genuinely unexpected.
+    SendFailed,
+}
+
+/// Deliver keystrokes to a worktree's Claude session, resuming the persisted
+/// session from disk (`claude --resume`) if its tmux session has died (monitor
+/// hibernation, memory reaping, reboot). Blocking: tmux calls plus a readiness
+/// poll up to `RESUME_READY_TIMEOUT`. A per-worktree lock serializes concurrent
+/// callers so a dead session is resumed exactly once (the second waits, then
+/// finds it live). Shared by the REST input handler and the monitor's
+/// parent-wake — **call from a blocking context** (spawn_blocking or a dedicated
+/// thread), never the monitor poll loop.
+///
+/// `literal` types `payload` verbatim; otherwise `payload` is a tmux key name.
+/// `submit` presses Enter after literal text (a small gap lets the TUI ingest
+/// the text first), turning the input into a submitted turn.
+pub fn deliver_input(
+    state: &AppState,
+    id: i64,
+    literal: bool,
+    payload: &str,
+    submit: bool,
+) -> Result<(), DeliverError> {
+    // Per-worktree lock so concurrent deliveries to a dead session resume once.
+    let lock = {
+        let mut locks = state.input_locks.lock().unwrap();
+        locks
+            .entry(id)
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let _guard = lock.lock().unwrap();
+
+    // Resume the persisted session if tmux has none live for this worktree. The
+    // live path is untouched — no resume, no readiness wait.
+    if !pty::tmux_list_sessions().contains(&id) {
+        let w = state.db.get_worktree(id).map_err(|_| DeliverError::NotFound)?;
+        let cwd = Path::new(&w.path);
+        let resume_id = pty::latest_session_id(cwd).ok_or(DeliverError::NoResumable)?;
+        // Env-profile vars by the repo's path, mirroring `session_open`.
+        let env_vars = match state.db.get_repo(w.repo_id) {
+            Ok(repo) => env_profiles::resolve_vars(&env_profiles::load(), &repo.path),
+            Err(_) => Vec::new(),
+        };
+        // Headless resume — no PTY client (no viewer), no `--append-system-prompt`
+        // (mirrors the desktop reattach; `--resume` restores the conversation).
+        pty::start_detached(id, cwd, &w.permission_mode, &env_vars, None, None, Some(&resume_id))
+            .map_err(|e| DeliverError::Spawn(e.to_string()))?;
+        // Wait for Claude's input UI before typing; on timeout, send anyway.
+        pty::wait_until_ready(id, RESUME_READY_TIMEOUT);
+    }
+
+    let sent = pty::tmux_send(id, literal, payload);
+    let sent = if sent && submit {
+        std::thread::sleep(Duration::from_millis(120));
+        pty::tmux_send(id, false, "Enter")
+    } else {
+        sent
+    };
+    if sent {
+        Ok(())
+    } else {
+        Err(DeliverError::SendFailed)
+    }
 }
 
 #[tauri::command]
