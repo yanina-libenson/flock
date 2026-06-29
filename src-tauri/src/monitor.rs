@@ -504,12 +504,12 @@ fn wake_parent(app: &AppHandle, parent_id: i64, child: &crate::db::Worktree, rea
         .unwrap_or_else(|| child.branch.clone());
     let child_id = child.id;
     let state_word = match reason {
-        WakeReason::NeedsInput => "necesita tu atención (needs_input)",
-        WakeReason::FinishedTurn => "terminó su turno (idle)",
+        WakeReason::NeedsInput => "needs your attention (needs_input)",
+        WakeReason::FinishedTurn => "finished its turn (idle)",
     };
     let msg = format!(
-        "🔔 Flock: tu tarea hija #{child_id} (\"{label}\") {state_word} — \
-         revisala con task_read/task_status."
+        "🔔 Flock: your child task #{child_id} (\"{label}\") {state_word} — \
+         check it with task_read/task_status."
     );
     let app = app.clone();
     std::thread::spawn(move || {
