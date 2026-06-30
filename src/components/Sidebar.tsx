@@ -224,7 +224,7 @@ export function Sidebar(props: {
       return {
         label: "Working",
         tooltip: "Claude is working…",
-        cls: PILL_TONES.accent,
+        cls: PILL_TONES.success,
       };
     return pr ? prPill(pr) : null;
   }
