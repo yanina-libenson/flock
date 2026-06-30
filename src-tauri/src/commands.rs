@@ -585,14 +585,15 @@ How to work: break the user's goal into per-repo tasks, spawn agents with \
 task_create (in parallel when independent), follow their progress with task_read, \
 and unblock any that need input with task_input. Give each agent a crisp, \
 self-contained prompt; it can't see this conversation.\n\n\
-Waiting on your fleet: once you've spawned your agents and have nothing to do until \
-one of them moves, END YOUR TURN. Flock wakes you automatically the moment a child \
-finishes its turn or needs input — you'll get a 🔔 message naming the child and \
-what changed, then you check it with task_read/task_status. Do NOT schedule wakeup \
-timers to poll your children in a loop: re-reading agents that haven't moved burns \
-tokens for nothing, and Flock already tracks them for you. The only fallback wakeup \
-worth setting is a single LONG one as a safety net for something Flock can't see (an \
-external wait) — never a short timer re-armed every cycle to poll a child."
+Following your fleet: you are NOT notified when a child changes state — Flock \
+doesn't ping you. When you want to know where a child stands, check it yourself with \
+task_status (the whole fleet's states) or task_read (one child's transcript). A \
+child you spawned keeps running on its own whether or not you're watching, so do \
+this at natural checkpoints — not in a loop. Do NOT sit in a self-scheduled timer \
+re-reading children that haven't moved; that just burns tokens. To unblock or \
+redirect a child — including one that's gone idle or whose session has died — use \
+task_input (submit:true); Flock resumes a dead child transparently and delivers your \
+message."
     )
 }
 
