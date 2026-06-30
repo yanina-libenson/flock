@@ -248,7 +248,7 @@ export function Sidebar(props: {
       changes_requested: {
         label: "Changes",
         tooltip: "Changes requested — address review feedback",
-        tone: "warn",
+        tone: "accent",
       },
       ci_failed: {
         label: "CI failed",
@@ -263,7 +263,7 @@ export function Sidebar(props: {
       comments_to_address: {
         label: "Comments",
         tooltip: "Unresolved review comments to address",
-        tone: "warn",
+        tone: "accent",
       },
       monitoring_ci: {
         label: "CI",
