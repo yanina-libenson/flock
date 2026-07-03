@@ -1,6 +1,6 @@
 import { createStore } from "solid-js/store";
 import { createEffect, createSignal } from "solid-js";
-import type { PrStatus, Repo, Worktree, WorktreeStatus } from "./ipc";
+import type { PrRef, PrStatus, Repo, Worktree, WorktreeStatus } from "./ipc";
 
 export interface AppStoreState {
   repos: Repo[];
@@ -28,6 +28,11 @@ export interface AppStoreState {
   /// PR lifecycle status per worktree id, from the backend PR poller. Absent =
   /// no PR and nothing to submit (no badge shown).
   prStatusByWorktree: Record<number, PrStatus>;
+  /// Full list of PRs opened from each worktree's branch, for the persistent
+  /// footer. Fetched on demand (when a pane activates) and refreshed when the
+  /// poller reports a status change. Orchestrators aggregate their fleet's
+  /// entries at render time rather than storing their own.
+  prsByWorktree: Record<number, PrRef[]>;
 }
 
 const PERSIST_KEY = "flock.panes.v1";
@@ -62,6 +67,7 @@ const [store, setStore] = createStore<AppStoreState>({
   statusByWorktree: {},
   hibernationNoteByWorktree: {},
   prStatusByWorktree: {},
+  prsByWorktree: {},
 });
 
 // Persist on any change to pane state.
@@ -251,6 +257,11 @@ export function setWorktreePrStatus(
   } else {
     setStore("prStatusByWorktree", worktreeId, status);
   }
+}
+
+/// Replace the stored PR list for a worktree (fetched from `worktree_list_prs`).
+export function setWorktreePrs(worktreeId: number, prs: PrRef[]) {
+  setStore("prsByWorktree", worktreeId, prs);
 }
 
 /// Apply a title pushed from the backend monitor to the matching worktree,
