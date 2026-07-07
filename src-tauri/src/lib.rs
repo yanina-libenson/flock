@@ -51,7 +51,6 @@ pub fn run() {
             commands::worktree_dirty,
             commands::worktree_current_branch,
             commands::worktree_refresh_pr_status,
-            commands::worktree_list_prs,
             commands::worktree_set_permission_mode,
             commands::worktree_set_title,
             commands::worktree_resize_window,

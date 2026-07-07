@@ -341,22 +341,6 @@ pub fn worktree_refresh_pr_status(
     Ok(crate::pr::compute(Path::new(&w.path), &default_branch))
 }
 
-/// Every PR opened from a worktree's branch (open/draft/merged/closed), newest
-/// first — the persistent PR list shown at the foot of the worktree view.
-/// Orchestrators are repo-less scratch sessions with no branch, so they never
-/// have PRs of their own; the frontend aggregates their fleet's PRs instead.
-#[tauri::command]
-pub fn worktree_list_prs(
-    state: State<'_, AppState>,
-    id: i64,
-) -> AppResult<Vec<crate::pr::PrRef>> {
-    let w = state.db.get_worktree(id)?;
-    if w.kind == "orchestrator" {
-        return Ok(Vec::new());
-    }
-    Ok(crate::pr::list_prs(Path::new(&w.path), &w.branch))
-}
-
 // ---------- Session / PTY commands ----------
 //
 // "Session" here is a loose term — the real session lives inside tmux.

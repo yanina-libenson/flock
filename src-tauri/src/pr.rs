@@ -66,19 +66,6 @@ pub struct PrStatusEvent {
     pub status: Option<PrStatus>,
 }
 
-/// One PR opened from a worktree's branch. The persistent footer lists every
-/// one of these (open, draft, merged, or closed) so a worktree's PR history
-/// doesn't vanish once it merges. `state` is `gh`'s raw PR state
-/// (OPEN/MERGED/CLOSED); `is_draft` refines OPEN into a draft.
-#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
-pub struct PrRef {
-    pub number: i64,
-    pub title: String,
-    pub state: String,
-    pub url: String,
-    pub is_draft: bool,
-}
-
 /// Spawn the background poller. Runs for the life of the app on its own thread;
 /// every poll is a cheap no-op when `gh` is unavailable.
 pub fn spawn(app: AppHandle) {
@@ -212,55 +199,6 @@ pub fn compute(path: &Path, default_branch: &str) -> Option<PrStatus> {
         return mk(TaskState::ReadyToMerge);
     }
     mk(TaskState::WaitingReview)
-}
-
-/// Every PR opened from `branch`, newest first. This is "the PRs created by
-/// this worktree" — GitHub keys a PR to its head branch, and a worktree is one
-/// branch. Includes merged/closed PRs (`--state all`) so the footer keeps a
-/// persistent record. Empty on any failure (gh missing, unauthenticated,
-/// non-GitHub remote) — degrades silently, same as `compute`.
-pub fn list_prs(path: &Path, branch: &str) -> Vec<PrRef> {
-    let Some(out) = gh(
-        path,
-        &[
-            "pr",
-            "list",
-            "--head",
-            branch,
-            "--state",
-            "all",
-            "--json",
-            "number,title,state,url,isDraft",
-        ],
-    ) else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let Ok(Value::Array(items)) = serde_json::from_slice::<Value>(&out.stdout) else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|v| {
-            Some(PrRef {
-                number: v.get("number").and_then(Value::as_i64)?,
-                title: v
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                state: v
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                url: v.get("url").and_then(Value::as_str)?.to_string(),
-                is_draft: v.get("isDraft").and_then(Value::as_bool).unwrap_or(false),
-            })
-        })
-        .collect()
 }
 
 /// Count of unresolved review threads (human or bot) on the PR. 0 on any

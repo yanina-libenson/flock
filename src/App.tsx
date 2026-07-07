@@ -10,7 +10,6 @@ import {
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalPane } from "./components/TerminalPane";
-import { PrFooter } from "./components/PrFooter";
 import { NewWorktreeModal } from "./components/NewWorktreeModal";
 import { NewOrchestratorModal } from "./components/NewOrchestratorModal";
 import { SettingsModal, remoteEnabledPref } from "./components/SettingsModal";
@@ -407,12 +406,6 @@ function App() {
                 }}
               </For>
             </div>
-            {/* Persistent PR list for the active pane — a worktree's own PRs,
-                or an orchestrator's whole-fleet aggregation. Collapses to zero
-                height when there are none, so it never steals terminal space. */}
-            <Show when={activeWorktree()}>
-              {(w) => <PrFooter worktree={w()} />}
-            </Show>
           </Show>
         </main>
       </div>

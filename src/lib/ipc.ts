@@ -62,16 +62,6 @@ export interface PrStatus {
   url: string | null;
 }
 
-/// One PR opened from a worktree's branch (mirrors Rust `PrRef`). `state` is
-/// gh's raw PR state ("OPEN" | "MERGED" | "CLOSED"); `is_draft` refines OPEN.
-export interface PrRef {
-  number: number;
-  title: string;
-  state: string;
-  url: string;
-  is_draft: boolean;
-}
-
 export interface CreateWorktreeArgs {
   repo_id: number;
   branch: string;
@@ -118,10 +108,6 @@ export const worktreeSetTitle = (id: number, title: string) =>
   invoke<void>("worktree_set_title", { id, title });
 export const worktreeRefreshPrStatus = (id: number) =>
   invoke<PrStatus | null>("worktree_refresh_pr_status", { id });
-/// Every PR opened from a worktree's branch (open/draft/merged/closed). Empty
-/// for orchestrators (no branch) and when gh is unavailable.
-export const worktreeListPrs = (id: number) =>
-  invoke<PrRef[]>("worktree_list_prs", { id });
 export const worktreeResizeWindow = (id: number, cols: number, rows: number) =>
   invoke<void>("worktree_resize_window", { worktreeId: id, cols, rows });
 
