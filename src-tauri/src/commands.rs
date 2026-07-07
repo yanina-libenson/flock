@@ -606,6 +606,7 @@ pub fn start_orchestrator_core(
     prompt: &str,
     title: Option<String>,
     permission_mode: Option<String>,
+    env: Option<String>,
 ) -> AppResult<Worktree> {
     let repo = ensure_internal_repo(&state.db)?;
     let root = orchestrators_root()?;
@@ -655,8 +656,13 @@ pub fn start_orchestrator_core(
         .collect();
     let sys = orchestrator_system_prompt(&repos, mcp_path.is_some());
 
-    let path_string = path.to_string_lossy().into_owned();
-    let env_vars = env_profiles::resolve_vars(&env_profiles::load(), &path_string);
+    // An orchestrator has no repo path to match a binding on, so honor its
+    // explicitly chosen profile; fall back to path-based resolution otherwise.
+    let cfg = env_profiles::load();
+    let env_vars = match env.as_deref() {
+        Some(name) => env_profiles::resolve_vars_by_name(&cfg, Some(name)),
+        None => env_profiles::resolve_vars(&cfg, &path.to_string_lossy()),
+    };
     pty::start_detached(w.id, &path, pm, &env_vars, Some(prompt), Some(&sys), None)?;
     state.db.touch_worktree(w.id)?;
     let _ = app.emit("worktree:created", &w);
@@ -668,6 +674,9 @@ pub struct CreateOrchestratorArgs {
     pub prompt: String,
     pub title: Option<String>,
     pub permission_mode: Option<String>,
+    /// Name of the env profile to run under. None resolves by scratch path
+    /// (i.e. the default account).
+    pub env: Option<String>,
 }
 
 /// Spawn an orchestrator session from the desktop. Returns the new worktree so
@@ -678,7 +687,14 @@ pub fn orchestrator_create(
     state: State<'_, AppState>,
     args: CreateOrchestratorArgs,
 ) -> AppResult<Worktree> {
-    start_orchestrator_core(&app, &state, &args.prompt, args.title, args.permission_mode)
+    start_orchestrator_core(
+        &app,
+        &state,
+        &args.prompt,
+        args.title,
+        args.permission_mode,
+        args.env,
+    )
 }
 
 /// Every orchestrator session (kind='orchestrator'), across the internal repo.

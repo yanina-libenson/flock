@@ -99,6 +99,20 @@ pub fn resolve_vars(cfg: &EnvConfig, repo_path: &str) -> Vec<(String, String)> {
     Vec::new()
 }
 
+/// Resolve the env vars for an explicitly named environment (e.g. an
+/// orchestrator's chosen profile, which has no repo path to match on). Empty
+/// when the name is None or doesn't match a defined environment.
+pub fn resolve_vars_by_name(cfg: &EnvConfig, name: Option<&str>) -> Vec<(String, String)> {
+    let Some(name) = name else {
+        return Vec::new();
+    };
+    cfg.environments
+        .iter()
+        .find(|e| e.name == name)
+        .map(|e| e.vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +175,17 @@ mod tests {
         assert!(path_is_prefix("/Code/Personal", "/Code/Personal"));
         assert!(!path_is_prefix("/Code/Personal", "/Code/PersonalX/x"));
         assert!(!path_is_prefix("", "/anything"));
+    }
+
+    #[test]
+    fn by_name_returns_that_env_vars() {
+        let v = resolve_vars_by_name(&cfg(), Some("Personal-A"));
+        assert_eq!(v, vec![("RENDER_API_KEY".to_string(), "tok_a".to_string())]);
+    }
+
+    #[test]
+    fn by_name_unknown_or_none_is_empty() {
+        assert!(resolve_vars_by_name(&cfg(), Some("Nope")).is_empty());
+        assert!(resolve_vars_by_name(&cfg(), None).is_empty());
     }
 }

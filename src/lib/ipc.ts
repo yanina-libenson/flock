@@ -247,6 +247,8 @@ export interface CreateOrchestratorArgs {
   prompt: string;
   title?: string | null;
   permission_mode?: PermissionMode | null;
+  /// Env profile name to run under. Null = default account (resolve by path).
+  env?: string | null;
 }
 
 /// Spawn a repo-less orchestrator session (Flock MCP auto-wired). Returns the

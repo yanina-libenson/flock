@@ -1,11 +1,25 @@
 import { createSignal, Show, onMount, For } from "solid-js";
 import {
   orchestratorCreate,
+  envConfigGet,
   DEFAULT_PERMISSION_MODE,
   type PermissionMode,
+  type FlockEnvironment,
 } from "../lib/ipc";
 import { appStore, addWorktree, openPane } from "../lib/store";
 import { Network, X, ShieldOff } from "lucide-solid";
+
+/// The env profile pre-selected for new orchestrators. Falls back to the first
+/// available profile when this exact name isn't defined.
+const DEFAULT_ENV = "Thanx";
+
+/// Which Claude account a profile resolves to, for the caption under the select.
+function accountLabel(env: FlockEnvironment | undefined): string {
+  const dir = env?.vars?.CLAUDE_CONFIG_DIR ?? "";
+  return dir.includes("claude-personal")
+    ? "personal account"
+    : "work account (default)";
+}
 
 /// Create a repo-less orchestrator session: a Claude that directs a fleet of
 /// agents across the registered repos. Mirrors NewWorktreeModal's styling.
@@ -14,9 +28,13 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
   const [title, setTitle] = createSignal("");
   const [autoApprove, setAutoApprove] = createSignal(true);
   const [submitting, setSubmitting] = createSignal(false);
+  const [envs, setEnvs] = createSignal<FlockEnvironment[]>([]);
+  const [selectedEnv, setSelectedEnv] = createSignal("");
 
   const permissionMode = (): PermissionMode =>
     autoApprove() ? DEFAULT_PERMISSION_MODE : "default";
+
+  const selectedEnvObj = () => envs().find((e) => e.name === selectedEnv());
 
   onMount(() => {
     setTimeout(() => {
@@ -25,6 +43,15 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
         | null;
       el?.focus();
     }, 0);
+    envConfigGet()
+      .then((cfg) => {
+        setEnvs(cfg.environments);
+        const names = cfg.environments.map((e) => e.name);
+        setSelectedEnv(
+          names.includes(DEFAULT_ENV) ? DEFAULT_ENV : (names[0] ?? ""),
+        );
+      })
+      .catch((e) => console.error("envConfigGet failed", e));
   });
 
   function onSubmit(e?: Event) {
@@ -36,6 +63,7 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
       prompt: mission,
       title: title().trim() || null,
       permission_mode: permissionMode(),
+      env: selectedEnv() || null,
     })
       .then((w) => {
         addWorktree(w);
@@ -114,6 +142,26 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
               onInput={(e) => setTitle(e.currentTarget.value)}
             />
           </label>
+
+          <Show when={envs().length > 0}>
+            <label class="block">
+              <span class="block text-[11px] uppercase tracking-wide font-semibold text-[var(--color-fg-muted)] mb-1.5">
+                Profile
+              </span>
+              <select
+                class="w-full rounded-md bg-[var(--color-bg)] border border-[var(--color-border)] focus:border-[var(--color-accent)] px-3 py-2 text-[13px] text-[var(--color-fg)] outline-none transition"
+                value={selectedEnv()}
+                onChange={(e) => setSelectedEnv(e.currentTarget.value)}
+              >
+                <For each={envs()}>
+                  {(env) => <option value={env.name}>{env.name}</option>}
+                </For>
+              </select>
+              <span class="block mt-1 text-[11px] text-[var(--color-fg-dim)]">
+                Runs under the {accountLabel(selectedEnvObj())}.
+              </span>
+            </label>
+          </Show>
 
           <div>
             <span class="block text-[11px] uppercase tracking-wide font-semibold text-[var(--color-fg-muted)] mb-1.5">
