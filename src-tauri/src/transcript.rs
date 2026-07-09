@@ -1,6 +1,10 @@
 //! Reads a worktree's Claude conversation from its session JSONL — the
 //! structured transcript Claude Code writes per cwd at
-//! `~/.claude/projects/<slug>/<session>.jsonl`. Powers the PWA "Reader" view:
+//! `<config>/projects/<slug>/<session>.jsonl`, where `<config>` is
+//! `$CLAUDE_CONFIG_DIR` when set, else `~/.claude`. Flock binds a distinct
+//! `CLAUDE_CONFIG_DIR` per env profile (e.g. a separate Claude for the Personal
+//! folder), so both resume and the Reader must look under the session's own
+//! config dir — not a hardcoded `~/.claude`. Powers the PWA "Reader" view:
 //! a clean, reflowable chat that's fully decoupled from the terminal (read-only
 //! file access — never touches the live tmux session or its width).
 
@@ -24,13 +28,34 @@ pub fn cwd_slug(path: &str) -> String {
         .collect()
 }
 
+/// The `CLAUDE_CONFIG_DIR` from a session's resolved env vars, if any. Flock
+/// runs separate Claude configs per folder (work vs the Personal folder), so a
+/// worktree's transcripts can live under a non-default root; callers pass this
+/// to `session_file_for` / `latest_session_id` so resume and the Reader look in
+/// the right place.
+pub fn config_dir_from_env(env_vars: &[(String, String)]) -> Option<&str> {
+    env_vars
+        .iter()
+        .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+        .map(|(_, v)| v.as_str())
+}
+
+/// The `projects` root for a session: `<CLAUDE_CONFIG_DIR>/projects` when set,
+/// else `~/.claude/projects`. Mirrors how Claude Code chooses where to write
+/// transcripts.
+fn projects_dir(config_dir: Option<&str>) -> Option<PathBuf> {
+    match config_dir {
+        Some(d) => Some(PathBuf::from(d).join("projects")),
+        None => Some(dirs::home_dir()?.join(".claude/projects")),
+    }
+}
+
 /// Locate the active session file for a worktree: Claude encodes the cwd as a
-/// slug under `~/.claude/projects`. The newest `.jsonl` in that dir is the live
-/// session.
-pub fn session_file_for(worktree_path: &str) -> Option<PathBuf> {
-    let dir = dirs::home_dir()?
-        .join(".claude/projects")
-        .join(cwd_slug(worktree_path));
+/// slug under `<config>/projects`. The newest `.jsonl` in that dir is the live
+/// session. `config_dir` is the session's `CLAUDE_CONFIG_DIR` (see
+/// `config_dir_from_env`); `None` falls back to `~/.claude`.
+pub fn session_file_for(worktree_path: &str, config_dir: Option<&str>) -> Option<PathBuf> {
+    let dir = projects_dir(config_dir)?.join(cwd_slug(worktree_path));
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(&dir).ok()?.flatten() {
         let path = entry.path();
@@ -121,6 +146,31 @@ mod tests {
         assert_eq!(
             super::cwd_slug("/Users/y/Library/Application Support/Flock/orchestrators/kyoto"),
             "-Users-y-Library-Application-Support-Flock-orchestrators-kyoto"
+        );
+    }
+
+    #[test]
+    fn config_dir_from_env_reads_claude_config_dir() {
+        let env = vec![
+            ("GH_CONFIG_DIR".to_string(), "/x/gh".to_string()),
+            ("CLAUDE_CONFIG_DIR".to_string(), "/Users/y/.claude-personal".to_string()),
+        ];
+        assert_eq!(config_dir_from_env(&env), Some("/Users/y/.claude-personal"));
+        assert_eq!(config_dir_from_env(&[]), None);
+    }
+
+    #[test]
+    fn projects_dir_honors_config_dir() {
+        // A set CLAUDE_CONFIG_DIR roots transcripts under <dir>/projects — the
+        // work-vs-Personal split that broke resume for Personal worktrees.
+        assert_eq!(
+            projects_dir(Some("/Users/y/.claude-personal")),
+            Some(PathBuf::from("/Users/y/.claude-personal/projects"))
+        );
+        // No override falls back to ~/.claude/projects.
+        assert_eq!(
+            projects_dir(None),
+            dirs::home_dir().map(|h| h.join(".claude/projects"))
         );
     }
 }

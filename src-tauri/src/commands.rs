@@ -837,12 +837,15 @@ pub fn deliver_input(
     if !pty::tmux_list_sessions().contains(&id) {
         let w = state.db.get_worktree(id).map_err(|_| DeliverError::NotFound)?;
         let cwd = Path::new(&w.path);
-        let resume_id = pty::latest_session_id(cwd).ok_or(DeliverError::NoResumable)?;
-        // Env-profile vars by the repo's path, mirroring `session_open`.
+        // Env-profile vars by the repo's path, mirroring `session_open`. Resolved
+        // first so the resume lookup uses the session's own CLAUDE_CONFIG_DIR.
         let env_vars = match state.db.get_repo(w.repo_id) {
             Ok(repo) => env_profiles::resolve_vars(&env_profiles::load(), &repo.path),
             Err(_) => Vec::new(),
         };
+        let resume_id =
+            pty::latest_session_id(cwd, crate::transcript::config_dir_from_env(&env_vars))
+                .ok_or(DeliverError::NoResumable)?;
         // Headless resume — no PTY client (no viewer), no `--append-system-prompt`
         // (mirrors the desktop reattach; `--resume` restores the conversation).
         pty::start_detached(id, cwd, &w.permission_mode, &env_vars, None, None, Some(&resume_id))

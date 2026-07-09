@@ -580,7 +580,18 @@ async fn transcript_h(
     let res = tokio::task::spawn_blocking(move || {
         let st = app.state::<AppState>();
         let w = st.db.get_worktree(id).ok()?;
-        let file = crate::transcript::session_file_for(&w.path)?;
+        // Resolve the worktree's env profile so the Reader reads from the same
+        // CLAUDE_CONFIG_DIR the session writes to (work vs Personal split).
+        let env_vars = match st.db.get_repo(w.repo_id) {
+            Ok(repo) => {
+                crate::env_profiles::resolve_vars(&crate::env_profiles::load(), &repo.path)
+            }
+            Err(_) => Vec::new(),
+        };
+        let file = crate::transcript::session_file_for(
+            &w.path,
+            crate::transcript::config_dir_from_env(&env_vars),
+        )?;
         let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
         let since = q.since.unwrap_or(0);
         let text = if since > 0 && since <= size {

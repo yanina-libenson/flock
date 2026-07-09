@@ -192,7 +192,7 @@ impl PtyManager {
         }
 
         let resume_id = if initial_prompt.is_none() && !tmux_list_sessions().contains(&worktree_id) {
-            latest_session_id(cwd)
+            latest_session_id(cwd, crate::transcript::config_dir_from_env(env_vars))
         } else {
             None
         };
@@ -412,8 +412,10 @@ fn session_command(claude: &str, shell: &str) -> String {
 /// transcript module's cwd→slug + newest-file logic so the Reader view and the
 /// resume-on-reattach path agree on which session is "current". None doubles as
 /// the "no resumable session" signal for the REST resume-on-input path.
-pub fn latest_session_id(cwd: &Path) -> Option<String> {
-    let file = crate::transcript::session_file_for(&cwd.to_string_lossy())?;
+/// `config_dir` is the session's `CLAUDE_CONFIG_DIR` (the transcript lives under
+/// it, not always `~/.claude`).
+pub fn latest_session_id(cwd: &Path, config_dir: Option<&str>) -> Option<String> {
+    let file = crate::transcript::session_file_for(&cwd.to_string_lossy(), config_dir)?;
     file.file_stem()
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
