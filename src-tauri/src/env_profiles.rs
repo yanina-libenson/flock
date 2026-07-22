@@ -113,6 +113,47 @@ pub fn resolve_vars_by_name(cfg: &EnvConfig, name: Option<&str>) -> Vec<(String,
         .unwrap_or_default()
 }
 
+/// Resolve the env vars for a worktree: honors a persisted `env_profile` (an
+/// orchestrator's explicitly chosen account, which has no repo path to
+/// re-derive it from) when set, else falls back to path-based resolution
+/// against the repo. Every place that re-resolves a worktree's env after
+/// creation (reattach, resume-on-input, the Reader) must go through this, not
+/// `resolve_vars` directly, or a persisted profile choice is silently dropped
+/// on the next resolution — this is what broke orchestrator resume: the
+/// profile was honored at launch but recomputed by path (which matches no
+/// binding for the orchestrators scratch dir) on every later reattach.
+pub fn resolve_vars_for_worktree(
+    cfg: &EnvConfig,
+    env_profile: Option<&str>,
+    repo_path: &str,
+) -> Vec<(String, String)> {
+    match env_profile {
+        Some(name) => resolve_vars_by_name(cfg, Some(name)),
+        None => resolve_vars(cfg, repo_path),
+    }
+}
+
+/// The resolved `CLAUDE_CONFIG_DIR` for a worktree — honoring a persisted
+/// `env_profile` override, else path-based resolution, same precedence as
+/// `resolve_vars_for_worktree`. `None` means the default `~/.claude` account
+/// (either nothing bound, or the bound environment doesn't override the
+/// config dir — e.g. "Thanx" only sets `GH_CONFIG_DIR`). This is deliberately
+/// narrower than comparing full env-var sets or binding names: two bindings
+/// can differ (e.g. "Thanx" vs. no binding) while resolving the *same* Claude
+/// account, and other vars (tokens, `GH_CONFIG_DIR`) can differ without ever
+/// changing which Claude account/subscription a session authenticates as.
+/// Used to detect a cross-account task_create (see `commands::start_task_core`).
+pub fn claude_config_dir_for_worktree(
+    cfg: &EnvConfig,
+    env_profile: Option<&str>,
+    repo_path: &str,
+) -> Option<String> {
+    resolve_vars_for_worktree(cfg, env_profile, repo_path)
+        .into_iter()
+        .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+        .map(|(_, v)| v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +228,98 @@ mod tests {
     fn by_name_unknown_or_none_is_empty() {
         assert!(resolve_vars_by_name(&cfg(), Some("Nope")).is_empty());
         assert!(resolve_vars_by_name(&cfg(), None).is_empty());
+    }
+
+    #[test]
+    fn for_worktree_persisted_profile_wins_over_path() {
+        // Regression: an orchestrator scratch dir matches no path binding, so
+        // without the persisted profile this resolved empty on every reattach
+        // even though the account was chosen correctly at creation.
+        let v = resolve_vars_for_worktree(
+            &cfg(),
+            Some("Personal-A"),
+            "/Users/y/Library/Application Support/Flock/orchestrators/kyoto",
+        );
+        assert_eq!(v, vec![("RENDER_API_KEY".to_string(), "tok_a".to_string())]);
+    }
+
+    #[test]
+    fn for_worktree_no_profile_falls_back_to_path() {
+        let v = resolve_vars_for_worktree(&cfg(), None, "/Users/y/Code/Personal/render-b/sub");
+        assert_eq!(v, vec![("RENDER_API_KEY".to_string(), "tok_b".to_string())]);
+    }
+
+    fn accounts_cfg() -> EnvConfig {
+        EnvConfig {
+            environments: vec![
+                Environment {
+                    // Mirrors real "Thanx": binds a folder but doesn't override
+                    // CLAUDE_CONFIG_DIR — same Claude account as no binding at all.
+                    name: "Thanx".into(),
+                    vars: BTreeMap::from([("GH_CONFIG_DIR".into(), "gh-thanx".into())]),
+                },
+                Environment {
+                    name: "Personal".into(),
+                    vars: BTreeMap::from([(
+                        "CLAUDE_CONFIG_DIR".into(),
+                        "/Users/y/.claude-personal".into(),
+                    )]),
+                },
+            ],
+            bindings: vec![
+                Binding {
+                    path: "/Users/y/Code/Thanx".into(),
+                    env: "Thanx".into(),
+                },
+                Binding {
+                    path: "/Users/y/Code/Personal".into(),
+                    env: "Personal".into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn claude_config_dir_is_none_when_binding_does_not_override_it() {
+        // "Thanx" only sets GH_CONFIG_DIR — same default Claude account as no
+        // binding at all, not a distinct one.
+        assert_eq!(
+            claude_config_dir_for_worktree(&accounts_cfg(), None, "/Users/y/Code/Thanx/nexus"),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_config_dir_matches_the_overriding_binding() {
+        assert_eq!(
+            claude_config_dir_for_worktree(
+                &accounts_cfg(),
+                None,
+                "/Users/y/Code/Personal/ixi/backend"
+            ),
+            Some("/Users/y/.claude-personal".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_config_dir_persisted_profile_wins_over_path() {
+        // An orchestrator with no repo path still resolves its explicitly
+        // chosen profile's config dir.
+        assert_eq!(
+            claude_config_dir_for_worktree(
+                &accounts_cfg(),
+                Some("Personal"),
+                "/Users/y/Library/Application Support/Flock/orchestrators/kyoto"
+            ),
+            Some("/Users/y/.claude-personal".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_config_dir_unbound_path_is_default_account() {
+        assert_eq!(
+            claude_config_dir_for_worktree(&accounts_cfg(), None, "/Users/y/Code/Other/repo"),
+            None
+        );
     }
 }

@@ -70,6 +70,30 @@ const TOOLS = [
         branch: { type: "string", description: "Optional branch leaf; auto-derived from the prompt if omitted" },
         base: { type: "string", description: "Optional base branch" },
         title: { type: "string", description: "Optional display title" },
+        model: {
+          type: "string",
+          enum: [
+            "opus",
+            "sonnet",
+            "haiku",
+            "fable",
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-haiku-4-5-20251001",
+            "claude-fable-5",
+          ],
+          description: "Optional model override for this agent's session (alias or full model id). Omit to use the default.",
+        },
+        effort: {
+          type: "string",
+          enum: ["low", "medium", "high", "xhigh", "max"],
+          description: "Optional reasoning-effort override for this agent's session. Omit to use the default.",
+        },
+        confirm_cross_account: {
+          type: "boolean",
+          description:
+            "Flock refuses to create a task whose repo resolves to a different Claude account than you (the calling orchestrator) are running under — this catches spawning into a mismatched/wrong repo. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
+        },
       },
       required: ["repo", "prompt"],
     },
@@ -80,6 +104,9 @@ const TOOLS = [
         branch: a.branch,
         base: a.base,
         title: a.title,
+        model: a.model,
+        effort: a.effort,
+        confirm_cross_account: a.confirm_cross_account,
         // Self-identify as the parent so the spawned worktree links into this
         // orchestrator's fleet. Flock injects FLOCK_WORKTREE_ID into every
         // session; absent (e.g. run standalone) → no parent linkage.
@@ -156,6 +183,30 @@ const TOOLS = [
         prompt: { type: "string" },
         spec: { type: "string" },
         title: { type: "string" },
+        model: {
+          type: "string",
+          enum: [
+            "opus",
+            "sonnet",
+            "haiku",
+            "fable",
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-haiku-4-5-20251001",
+            "claude-fable-5",
+          ],
+          description: "Optional model override applied to every task this schedule fires. Omit to use the default.",
+        },
+        effort: {
+          type: "string",
+          enum: ["low", "medium", "high", "xhigh", "max"],
+          description: "Optional reasoning-effort override applied to every task this schedule fires. Omit to use the default.",
+        },
+        confirm_cross_account: {
+          type: "boolean",
+          description:
+            "Flock refuses to create a schedule whose repo resolves to a different Claude account than you (the calling orchestrator) are running under. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
+        },
       },
       required: ["repo", "prompt", "spec"],
     },
@@ -165,6 +216,15 @@ const TOOLS = [
         prompt: a.prompt,
         spec: a.spec,
         title: a.title,
+        model: a.model,
+        effort: a.effort,
+        confirm_cross_account: a.confirm_cross_account,
+        // Self-identify as the parent, mirroring task_create, so fired tasks
+        // link into this orchestrator's fleet and the cross-account guard has
+        // something to check against.
+        parent_id: process.env.FLOCK_WORKTREE_ID
+          ? Number(process.env.FLOCK_WORKTREE_ID)
+          : undefined,
       }),
   },
   {

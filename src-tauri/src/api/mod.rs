@@ -83,6 +83,8 @@ struct WorktreeRow {
     title: Option<String>,
     status: Option<WorktreeStatus>,
     has_session: bool,
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -218,6 +220,8 @@ async fn worktrees(State(ctx): State<ApiCtx>) -> Json<Vec<WorktreeRow>> {
                         title: w.title,
                         status,
                         has_session: status.is_some(),
+                        model: w.model,
+                        effort: w.effort,
                     });
                 }
             }
@@ -399,6 +403,18 @@ struct CreateTaskBody {
     /// Orchestrator worktree id that's spawning this task, so the child links
     /// back into its fleet. Sent by the Flock MCP (from FLOCK_WORKTREE_ID).
     parent_id: Option<i64>,
+    /// Claude `--model` override. Omit for no override. Validated against
+    /// `commands::ALLOWED_MODELS`.
+    model: Option<String>,
+    /// Claude `--effort` override. Omit for no override. Validated against
+    /// `commands::ALLOWED_EFFORTS`.
+    effort: Option<String>,
+    /// Explicit override for the cross-account safety check: when `parent_id`
+    /// is set and the target repo resolves to a different Claude account than
+    /// the spawning orchestrator, `start_task_core` refuses the task unless
+    /// this is `true`. Omit/false is the safe default.
+    #[serde(default)]
+    confirm_cross_account: bool,
 }
 
 #[derive(Serialize)]
@@ -437,6 +453,9 @@ async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>
             body.title,
             body.permission_mode,
             body.parent_id,
+            body.model,
+            body.effort,
+            body.confirm_cross_account,
         )
     })
     .await;
@@ -465,6 +484,15 @@ struct CreateScheduleBody {
     prompt: String,
     spec: String,
     title: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    /// Orchestrator worktree id that's creating this schedule, so the
+    /// cross-account guard can check it and the resulting fired tasks link
+    /// into its fleet. Sent by the Flock MCP (from FLOCK_WORKTREE_ID).
+    parent_id: Option<i64>,
+    /// See `CreateTaskBody::confirm_cross_account`.
+    #[serde(default)]
+    confirm_cross_account: bool,
 }
 
 async fn schedule_create_h(
@@ -486,6 +514,10 @@ async fn schedule_create_h(
         &body.prompt,
         &body.spec,
         body.title.as_deref(),
+        body.model.as_deref(),
+        body.effort.as_deref(),
+        body.parent_id,
+        body.confirm_cross_account,
     ) {
         Ok(s) => Json(s).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -508,8 +540,21 @@ async fn schedule_run_h(State(ctx): State<ApiCtx>, Path(id): Path<i64>) -> Respo
             .clone()
             .filter(|t| !t.trim().is_empty())
             .or_else(|| Some(format!("scheduled: {}", s.spec)));
-        let w =
-            crate::commands::start_task_core(&app, &st, s.repo_id, &s.prompt, None, None, title, None, None)?;
+        let w = crate::commands::start_task_core(
+            &app,
+            &st,
+            s.repo_id,
+            &s.prompt,
+            None,
+            None,
+            title,
+            None,
+            s.parent_id,
+            s.model.clone(),
+            s.effort.clone(),
+            // Already gated at schedule_create time.
+            true,
+        )?;
         if let Some(spec) = crate::schedule::parse_spec(&s.spec) {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -581,11 +626,15 @@ async fn transcript_h(
         let st = app.state::<AppState>();
         let w = st.db.get_worktree(id).ok()?;
         // Resolve the worktree's env profile so the Reader reads from the same
-        // CLAUDE_CONFIG_DIR the session writes to (work vs Personal split).
+        // CLAUDE_CONFIG_DIR the session writes to (work vs Personal split). A
+        // persisted `env_profile` (an orchestrator's chosen account) wins over
+        // path-based resolution — see `resolve_vars_for_worktree`.
         let env_vars = match st.db.get_repo(w.repo_id) {
-            Ok(repo) => {
-                crate::env_profiles::resolve_vars(&crate::env_profiles::load(), &repo.path)
-            }
+            Ok(repo) => crate::env_profiles::resolve_vars_for_worktree(
+                &crate::env_profiles::load(),
+                w.env_profile.as_deref(),
+                &repo.path,
+            ),
             Err(_) => Vec::new(),
         };
         let file = crate::transcript::session_file_for(

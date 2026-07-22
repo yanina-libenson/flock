@@ -377,6 +377,13 @@ export function Sidebar(props: {
                     {subtitle()}
                   </span>
                 </Show>
+                {/* Model/effort override, when this session isn't running the
+                    default — e.g. "haiku" or "opus · high". Hidden otherwise. */}
+                <Show when={w.model || w.effort}>
+                  <span class="truncate text-[10px] font-mono text-[var(--color-fg-dim)] mt-px">
+                    {[w.model, w.effort].filter(Boolean).join(" · ")}
+                  </span>
+                </Show>
               </>
             }
           >

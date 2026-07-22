@@ -122,7 +122,11 @@ pub fn spawn(app: AppHandle) {
                 None,
                 title,
                 None,
-                None,
+                s.parent_id,
+                s.model.clone(),
+                s.effort.clone(),
+                // Already gated at schedule_create time; see schedule_run_now.
+                true,
             ) {
                 eprintln!("flock: schedule {} fire failed: {e}", s.id);
             }

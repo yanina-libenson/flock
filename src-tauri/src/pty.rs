@@ -119,6 +119,7 @@ impl PtyManager {
     /// kicks any stale client from a prior Flock run. Using `-L flock` pins
     /// us to our dedicated tmux server and `-f <conf>` seeds it with our
     /// mouse / history / RGB config on first launch.
+    #[allow(clippy::too_many_arguments)]
     pub fn attach(
         &self,
         app: &AppHandle,
@@ -130,6 +131,8 @@ impl PtyManager {
         env_vars: &[(String, String)],
         initial_prompt: Option<&str>,
         append_system_prompt: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
     ) -> AppResult<()> {
         // Evict any prior attach for this worktree. `kill()` marks the old
         // attach silent so its reader thread's tail `pty:exit` emit is
@@ -201,6 +204,8 @@ impl PtyManager {
             initial_prompt,
             resume_id.as_deref(),
             append_system_prompt,
+            model,
+            effort,
         );
         let env_flags = build_env_flags(&with_worktree_id(env_vars, worktree_id));
         let session_cmd = session_command(&claude, &shell);
@@ -367,12 +372,24 @@ fn claude_invocation(
     initial_prompt: Option<&str>,
     resume_id: Option<&str>,
     append_system_prompt: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
 ) -> String {
     let mut cmd = if permission_mode == "default" || permission_mode.is_empty() {
         "claude".to_string()
     } else {
         format!("claude --permission-mode {}", shell_escape(permission_mode))
     };
+    if let Some(m) = model {
+        if !m.is_empty() {
+            cmd = format!("{cmd} --model {}", shell_escape(m));
+        }
+    }
+    if let Some(e) = effort {
+        if !e.is_empty() {
+            cmd = format!("{cmd} --effort {}", shell_escape(e));
+        }
+    }
     if let Some(sp) = append_system_prompt {
         if !sp.is_empty() {
             cmd = format!("{cmd} --append-system-prompt {}", shell_escape(sp));
@@ -460,6 +477,8 @@ pub fn start_detached(
     initial_prompt: Option<&str>,
     append_system_prompt: Option<&str>,
     resume_id: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
 ) -> AppResult<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let conf_path = tmux_config_path()?;
@@ -473,6 +492,8 @@ pub fn start_detached(
         resume_id,
         &shell,
         &conf_path.to_string_lossy(),
+        model,
+        effort,
     );
     let out = std::process::Command::new(shell)
         .args(["-i", "-l", "-c", &tmux_cmd])
@@ -500,9 +521,18 @@ fn detached_tmux_cmd(
     resume_id: Option<&str>,
     shell: &str,
     conf_path: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
 ) -> String {
     let session_name = tmux_session_name(worktree_id);
-    let claude = claude_invocation(permission_mode, initial_prompt, resume_id, append_system_prompt);
+    let claude = claude_invocation(
+        permission_mode,
+        initial_prompt,
+        resume_id,
+        append_system_prompt,
+        model,
+        effort,
+    );
     let env_flags = build_env_flags(&with_worktree_id(env_vars, worktree_id));
     let session_cmd = session_command(&claude, shell);
     format!(
@@ -845,17 +875,17 @@ mod tests {
     #[test]
     fn plain_attach_has_no_resume_or_prompt() {
         assert_eq!(
-            claude_invocation("bypassPermissions", None, None, None),
+            claude_invocation("bypassPermissions", None, None, None, None, None),
             "claude --permission-mode 'bypassPermissions'"
         );
         // default mode → bare `claude`, no --permission-mode flag.
-        assert_eq!(claude_invocation("default", None, None, None), "claude");
+        assert_eq!(claude_invocation("default", None, None, None, None, None), "claude");
     }
 
     #[test]
     fn resume_id_is_baked_in_after_permission_mode() {
         assert_eq!(
-            claude_invocation("bypassPermissions", None, Some("abc-123"), None),
+            claude_invocation("bypassPermissions", None, Some("abc-123"), None, None, None),
             "claude --permission-mode 'bypassPermissions' --resume 'abc-123'"
         );
     }
@@ -863,7 +893,7 @@ mod tests {
     #[test]
     fn initial_prompt_is_a_trailing_positional() {
         assert_eq!(
-            claude_invocation("default", Some("fix the bug"), None, None),
+            claude_invocation("default", Some("fix the bug"), None, None, None, None),
             "claude 'fix the bug'"
         );
     }
@@ -871,7 +901,7 @@ mod tests {
     #[test]
     fn empty_resume_id_is_ignored() {
         assert_eq!(
-            claude_invocation("default", None, Some(""), None),
+            claude_invocation("default", None, Some(""), None, None, None),
             "claude"
         );
     }
@@ -879,12 +909,44 @@ mod tests {
     #[test]
     fn append_system_prompt_after_permission_mode() {
         assert_eq!(
-            claude_invocation("bypassPermissions", Some("go"), None, Some("you orchestrate")),
+            claude_invocation(
+                "bypassPermissions",
+                Some("go"),
+                None,
+                Some("you orchestrate"),
+                None,
+                None
+            ),
             "claude --permission-mode 'bypassPermissions' --append-system-prompt 'you orchestrate' 'go'"
         );
         // Empty system prompt is ignored.
         assert_eq!(
-            claude_invocation("default", None, None, Some("")),
+            claude_invocation("default", None, None, Some(""), None, None),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn model_and_effort_land_after_permission_mode() {
+        assert_eq!(
+            claude_invocation(
+                "bypassPermissions",
+                None,
+                None,
+                None,
+                Some("opus"),
+                Some("high")
+            ),
+            "claude --permission-mode 'bypassPermissions' --model 'opus' --effort 'high'"
+        );
+        // Omitted → no flags at all, identical to today's default behavior.
+        assert_eq!(
+            claude_invocation("default", None, None, None, None, None),
+            "claude"
+        );
+        // Empty strings are ignored, same as the other optional flags.
+        assert_eq!(
+            claude_invocation("default", None, None, None, Some(""), Some("")),
             "claude"
         );
     }
@@ -917,6 +979,8 @@ mod tests {
             Some("sess-abc"),
             "/bin/zsh",
             "/conf",
+            None,
+            None,
         );
         assert!(cmd.contains("new-session -d"));
         assert!(cmd.contains("-s 'flock-7'"));
@@ -937,9 +1001,33 @@ mod tests {
             None,
             "/bin/zsh",
             "/conf",
+            None,
+            None,
         );
         assert!(!plain.contains("--resume"));
         assert!(plain.contains("'do it'"));
+    }
+
+    #[test]
+    fn detached_cmd_bakes_model_and_effort() {
+        use super::detached_tmux_cmd;
+        let cmd = detached_tmux_cmd(
+            7,
+            "/work/dir",
+            "bypassPermissions",
+            &[],
+            Some("do it"),
+            None,
+            None,
+            "/bin/zsh",
+            "/conf",
+            Some("haiku"),
+            Some("low"),
+        );
+        assert!(cmd.contains("--model"));
+        assert!(cmd.contains("haiku"));
+        assert!(cmd.contains("--effort"));
+        assert!(cmd.contains("low"));
     }
 
     #[test]

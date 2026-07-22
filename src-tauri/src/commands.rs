@@ -46,6 +46,9 @@ pub fn repo_add(state: State<'_, AppState>, path: String) -> AppResult<Repo> {
                 DEFAULT_PERMISSION_MODE,
                 "worktree",
                 None,
+                None,
+                None,
+                None,
             );
         }
     }
@@ -116,6 +119,15 @@ pub struct CreateWorktreeArgs {
     /// orchestration path so the fleet can be reconstructed.
     #[serde(default)]
     pub parent_id: Option<i64>,
+    /// Claude `--model` override. Omit / None → no override (the session uses
+    /// whatever the profile's own settings.json/CLI default resolves to).
+    /// Validated server-side against `ALLOWED_MODELS`.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Claude `--effort` override. Omit / None → no override. Validated
+    /// server-side against `ALLOWED_EFFORTS`.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// Permission-mode values forwarded to `claude --permission-mode`.
@@ -136,6 +148,43 @@ fn validate_permission_mode(mode: &str) -> AppResult<()> {
     } else {
         Err(AppError::msg(format!(
             "invalid permission_mode {mode:?}; must be one of {ALLOWED_PERMISSION_MODES:?}"
+        )))
+    }
+}
+
+/// `--model` values forwarded to `claude`: either a short alias or a full
+/// model id. Whitelisted for the same reason as permission_mode — it goes
+/// onto a shell command line.
+const ALLOWED_MODELS: &[&str] = &[
+    "opus",
+    "sonnet",
+    "haiku",
+    "fable",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-haiku-4-5-20251001",
+    "claude-fable-5",
+];
+
+/// `--effort` values forwarded to `claude`.
+const ALLOWED_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+fn validate_model(model: &str) -> AppResult<()> {
+    if ALLOWED_MODELS.contains(&model) {
+        Ok(())
+    } else {
+        Err(AppError::msg(format!(
+            "invalid model {model:?}; must be one of {ALLOWED_MODELS:?}"
+        )))
+    }
+}
+
+fn validate_effort(effort: &str) -> AppResult<()> {
+    if ALLOWED_EFFORTS.contains(&effort) {
+        Ok(())
+    } else {
+        Err(AppError::msg(format!(
+            "invalid effort {effort:?}; must be one of {ALLOWED_EFFORTS:?}"
         )))
     }
 }
@@ -211,6 +260,12 @@ fn create_worktree_core(db: &Db, args: CreateWorktreeArgs) -> AppResult<Worktree
         .as_deref()
         .unwrap_or(DEFAULT_PERMISSION_MODE);
     validate_permission_mode(permission_mode)?;
+    if let Some(m) = args.model.as_deref() {
+        validate_model(m)?;
+    }
+    if let Some(e) = args.effort.as_deref() {
+        validate_effort(e)?;
+    }
 
     let w = db.insert_worktree(
         repo.id,
@@ -220,6 +275,9 @@ fn create_worktree_core(db: &Db, args: CreateWorktreeArgs) -> AppResult<Worktree
         permission_mode,
         args.kind.as_deref().unwrap_or("worktree"),
         args.parent_id,
+        None,
+        args.model.as_deref(),
+        args.effort.as_deref(),
     )?;
     Ok(w)
 }
@@ -361,12 +419,24 @@ pub fn session_open(
     args: OpenSessionArgs,
 ) -> AppResult<()> {
     let w = state.db.get_worktree(args.worktree_id)?;
-    // Resolve per-environment vars by the *repo's* registered path (worktrees
-    // live elsewhere, so folder bindings must key off the repo's location).
+    // Resolve per-environment vars: a persisted `env_profile` (an
+    // orchestrator's explicit account choice) wins; otherwise fall back to
+    // the *repo's* registered path (worktrees live elsewhere, so folder
+    // bindings must key off the repo's location).
     let env_vars = match state.db.get_repo(w.repo_id) {
-        Ok(repo) => env_profiles::resolve_vars(&env_profiles::load(), &repo.path),
+        Ok(repo) => env_profiles::resolve_vars_for_worktree(
+            &env_profiles::load(),
+            w.env_profile.as_deref(),
+            &repo.path,
+        ),
         Err(_) => Vec::new(),
     };
+    if w.model.is_some() || w.effort.is_some() {
+        eprintln!(
+            "flock: worktree {} launching model={:?} effort={:?}",
+            w.id, w.model, w.effort
+        );
+    }
     state.pty.attach(
         &app,
         args.worktree_id,
@@ -377,6 +447,8 @@ pub fn session_open(
         &env_vars,
         None,
         None,
+        w.model.as_deref(),
+        w.effort.as_deref(),
     )?;
     state.db.touch_worktree(args.worktree_id)?;
     Ok(())
@@ -391,6 +463,52 @@ pub struct CreateTaskArgs {
     pub base: Option<String>,
     pub title: Option<String>,
     pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// Safety net for the "wrong repo, wrong account" failure mode: an
+/// orchestrator (running under account A) spawns a child into a repo that
+/// resolves to a *different* Claude account B — e.g. it guessed/mistyped a
+/// repo name and Flock silently matched an unrelated repo under a different
+/// profile binding. Only checked when a parent orchestrator is doing the
+/// spawning (`parent_id` set); a human using the desktop "New task"/"New
+/// schedule" flow always has `parent_id: None` and isn't guessing a repo name
+/// from a list. Shared by `start_task_core` (task_create) and
+/// `schedule_create_core` (schedule_create) — both reject *before* creating
+/// anything, so a caught mismatch leaves no debris.
+fn check_cross_account(
+    db: &Db,
+    parent_id: Option<i64>,
+    confirm_cross_account: bool,
+    repo: &Repo,
+) -> AppResult<()> {
+    if confirm_cross_account {
+        return Ok(());
+    }
+    let Some(pid) = parent_id else {
+        return Ok(());
+    };
+    let Ok(parent) = db.get_worktree(pid) else {
+        return Ok(());
+    };
+    let cfg = env_profiles::load();
+    let orch_account =
+        env_profiles::claude_config_dir_for_worktree(&cfg, parent.env_profile.as_deref(), &parent.path);
+    let repo_account = env_profiles::claude_config_dir_for_worktree(&cfg, None, &repo.path);
+    if orch_account != repo_account {
+        return Err(AppError::msg(format!(
+            "refusing: repo {:?} resolves to a different Claude account than the spawning \
+             orchestrator (worktree {pid}) runs under (orchestrator account: {}, repo account: \
+             {}). If this is intentional, retry with confirm_cross_account: true.",
+            repo.name,
+            orch_account.as_deref().unwrap_or("default"),
+            repo_account.as_deref().unwrap_or("default"),
+        )));
+    }
+    Ok(())
 }
 
 /// Orchestration primitive: create a worktree and start claude on it with an
@@ -409,7 +527,12 @@ pub fn start_task_core(
     title: Option<String>,
     permission_mode: Option<String>,
     parent_id: Option<i64>,
+    model: Option<String>,
+    effort: Option<String>,
+    confirm_cross_account: bool,
 ) -> AppResult<Worktree> {
+    let repo = state.db.get_repo(repo_id)?;
+    check_cross_account(&state.db, parent_id, confirm_cross_account, &repo)?;
     let leaf = branch.unwrap_or_else(|| branch_from_prompt(prompt));
     // Create the worktree, retrying with a numeric suffix on branch collision
     // (the loop caller can't know what names are already taken).
@@ -436,6 +559,8 @@ pub fn start_task_core(
             permission_mode: permission_mode.clone(),
             kind: None,
             parent_id,
+            model: model.clone(),
+            effort: effort.clone(),
         };
         match create_worktree_core(&state.db, args) {
             Ok(created) => {
@@ -453,8 +578,13 @@ pub fn start_task_core(
         last_err.unwrap_or_else(|| AppError::msg("could not create worktree after retries"))
     })?;
 
-    let repo = state.db.get_repo(repo_id)?;
     let env_vars = env_profiles::resolve_vars(&env_profiles::load(), &repo.path);
+    if w.model.is_some() || w.effort.is_some() {
+        eprintln!(
+            "flock: worktree {} launching model={:?} effort={:?}",
+            w.id, w.model, w.effort
+        );
+    }
     pty::start_detached(
         w.id,
         Path::new(&w.path),
@@ -463,6 +593,8 @@ pub fn start_task_core(
         Some(prompt),
         None,
         None,
+        w.model.as_deref(),
+        w.effort.as_deref(),
     )?;
     state.db.touch_worktree(w.id)?;
     // Tell the desktop UI a worktree appeared so it shows up live (under its
@@ -481,7 +613,8 @@ fn is_branch_collision(e: &AppError) -> bool {
 
 /// Derive a branch leaf from a prompt: first few words, slugified, capped.
 fn branch_from_prompt(prompt: &str) -> String {
-    let words = prompt
+    let body = skip_leading_caps_heading(prompt);
+    let words = body
         .split_whitespace()
         .take(6)
         .collect::<Vec<_>>()
@@ -497,6 +630,31 @@ fn branch_from_prompt(prompt: &str) -> String {
         "task".to_string()
     } else {
         slug
+    }
+}
+
+/// Skip a leading all-caps "heading" line — boilerplate some callers prepend
+/// ahead of the actual task (e.g. an orchestrator pasting an org policy
+/// banner like "THANX SECURITY POLICY" into task_create's prompt) — so the
+/// branch name reflects the real task, not the banner. A line counts as a
+/// heading when it has at least one letter and every letter in it is
+/// uppercase; only the first such line is skipped, since real task text
+/// practically never opens that way. Best-effort, not a general "strip
+/// boilerplate" parser — a paraphrased or unstructured prepend won't be
+/// caught, but the common verbatim-banner case is.
+fn skip_leading_caps_heading(prompt: &str) -> &str {
+    let trimmed = prompt.trim_start();
+    let first_line_end = trimmed.find('\n').unwrap_or(trimmed.len());
+    let first_line = &trimmed[..first_line_end];
+    let is_heading = first_line.chars().any(|c| c.is_alphabetic())
+        && first_line
+            .chars()
+            .filter(|c| c.is_alphabetic())
+            .all(|c| c.is_uppercase());
+    if is_heading {
+        trimmed[first_line_end..].trim_start()
+    } else {
+        trimmed
     }
 }
 
@@ -567,8 +725,8 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool) -> String {
     };
     let tools = if has_mcp {
         "You have the Flock MCP tools:\n\
-         - task_create(repo, prompt): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet).\n\
-         - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input).\n\
+         - task_create(repo, prompt, model?, effort?, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `model`/`effort` are optional — see \"Choosing model/effort\" below. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
+         - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
          - kb_search / kb_read / kb_ingest: your durable memory across sessions."
@@ -584,7 +742,27 @@ Registered repos you can spawn agents into:\n{repo_list}\n\n{tools}\n\n\
 How to work: break the user's goal into per-repo tasks, spawn agents with \
 task_create (in parallel when independent), follow their progress with task_read, \
 and unblock any that need input with task_input. Give each agent a crisp, \
-self-contained prompt; it can't see this conversation.\n\n\
+self-contained prompt describing ONLY the task; it can't see this conversation. Do \
+NOT paste organization-level policies/instructions into the prompt — a spawned agent's \
+own Claude Code session already receives those automatically, the same way you did. \
+Re-pasting them is redundant and pollutes the auto-derived branch name with banner text \
+instead of the task.\n\n\
+Native subagent vs. task_create — pick deliberately, don't default to one: use your \
+own native subagent/Task tool for anything that does NOT end in a commit — research, \
+reading code to answer a question, investigating across one or more repos, drafting a \
+plan. It runs inside your own session, needs no `repo` argument, and can't land in the \
+wrong place. Reach for task_create/a worktree only when the work should actually produce \
+a branch and (eventually) a PR in a SPECIFIC repo, and benefits from running \
+independently of your session (long-running, resumable later, tracked in Flock's UI). A \
+task titled \"Research: ...\" or \"Investigate: ...\" is a strong signal it belongs in a \
+native subagent, not a worktree.\n\n\
+Choosing model/effort (optional on task_create, omit for the default): use `haiku` for \
+mechanical, well-specified work — renames, formatting, boilerplate, simple scripted \
+changes — it's the cheapest and fastest. Omit `model` (default) for most everyday \
+feature work, bug fixes, and typical PRs. Use `opus` with `effort: \"high\"` or `\"xhigh\"` \
+for hard architecture decisions, ambiguous or high-stakes changes, security-sensitive \
+work, or anything you'd want a second, careful pass on. When unsure, omit both rather \
+than guessing.\n\n\
 Following your fleet: you are NOT notified when a child changes state — Flock \
 doesn't ping you. When you want to know where a child stands, check it yourself with \
 task_status (the whole fleet's states) or task_read (one child's transcript). A \
@@ -635,6 +813,11 @@ pub fn start_orchestrator_core(
     let pm = permission_mode.as_deref().unwrap_or(DEFAULT_PERMISSION_MODE);
     validate_permission_mode(pm)?;
 
+    // Persist the chosen profile on the row itself — an orchestrator has no
+    // repo path to re-derive it from later, so without this, every reattach
+    // or resume after the first launch (app restart, hibernation, etc.)
+    // silently falls back to path-based resolution against the internal
+    // scratch dir (which matches no binding) and loses the account.
     let w = state.db.insert_worktree(
         repo.id,
         &leaf,
@@ -642,6 +825,9 @@ pub fn start_orchestrator_core(
         title.as_deref(),
         pm,
         "orchestrator",
+        None,
+        env.as_deref(),
+        None,
         None,
     )?;
 
@@ -663,7 +849,7 @@ pub fn start_orchestrator_core(
         Some(name) => env_profiles::resolve_vars_by_name(&cfg, Some(name)),
         None => env_profiles::resolve_vars(&cfg, &path.to_string_lossy()),
     };
-    pty::start_detached(w.id, &path, pm, &env_vars, Some(prompt), Some(&sys), None)?;
+    pty::start_detached(w.id, &path, pm, &env_vars, Some(prompt), Some(&sys), None, None, None)?;
     state.db.touch_worktree(w.id)?;
     let _ = app.emit("worktree:created", &w);
     Ok(w)
@@ -726,6 +912,9 @@ pub fn task_create(
         args.title,
         args.permission_mode,
         None,
+        args.model,
+        args.effort,
+        false,
     )
 }
 
@@ -837,19 +1026,40 @@ pub fn deliver_input(
     if !pty::tmux_list_sessions().contains(&id) {
         let w = state.db.get_worktree(id).map_err(|_| DeliverError::NotFound)?;
         let cwd = Path::new(&w.path);
-        // Env-profile vars by the repo's path, mirroring `session_open`. Resolved
-        // first so the resume lookup uses the session's own CLAUDE_CONFIG_DIR.
+        // Env-profile vars, mirroring `session_open`: a persisted `env_profile`
+        // wins over path-based resolution. Resolved first so the resume lookup
+        // uses the session's own CLAUDE_CONFIG_DIR.
         let env_vars = match state.db.get_repo(w.repo_id) {
-            Ok(repo) => env_profiles::resolve_vars(&env_profiles::load(), &repo.path),
+            Ok(repo) => env_profiles::resolve_vars_for_worktree(
+                &env_profiles::load(),
+                w.env_profile.as_deref(),
+                &repo.path,
+            ),
             Err(_) => Vec::new(),
         };
         let resume_id =
             pty::latest_session_id(cwd, crate::transcript::config_dir_from_env(&env_vars))
                 .ok_or(DeliverError::NoResumable)?;
+        if w.model.is_some() || w.effort.is_some() {
+            eprintln!(
+                "flock: worktree {} launching model={:?} effort={:?}",
+                w.id, w.model, w.effort
+            );
+        }
         // Headless resume — no PTY client (no viewer), no `--append-system-prompt`
         // (mirrors the desktop reattach; `--resume` restores the conversation).
-        pty::start_detached(id, cwd, &w.permission_mode, &env_vars, None, None, Some(&resume_id))
-            .map_err(|e| DeliverError::Spawn(e.to_string()))?;
+        pty::start_detached(
+            id,
+            cwd,
+            &w.permission_mode,
+            &env_vars,
+            None,
+            None,
+            Some(&resume_id),
+            w.model.as_deref(),
+            w.effort.as_deref(),
+        )
+        .map_err(|e| DeliverError::Spawn(e.to_string()))?;
         // Wait for Claude's input UI before typing; on timeout, send anyway.
         pty::wait_until_ready(id, RESUME_READY_TIMEOUT);
     }
@@ -917,21 +1127,38 @@ pub struct CreateScheduleArgs {
     pub prompt: String,
     pub spec: String,
     pub title: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// Create a scheduled task. Shared validation/insert used by the command and
 /// `POST /api/schedules`.
+#[allow(clippy::too_many_arguments)]
 pub fn schedule_create_core(
     db: &Db,
     repo_id: i64,
     prompt: &str,
     spec: &str,
     title: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    parent_id: Option<i64>,
+    confirm_cross_account: bool,
 ) -> AppResult<Schedule> {
+    let repo = db.get_repo(repo_id)?;
+    check_cross_account(db, parent_id, confirm_cross_account, &repo)?;
     let parsed = schedule::parse_spec(spec)
         .ok_or_else(|| AppError::msg("invalid spec; use '@every 30m' or 'HH:MM'"))?;
+    if let Some(m) = model {
+        validate_model(m)?;
+    }
+    if let Some(e) = effort {
+        validate_effort(e)?;
+    }
     let next = schedule::initial_next_run(&parsed, now_unix());
-    db.insert_schedule(repo_id, prompt, spec, title, next)
+    db.insert_schedule(repo_id, prompt, spec, title, next, model, effort, parent_id)
 }
 
 #[tauri::command]
@@ -942,6 +1169,10 @@ pub fn schedule_create(state: State<'_, AppState>, args: CreateScheduleArgs) -> 
         &args.prompt,
         &args.spec,
         args.title.as_deref(),
+        args.model.as_deref(),
+        args.effort.as_deref(),
+        None,
+        false,
     )
 }
 
@@ -974,7 +1205,24 @@ pub fn schedule_run_now(
         .clone()
         .filter(|t| !t.trim().is_empty())
         .or_else(|| Some(format!("scheduled: {}", s.spec)));
-    let w = start_task_core(&app, &state, s.repo_id, &s.prompt, None, None, title, None, None)?;
+    let w = start_task_core(
+        &app,
+        &state,
+        s.repo_id,
+        &s.prompt,
+        None,
+        None,
+        title,
+        None,
+        s.parent_id,
+        s.model.clone(),
+        s.effort.clone(),
+        // The cross-account gate was already decided at schedule_create time;
+        // replaying it on every fire would silently re-block a schedule that
+        // was deliberately confirmed once. parent_id is still passed through
+        // so the fired task links into the same fleet.
+        true,
+    )?;
     if let Some(spec) = schedule::parse_spec(&s.spec) {
         let now = now_unix();
         let _ = state
@@ -1048,5 +1296,22 @@ mod tests {
         assert!(b.len() <= 40);
         assert_eq!(branch_from_prompt("   "), "task");
         assert_eq!(branch_from_prompt(""), "task");
+    }
+
+    #[test]
+    fn branch_from_prompt_skips_a_leading_caps_heading() {
+        // Regression: an orchestrator prepending an org policy banner (e.g.
+        // "THANX SECURITY POLICY\n...") must not pollute the branch name with
+        // the banner instead of the actual task.
+        let b = branch_from_prompt("THANX SECURITY POLICY\nResearch purchase rule targeting");
+        assert_eq!(b, "research-purchase-rule-targeting");
+    }
+
+    #[test]
+    fn branch_from_prompt_keeps_normal_case_first_line() {
+        // A prompt that just happens to start with one capitalized word (not
+        // an all-caps banner line) must not be affected.
+        let b = branch_from_prompt("Research purchase rule targeting");
+        assert_eq!(b, "research-purchase-rule-targeting");
     }
 }

@@ -38,6 +38,21 @@ pub struct Worktree {
     /// user-created worktrees and for orchestrators themselves. ON DELETE SET
     /// NULL so removing an orchestrator orphans (but never kills) its fleet.
     pub parent_id: Option<i64>,
+    /// Explicitly chosen env profile name (an orchestrator's Profile dropdown
+    /// selection — orchestrators are repo-less so path-based resolution can't
+    /// find their account). NULL for normal worktrees, which resolve by the
+    /// repo's own path instead. Persisted so a later reattach/resume re-derives
+    /// the same account rather than silently falling back to the default.
+    pub env_profile: Option<String>,
+    /// Claude `--model` override for this worktree's session (alias like
+    /// `"opus"` or a full model id). NULL means no override — the session
+    /// uses whatever the profile's own settings.json/CLI default resolves to.
+    /// Persisted so a hibernate/resume relaunch keeps the same model.
+    pub model: Option<String>,
+    /// Claude `--effort` override for this worktree's session (`low`, `medium`,
+    /// `high`, `xhigh`, `max`). NULL means no override. Persisted for the same
+    /// reason as `model`.
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +67,18 @@ pub struct Schedule {
     pub last_run: Option<i64>,
     pub next_run: i64,
     pub created_at: i64,
+    /// Claude `--model` override applied to every task this schedule fires.
+    /// NULL means no override. See `Worktree::model`.
+    pub model: Option<String>,
+    /// Claude `--effort` override applied to every task this schedule fires.
+    /// NULL means no override. See `Worktree::effort`.
+    pub effort: Option<String>,
+    /// The orchestrator worktree that created this schedule, if any. NULL for
+    /// schedules created from the desktop or without a spawning orchestrator.
+    /// Checked for a cross-account mismatch at creation (see
+    /// `commands::check_cross_account`) and replayed at fire time so the
+    /// resulting task links into the same fleet.
+    pub parent_id: Option<i64>,
 }
 
 /// A knowledge-base search hit (ranked FTS5 match with a highlighted snippet).
@@ -125,7 +152,10 @@ impl Db {
               last_used       INTEGER,
               permission_mode TEXT NOT NULL DEFAULT 'bypassPermissions',
               kind            TEXT NOT NULL DEFAULT 'worktree',
-              parent_id       INTEGER REFERENCES worktrees(id) ON DELETE SET NULL
+              parent_id       INTEGER REFERENCES worktrees(id) ON DELETE SET NULL,
+              env_profile     TEXT,
+              model           TEXT,
+              effort          TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_worktrees_repo ON worktrees(repo_id);
@@ -139,7 +169,10 @@ impl Db {
               enabled    INTEGER NOT NULL DEFAULT 1,
               last_run   INTEGER,
               next_run   INTEGER NOT NULL,
-              created_at INTEGER NOT NULL
+              created_at INTEGER NOT NULL,
+              model      TEXT,
+              effort     TEXT,
+              parent_id  INTEGER REFERENCES worktrees(id) ON DELETE SET NULL
             );
 
             -- Knowledge base: an FTS5 index over an Obsidian vault (the vault on
@@ -173,6 +206,15 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE worktrees ADD COLUMN parent_id INTEGER REFERENCES worktrees(id) ON DELETE SET NULL",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE worktrees ADD COLUMN env_profile TEXT", []);
+        let _ = conn.execute("ALTER TABLE worktrees ADD COLUMN model TEXT", []);
+        let _ = conn.execute("ALTER TABLE worktrees ADD COLUMN effort TEXT", []);
+        let _ = conn.execute("ALTER TABLE schedules ADD COLUMN model TEXT", []);
+        let _ = conn.execute("ALTER TABLE schedules ADD COLUMN effort TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE schedules ADD COLUMN parent_id INTEGER REFERENCES worktrees(id) ON DELETE SET NULL",
             [],
         );
         // Index on parent_id must come AFTER the defensive ALTER above: on a DB
@@ -263,13 +305,16 @@ impl Db {
         permission_mode: &str,
         kind: &str,
         parent_id: Option<i64>,
+        env_profile: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
     ) -> AppResult<Worktree> {
         let c = self.c()?;
         c.execute(
-            "INSERT INTO worktrees (repo_id, branch, path, title, created_at, permission_mode, kind, parent_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO worktrees (repo_id, branch, path, title, created_at, permission_mode, kind, parent_id, env_profile, model, effort)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(path) DO UPDATE SET branch=excluded.branch, title=excluded.title",
-            params![repo_id, branch, path, title, now(), permission_mode, kind, parent_id],
+            params![repo_id, branch, path, title, now(), permission_mode, kind, parent_id, env_profile, model, effort],
         )?;
         let id = c.query_row(
             "SELECT id FROM worktrees WHERE path = ?1",
@@ -292,13 +337,16 @@ impl Db {
             permission_mode: row.get(7)?,
             kind: row.get(8)?,
             parent_id: row.get(9)?,
+            env_profile: row.get(10)?,
+            model: row.get(11)?,
+            effort: row.get(12)?,
         })
     }
 
     pub fn get_worktree(&self, id: i64) -> AppResult<Worktree> {
         let c = self.c()?;
         let w = c.query_row(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort
              FROM worktrees WHERE id = ?1",
             params![id],
             Self::row_to_worktree,
@@ -309,7 +357,7 @@ impl Db {
     pub fn list_worktrees(&self, repo_id: i64) -> AppResult<Vec<Worktree>> {
         let c = self.c()?;
         let mut stmt = c.prepare(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort
              FROM worktrees WHERE repo_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![repo_id], Self::row_to_worktree)?;
@@ -326,7 +374,7 @@ impl Db {
     pub fn list_all_worktrees(&self) -> AppResult<Vec<Worktree>> {
         let c = self.c()?;
         let mut stmt = c.prepare(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort
              FROM worktrees ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], Self::row_to_worktree)?;
@@ -342,7 +390,7 @@ impl Db {
     pub fn list_children(&self, parent_id: i64) -> AppResult<Vec<Worktree>> {
         let c = self.c()?;
         let mut stmt = c.prepare(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort
              FROM worktrees WHERE parent_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![parent_id], Self::row_to_worktree)?;
@@ -385,6 +433,8 @@ impl Db {
 
     // --- Schedules ---
 
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_schedule(
         &self,
         repo_id: i64,
@@ -392,12 +442,15 @@ impl Db {
         spec: &str,
         title: Option<&str>,
         next_run: i64,
+        model: Option<&str>,
+        effort: Option<&str>,
+        parent_id: Option<i64>,
     ) -> AppResult<Schedule> {
         let c = self.c()?;
         c.execute(
-            "INSERT INTO schedules (repo_id, prompt, spec, title, enabled, next_run, created_at)
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
-            params![repo_id, prompt, spec, title, next_run, now()],
+            "INSERT INTO schedules (repo_id, prompt, spec, title, enabled, next_run, created_at, model, effort, parent_id)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9)",
+            params![repo_id, prompt, spec, title, next_run, now(), model, effort, parent_id],
         )?;
         let id = c.last_insert_rowid();
         drop(c);
@@ -415,13 +468,16 @@ impl Db {
             last_run: row.get(6)?,
             next_run: row.get(7)?,
             created_at: row.get(8)?,
+            model: row.get(9)?,
+            effort: row.get(10)?,
+            parent_id: row.get(11)?,
         })
     }
 
     pub fn get_schedule(&self, id: i64) -> AppResult<Schedule> {
         let c = self.c()?;
         let s = c.query_row(
-            "SELECT id, repo_id, prompt, spec, title, enabled, last_run, next_run, created_at
+            "SELECT id, repo_id, prompt, spec, title, enabled, last_run, next_run, created_at, model, effort, parent_id
              FROM schedules WHERE id = ?1",
             params![id],
             Self::row_to_schedule,
@@ -432,7 +488,7 @@ impl Db {
     pub fn list_schedules(&self) -> AppResult<Vec<Schedule>> {
         let c = self.c()?;
         let mut stmt = c.prepare(
-            "SELECT id, repo_id, prompt, spec, title, enabled, last_run, next_run, created_at
+            "SELECT id, repo_id, prompt, spec, title, enabled, last_run, next_run, created_at, model, effort, parent_id
              FROM schedules ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], Self::row_to_schedule)?;
@@ -616,11 +672,38 @@ mod tests {
     }
 
     #[test]
+    fn env_profile_persists_and_roundtrips() {
+        // An orchestrator's chosen profile must survive a reload from disk —
+        // otherwise a later reattach/resume can't re-derive the account (the
+        // orchestrator scratch dir matches no path binding).
+        let db = temp_db();
+        let repo = db.insert_repo("acme", "/tmp/acme2").unwrap();
+        let orch = db
+            .insert_worktree(
+                repo.id,
+                "kyoto",
+                "/tmp/orch_personal",
+                None,
+                "bypassPermissions",
+                "orchestrator",
+                None,
+                Some("Personal"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(orch.env_profile.as_deref(), Some("Personal"));
+
+        let reloaded = db.get_worktree(orch.id).unwrap();
+        assert_eq!(reloaded.env_profile.as_deref(), Some("Personal"));
+    }
+
+    #[test]
     fn worktree_kind_and_parent_roundtrip() {
         let db = temp_db();
         let repo = db.insert_repo("acme", "/tmp/acme").unwrap();
         let orch = db
-            .insert_worktree(repo.id, "kyoto", "/tmp/orch", None, "bypassPermissions", "orchestrator", None)
+            .insert_worktree(repo.id, "kyoto", "/tmp/orch", None, "bypassPermissions", "orchestrator", None, None, None, None)
             .unwrap();
         assert_eq!(orch.kind, "orchestrator");
         assert_eq!(orch.parent_id, None);
@@ -634,6 +717,9 @@ mod tests {
                 "bypassPermissions",
                 "worktree",
                 Some(orch.id),
+                None,
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(child.kind, "worktree");
@@ -653,10 +739,10 @@ mod tests {
         let db = temp_db();
         let repo = db.insert_repo("acme", "/tmp/acme2").unwrap();
         let orch = db
-            .insert_worktree(repo.id, "lima", "/tmp/orch2", None, "bypassPermissions", "orchestrator", None)
+            .insert_worktree(repo.id, "lima", "/tmp/orch2", None, "bypassPermissions", "orchestrator", None, None, None, None)
             .unwrap();
         let child = db
-            .insert_worktree(repo.id, "flock/oslo", "/tmp/child2", None, "bypassPermissions", "worktree", Some(orch.id))
+            .insert_worktree(repo.id, "flock/oslo", "/tmp/child2", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None)
             .unwrap();
 
         // ON DELETE SET NULL: the child survives, just loses the link.
@@ -671,16 +757,16 @@ mod tests {
         let db = temp_db();
         let repo = db.insert_repo("acme", "/tmp/acme3").unwrap();
         let orch = db
-            .insert_worktree(repo.id, "cairo", "/tmp/orch3", None, "bypassPermissions", "orchestrator", None)
+            .insert_worktree(repo.id, "cairo", "/tmp/orch3", None, "bypassPermissions", "orchestrator", None, None, None, None)
             .unwrap();
         let c1 = db
-            .insert_worktree(repo.id, "flock/a", "/tmp/c1", None, "bypassPermissions", "worktree", Some(orch.id))
+            .insert_worktree(repo.id, "flock/a", "/tmp/c1", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None)
             .unwrap();
         let c2 = db
-            .insert_worktree(repo.id, "flock/b", "/tmp/c2", None, "bypassPermissions", "worktree", Some(orch.id))
+            .insert_worktree(repo.id, "flock/b", "/tmp/c2", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None)
             .unwrap();
         // An unrelated standalone worktree must not show up in the fleet.
-        db.insert_worktree(repo.id, "flock/loose", "/tmp/loose", None, "bypassPermissions", "worktree", None)
+        db.insert_worktree(repo.id, "flock/loose", "/tmp/loose", None, "bypassPermissions", "worktree", None, None, None, None)
             .unwrap();
 
         let fleet = db.list_children(orch.id).unwrap();
@@ -690,7 +776,7 @@ mod tests {
 
         // A childless orchestrator has an empty fleet.
         let lonely = db
-            .insert_worktree(repo.id, "tokyo", "/tmp/orch_lonely", None, "bypassPermissions", "orchestrator", None)
+            .insert_worktree(repo.id, "tokyo", "/tmp/orch_lonely", None, "bypassPermissions", "orchestrator", None, None, None, None)
             .unwrap();
         assert!(db.list_children(lonely.id).unwrap().is_empty());
     }

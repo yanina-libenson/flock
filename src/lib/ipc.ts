@@ -24,6 +24,15 @@ export interface Worktree {
   kind: string;
   /// The orchestrator worktree that spawned this one, if any. null otherwise.
   parent_id: number | null;
+  /// Explicitly chosen env profile name (an orchestrator's Profile dropdown
+  /// selection). null for normal worktrees, which resolve by repo path.
+  env_profile: string | null;
+  /// Claude `--model` override for this worktree's session. null = no
+  /// override (uses the profile's own default).
+  model: string | null;
+  /// Claude `--effort` override for this worktree's session. null = no
+  /// override.
+  effort: string | null;
 }
 
 export type PermissionMode =
@@ -236,6 +245,8 @@ export interface CreateTaskArgs {
   base?: string | null;
   title?: string | null;
   permission_mode?: PermissionMode | null;
+  model?: string | null;
+  effort?: string | null;
 }
 
 export const taskCreate = (args: CreateTaskArgs) =>
