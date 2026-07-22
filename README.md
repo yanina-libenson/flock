@@ -76,11 +76,13 @@ A single status pill per worktree, color-coded by whose turn it is:
 ### 🤖 Orchestration & scheduling
 - **Orchestrator sessions** — a first-class, **repo-less Claude** whose job is to direct a fleet. It runs in a Flock scratch space with the Flock MCP auto-wired, spawns worktrees across *any* of your registered repos, and watches + unblocks them. Its **fleet** shows nested beneath it in the sidebar (each child with its live status pill); click any to drop into it. New worktrees appear **live**, no refresh.
 - **MCP server** (`mcp/flock-mcp.mjs`): other agents (or Claude itself) can `task_create`, `task_list`, `task_status`, `task_read`, `task_input`, and manage schedules — a stdio bridge to Flock's REST API. Spawned tasks auto-link to the orchestrator that created them (via an injected `FLOCK_WORKTREE_ID`).
+- **Per-task model & effort** — each spawned task can pick its own model (`opus` · `sonnet` · `haiku` · `fable`, or a pinned model ID) and reasoning effort (`low` → `max`), baked into the launched `claude` and remembered per worktree — so an orchestrator can run cheap mechanical children on Haiku and hard ones on Opus.
+- **Cross-account guard** — when an orchestrator spawns a child into a repo that resolves to a *different* Claude account than its own, Flock refuses unless you confirm — catching the "wrong repo, wrong account" slip *before* any worktree is created.
 - **Scheduled tasks**: fire a fresh prompted task on a cron-like spec (`@every 30m`, `@every 2h`, `HH:MM`).
 - **Headless task creation**: spawn a worktree + prompted Claude without ever touching the UI.
 
 ### ⚙️ Quality-of-life
-- **Per-folder environment profiles** — inject env vars (API keys, etc.) by binding a directory to an environment; longest-prefix match, tokens stored `0600` outside any repo.
+- **Multi-account & per-folder env profiles** — bind a directory to an environment to inject env vars (API keys, etc.) *and* switch which **Claude account** a worktree authenticates as (via `CLAUDE_CONFIG_DIR`) — e.g. run your work repos under a "Thanx" login and side projects under "Personal", side by side. Longest-prefix path match, remembered per worktree; tokens stored `0600` outside any repo.
 - **Memory-aware** — idle sessions hibernate and reattach on demand; a RAM budget reaps runaway sessions; panes attach lazily so launch doesn't spawn every Claude at once.
 - **Drag a file onto the window** to insert its path into the active session.
 - **iTerm-matched theme** — Monaco 12, classic ANSI palette, pure black, `⌘B` to toggle the sidebar.
@@ -144,7 +146,7 @@ Then: add a repo (the sidebar `+`), create a worktree, and Claude starts in it. 
 | `schedule.rs` | cron-spec task firing |
 | `mcp.rs` | self-contained install of Flock's own MCP server (data dir) so orchestrator sessions get the `task_*` tools auto-wired |
 | `kb.rs` | Obsidian vault → FTS5 index, exposed over MCP |
-| `env_profiles.rs` | per-folder env-var injection |
+| `env_profiles.rs` | per-folder env-var injection + per-worktree Claude account (`CLAUDE_CONFIG_DIR`) resolution |
 | `transcript.rs` | reads Claude session JSONL for the PWA Reader |
 
 ### Frontend — `src/`
