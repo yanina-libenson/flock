@@ -260,7 +260,15 @@ export interface CreateOrchestratorArgs {
   permission_mode?: PermissionMode | null;
   /// Env profile name to run under. Null = default account (resolve by path).
   env?: string | null;
+  /// Claude `--model` for the orchestrator. Always explicit.
+  model: string;
+  /// Claude `--effort` for the orchestrator. Null = no override.
+  effort?: string | null;
 }
+
+/// Models offered in the UI. Mirrors (a subset of) ALLOWED_MODELS in commands.rs.
+export const MODEL_OPTIONS = ["opus", "sonnet", "haiku", "fable"] as const;
+export const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 /// Spawn a repo-less orchestrator session (Flock MCP auto-wired). Returns the
 /// new worktree so the UI can open it.

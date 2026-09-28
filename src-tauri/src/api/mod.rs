@@ -403,8 +403,8 @@ struct CreateTaskBody {
     /// Orchestrator worktree id that's spawning this task, so the child links
     /// back into its fleet. Sent by the Flock MCP (from FLOCK_WORKTREE_ID).
     parent_id: Option<i64>,
-    /// Claude `--model` override. Omit for no override. Validated against
-    /// `commands::ALLOWED_MODELS`.
+    /// Claude `--model` override. Validated against `commands::ALLOWED_MODELS`.
+    /// Required when `parent_id` is set (orchestrator-spawned); optional otherwise.
     model: Option<String>,
     /// Claude `--effort` override. Omit for no override. Validated against
     /// `commands::ALLOWED_EFFORTS`.
@@ -438,6 +438,9 @@ async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>
     let Some(repo_id) = repo_id else {
         return (StatusCode::BAD_REQUEST, format!("unknown repo {:?}", body.repo)).into_response();
     };
+    if let Err(e) = crate::commands::require_explicit_model(body.parent_id, body.model.as_deref()) {
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
 
     // Git + tmux work is blocking — keep it off the async executor.
     let app = ctx.app.clone();
@@ -508,6 +511,9 @@ async fn schedule_create_h(
     let Some(repo_id) = repo_id else {
         return (StatusCode::BAD_REQUEST, format!("unknown repo {:?}", body.repo)).into_response();
     };
+    if let Err(e) = crate::commands::require_explicit_model(body.parent_id, body.model.as_deref()) {
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
     match crate::commands::schedule_create_core(
         &st.db,
         repo_id,

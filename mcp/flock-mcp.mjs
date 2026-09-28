@@ -77,17 +77,18 @@ const TOOLS = [
             "sonnet",
             "haiku",
             "fable",
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             "claude-sonnet-5",
             "claude-haiku-4-5-20251001",
-            "claude-fable-5",
+            "claude-fable-5-1",
           ],
-          description: "Optional model override for this agent's session (alias or full model id). Omit to use the default.",
+          description:
+            "REQUIRED. Model for this agent's session (alias or full model id). Always choose explicitly — never rely on the default, it changes over time. haiku = mechanical work, sonnet = everyday features/fixes, opus = hard/ambiguous/high-stakes.",
         },
         effort: {
           type: "string",
           enum: ["low", "medium", "high", "xhigh", "max"],
-          description: "Optional reasoning-effort override for this agent's session. Omit to use the default.",
+          description: "Reasoning effort for this agent's session. Always pass one explicitly (low/medium for mechanical, medium/high for everyday, high/xhigh for hard work).",
         },
         confirm_cross_account: {
           type: "boolean",
@@ -95,7 +96,7 @@ const TOOLS = [
             "Flock refuses to create a task whose repo resolves to a different Claude account than you (the calling orchestrator) are running under — this catches spawning into a mismatched/wrong repo. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
         },
       },
-      required: ["repo", "prompt"],
+      required: ["repo", "prompt", "model"],
     },
     handler: (a) =>
       apiCall("POST", "/api/tasks", {
@@ -190,17 +191,17 @@ const TOOLS = [
             "sonnet",
             "haiku",
             "fable",
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             "claude-sonnet-5",
             "claude-haiku-4-5-20251001",
-            "claude-fable-5",
+            "claude-fable-5-1",
           ],
-          description: "Optional model override applied to every task this schedule fires. Omit to use the default.",
+          description: "REQUIRED. Model applied to every task this schedule fires. Always choose explicitly — never rely on the default, it changes over time.",
         },
         effort: {
           type: "string",
           enum: ["low", "medium", "high", "xhigh", "max"],
-          description: "Optional reasoning-effort override applied to every task this schedule fires. Omit to use the default.",
+          description: "Reasoning effort applied to every task this schedule fires. Always pass one explicitly.",
         },
         confirm_cross_account: {
           type: "boolean",
@@ -208,7 +209,7 @@ const TOOLS = [
             "Flock refuses to create a schedule whose repo resolves to a different Claude account than you (the calling orchestrator) are running under. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
         },
       },
-      required: ["repo", "prompt", "spec"],
+      required: ["repo", "prompt", "spec", "model"],
     },
     handler: (a) =>
       apiCall("POST", "/api/schedules", {

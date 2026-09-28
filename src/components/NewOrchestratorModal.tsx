@@ -3,6 +3,8 @@ import {
   orchestratorCreate,
   envConfigGet,
   DEFAULT_PERMISSION_MODE,
+  MODEL_OPTIONS,
+  EFFORT_OPTIONS,
   type PermissionMode,
   type FlockEnvironment,
 } from "../lib/ipc";
@@ -30,6 +32,8 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
   const [submitting, setSubmitting] = createSignal(false);
   const [envs, setEnvs] = createSignal<FlockEnvironment[]>([]);
   const [selectedEnv, setSelectedEnv] = createSignal("");
+  const [model, setModel] = createSignal<string>("opus");
+  const [effort, setEffort] = createSignal<string>("high");
 
   const permissionMode = (): PermissionMode =>
     autoApprove() ? DEFAULT_PERMISSION_MODE : "default";
@@ -64,6 +68,8 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
       title: title().trim() || null,
       permission_mode: permissionMode(),
       env: selectedEnv() || null,
+      model: model(),
+      effort: effort(),
     })
       .then((w) => {
         addWorktree(w);
@@ -142,6 +148,37 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
               onInput={(e) => setTitle(e.currentTarget.value)}
             />
           </label>
+
+          <div class="grid grid-cols-2 gap-3">
+            <label class="block">
+              <span class="block text-[11px] uppercase tracking-wide font-semibold text-[var(--color-fg-muted)] mb-1.5">
+                Model
+              </span>
+              <select
+                class="w-full rounded-md bg-[var(--color-bg)] border border-[var(--color-border)] focus:border-[var(--color-accent)] px-3 py-2 text-[13px] text-[var(--color-fg)] outline-none transition"
+                value={model()}
+                onChange={(e) => setModel(e.currentTarget.value)}
+              >
+                <For each={MODEL_OPTIONS}>
+                  {(m) => <option value={m}>{m}</option>}
+                </For>
+              </select>
+            </label>
+            <label class="block">
+              <span class="block text-[11px] uppercase tracking-wide font-semibold text-[var(--color-fg-muted)] mb-1.5">
+                Effort
+              </span>
+              <select
+                class="w-full rounded-md bg-[var(--color-bg)] border border-[var(--color-border)] focus:border-[var(--color-accent)] px-3 py-2 text-[13px] text-[var(--color-fg)] outline-none transition"
+                value={effort()}
+                onChange={(e) => setEffort(e.currentTarget.value)}
+              >
+                <For each={EFFORT_OPTIONS}>
+                  {(x) => <option value={x}>{x}</option>}
+                </For>
+              </select>
+            </label>
+          </div>
 
           <Show when={envs().length > 0}>
             <label class="block">
