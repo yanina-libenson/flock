@@ -88,7 +88,7 @@ const TOOLS = [
         effort: {
           type: "string",
           enum: ["low", "medium", "high", "xhigh", "max"],
-          description: "Reasoning effort for this agent's session. Always pass one explicitly (low/medium for mechanical, medium/high for everyday, high/xhigh for hard work).",
+          description: "REQUIRED. Reasoning effort for this agent's session. Always choose explicitly (low/medium for mechanical, medium/high for everyday, high/xhigh for hard work).",
         },
         confirm_cross_account: {
           type: "boolean",
@@ -96,7 +96,7 @@ const TOOLS = [
             "Flock refuses to create a task whose repo resolves to a different Claude account than you (the calling orchestrator) are running under — this catches spawning into a mismatched/wrong repo. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
         },
       },
-      required: ["repo", "prompt", "model"],
+      required: ["repo", "prompt", "model", "effort"],
     },
     handler: (a) =>
       apiCall("POST", "/api/tasks", {
@@ -201,7 +201,7 @@ const TOOLS = [
         effort: {
           type: "string",
           enum: ["low", "medium", "high", "xhigh", "max"],
-          description: "Reasoning effort applied to every task this schedule fires. Always pass one explicitly.",
+          description: "REQUIRED. Reasoning effort applied to every task this schedule fires. Always choose explicitly — never rely on the default.",
         },
         confirm_cross_account: {
           type: "boolean",
@@ -209,7 +209,7 @@ const TOOLS = [
             "Flock refuses to create a schedule whose repo resolves to a different Claude account than you (the calling orchestrator) are running under. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
         },
       },
-      required: ["repo", "prompt", "spec", "model"],
+      required: ["repo", "prompt", "spec", "model", "effort"],
     },
     handler: (a) =>
       apiCall("POST", "/api/schedules", {

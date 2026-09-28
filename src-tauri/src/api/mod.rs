@@ -406,8 +406,8 @@ struct CreateTaskBody {
     /// Claude `--model` override. Validated against `commands::ALLOWED_MODELS`.
     /// Required when `parent_id` is set (orchestrator-spawned); optional otherwise.
     model: Option<String>,
-    /// Claude `--effort` override. Omit for no override. Validated against
-    /// `commands::ALLOWED_EFFORTS`.
+    /// Claude `--effort` override. Validated against `commands::ALLOWED_EFFORTS`.
+    /// Required when `parent_id` is set (orchestrator-spawned); optional otherwise.
     effort: Option<String>,
     /// Explicit override for the cross-account safety check: when `parent_id`
     /// is set and the target repo resolves to a different Claude account than
@@ -438,7 +438,11 @@ async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>
     let Some(repo_id) = repo_id else {
         return (StatusCode::BAD_REQUEST, format!("unknown repo {:?}", body.repo)).into_response();
     };
-    if let Err(e) = crate::commands::require_explicit_model(body.parent_id, body.model.as_deref()) {
+    if let Err(e) = crate::commands::require_explicit_model_and_effort(
+        body.parent_id,
+        body.model.as_deref(),
+        body.effort.as_deref(),
+    ) {
         return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
     }
 
@@ -511,7 +515,11 @@ async fn schedule_create_h(
     let Some(repo_id) = repo_id else {
         return (StatusCode::BAD_REQUEST, format!("unknown repo {:?}", body.repo)).into_response();
     };
-    if let Err(e) = crate::commands::require_explicit_model(body.parent_id, body.model.as_deref()) {
+    if let Err(e) = crate::commands::require_explicit_model_and_effort(
+        body.parent_id,
+        body.model.as_deref(),
+        body.effort.as_deref(),
+    ) {
         return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
     }
     match crate::commands::schedule_create_core(

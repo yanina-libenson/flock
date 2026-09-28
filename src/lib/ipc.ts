@@ -262,8 +262,8 @@ export interface CreateOrchestratorArgs {
   env?: string | null;
   /// Claude `--model` for the orchestrator. Always explicit.
   model: string;
-  /// Claude `--effort` for the orchestrator. Null = no override.
-  effort?: string | null;
+  /// Claude `--effort` for the orchestrator. Always explicit.
+  effort: string;
 }
 
 /// Models offered in the UI. Mirrors (a subset of) ALLOWED_MODELS in commands.rs.

@@ -183,17 +183,31 @@ fn validate_model(model: &str) -> AppResult<()> {
 }
 
 /// Orchestrator-spawned work (tasks and schedules with a `parent_id`) must name
-/// its model: the CLI default changes over time, so relying on it makes a
-/// fleet's behavior drift silently. Human/API callers without a parent are
-/// unaffected.
-pub fn require_explicit_model(parent_id: Option<i64>, model: Option<&str>) -> AppResult<()> {
-    match (parent_id, model.map(str::trim)) {
-        (Some(_), None) | (Some(_), Some("")) => Err(AppError::msg(format!(
+/// its model and effort: the CLI defaults change over time, so relying on them
+/// makes a fleet's behavior drift silently. Human/API callers without a parent
+/// are unaffected.
+pub fn require_explicit_model_and_effort(
+    parent_id: Option<i64>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> AppResult<()> {
+    if parent_id.is_none() {
+        return Ok(());
+    }
+    let missing = |v: Option<&str>| v.map(str::trim).unwrap_or("").is_empty();
+    if missing(model) {
+        return Err(AppError::msg(format!(
             "model is required when an orchestrator spawns work — pass one of \
              {ALLOWED_MODELS:?} explicitly (never rely on the default, it changes)"
-        ))),
-        _ => Ok(()),
+        )));
     }
+    if missing(effort) {
+        return Err(AppError::msg(format!(
+            "effort is required when an orchestrator spawns work — pass one of \
+             {ALLOWED_EFFORTS:?} explicitly (never rely on the default, it changes)"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_effort(effort: &str) -> AppResult<()> {
@@ -742,7 +756,7 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool) -> String {
     };
     let tools = if has_mcp {
         "You have the Flock MCP tools:\n\
-         - task_create(repo, prompt, model, effort?, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `model` is REQUIRED and `effort` should always be set too — see \"Choosing model/effort\" below. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
+         - task_create(repo, prompt, model, effort, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `model` and `effort` are both REQUIRED — see \"Choosing model/effort\" below. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
          - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
@@ -774,13 +788,13 @@ independently of your session (long-running, resumable later, tracked in Flock's
 task titled \"Research: ...\" or \"Investigate: ...\" is a strong signal it belongs in a \
 native subagent, not a worktree.\n\n\
 Choosing model/effort (ALWAYS explicit on task_create — never rely on the default, \
-it changes over time and task_create rejects calls without `model`): use `haiku` for \
+it changes over time and task_create rejects calls without `model` or `effort`): use `haiku` for \
 mechanical, well-specified work — renames, formatting, boilerplate, simple scripted \
 changes — it's the cheapest and fastest. Use `sonnet` for most everyday feature work, \
 bug fixes, and typical PRs. Use `opus` with `effort: \"high\"` or `\"xhigh\"` for hard \
 architecture decisions, ambiguous or high-stakes changes, security-sensitive work, or \
-anything you'd want a second, careful pass on. Pass an `effort` every time as well \
-(`low`/`medium` for mechanical work, `medium`/`high` for everyday work). When unsure, \
+anything you'd want a second, careful pass on. `effort` is required too: \
+`low`/`medium` for mechanical work, `medium`/`high` for everyday work. When unsure, \
 pick `sonnet` + `medium` explicitly rather than omitting.\n\n\
 Following your fleet: you are NOT notified when a child changes state — Flock \
 doesn't ping you. When you want to know where a child stands, check it yourself with \
@@ -805,13 +819,11 @@ pub fn start_orchestrator_core(
     permission_mode: Option<String>,
     env: Option<String>,
     model: &str,
-    effort: Option<String>,
+    effort: &str,
 ) -> AppResult<Worktree> {
     // Validate before touching disk so a bad value leaves no scratch dir behind.
     validate_model(model)?;
-    if let Some(e) = effort.as_deref() {
-        validate_effort(e)?;
-    }
+    validate_effort(effort)?;
     let repo = ensure_internal_repo(&state.db)?;
     let root = orchestrators_root()?;
 
@@ -854,7 +866,7 @@ pub fn start_orchestrator_core(
         None,
         env.as_deref(),
         Some(model),
-        effort.as_deref(),
+        Some(effort),
     )?;
 
     // The MCP talks to the REST API — make sure it's running.
@@ -884,7 +896,7 @@ pub fn start_orchestrator_core(
         Some(&sys),
         None,
         Some(model),
-        effort.as_deref(),
+        Some(effort),
     )?;
     state.db.touch_worktree(w.id)?;
     let _ = app.emit("worktree:created", &w);
@@ -902,8 +914,8 @@ pub struct CreateOrchestratorArgs {
     /// Claude `--model` for the orchestrator. Required — never rely on the
     /// CLI's default, which changes over time.
     pub model: String,
-    /// Claude `--effort` for the orchestrator. None = no override.
-    pub effort: Option<String>,
+    /// Claude `--effort` for the orchestrator. Required, same reason as model.
+    pub effort: String,
 }
 
 /// Spawn an orchestrator session from the desktop. Returns the new worktree so
@@ -922,7 +934,7 @@ pub fn orchestrator_create(
         args.permission_mode,
         args.env,
         &args.model,
-        args.effort,
+        &args.effort,
     )
 }
 
@@ -1329,18 +1341,21 @@ pub fn kb_search(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn orchestrated_work_requires_explicit_model() {
-        assert!(super::require_explicit_model(Some(1), None).is_err());
-        assert!(super::require_explicit_model(Some(1), Some("  ")).is_err());
-        assert!(super::require_explicit_model(Some(1), Some("sonnet")).is_ok());
+    fn orchestrated_work_requires_explicit_model_and_effort() {
+        use super::require_explicit_model_and_effort as req;
+        assert!(req(Some(1), None, Some("high")).is_err());
+        assert!(req(Some(1), Some("  "), Some("high")).is_err());
+        assert!(req(Some(1), Some("sonnet"), None).is_err());
+        assert!(req(Some(1), Some("sonnet"), Some("")).is_err());
+        assert!(req(Some(1), Some("sonnet"), Some("medium")).is_ok());
         // No parent (desktop / plain API callers) keeps the old behavior.
-        assert!(super::require_explicit_model(None, None).is_ok());
+        assert!(req(None, None, None).is_ok());
     }
 
     #[test]
     fn orchestrator_prompt_tells_it_to_always_pass_a_model() {
         let sys = super::orchestrator_system_prompt(&[], true);
-        assert!(sys.contains("task_create(repo, prompt, model, effort?"));
+        assert!(sys.contains("task_create(repo, prompt, model, effort,"));
         assert!(sys.contains("ALWAYS explicit on task_create"));
         assert!(!sys.contains("omit for the default"));
     }
