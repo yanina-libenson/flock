@@ -23,6 +23,7 @@ import {
   setWorktreePrStatus,
   applyWorktreeTitle,
   addWorktree,
+  removeWorktreeFromStore,
   hibernatePane,
   jumpToNextNeedingInput,
   worktreesNeedingInput,
@@ -36,6 +37,7 @@ import {
   onWorktreePrStatus,
   onWorktreeHibernated,
   onWorktreeCreated,
+  onWorktreeRemoved,
   onPtyExit,
   setActiveWorktree,
   sessionWriteText,
@@ -198,6 +200,8 @@ function App() {
     // cron, or the REST API) — add it live so it shows in the sidebar without a
     // manual refresh.
     const createdUnlisten = onWorktreeCreated((w) => addWorktree(w));
+    // An orchestrator removed a worktree (task_remove) — drop it live.
+    const removedUnlisten = onWorktreeRemoved((id) => removeWorktreeFromStore(id));
     const prStatusUnlisten = onWorktreePrStatus((e) =>
       setWorktreePrStatus(e.worktree_id, e.status),
     );
@@ -245,6 +249,7 @@ function App() {
       titleUnlisten.then((f) => f());
       exitUnlisten.then((f) => f());
       createdUnlisten.then((f) => f());
+      removedUnlisten.then((f) => f());
       prStatusUnlisten.then((f) => f());
       hibernateUnlisten.then((f) => f());
       actionUnlisten.then((l) => l.unregister());

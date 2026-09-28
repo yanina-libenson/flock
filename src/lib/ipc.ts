@@ -357,6 +357,13 @@ export const onWorktreeHibernated = (
 /// the REST API) — the backend pushes the full row so the sidebar can add it
 /// live, without a manual refresh. The desktop's own create flows add the row
 /// directly, so this mainly surfaces spawned/fleet worktrees.
+/// A worktree was removed out-of-band (an orchestrator's task_remove) — drop it
+/// from the sidebar and close its pane. Payload is the worktree id.
+export const onWorktreeRemoved = (
+  cb: (id: number) => void,
+): Promise<UnlistenFn> =>
+  listen<number>("worktree:removed", (e) => cb(e.payload));
+
 export const onWorktreeCreated = (
   cb: (w: Worktree) => void,
 ): Promise<UnlistenFn> =>

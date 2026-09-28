@@ -117,6 +117,23 @@ const TOOLS = [
       }),
   },
   {
+    name: "task_remove",
+    description:
+      "Remove a worktree — same as the ✕ in Flock's sidebar: kills its session and deletes the checkout (the git branch is kept). ONLY use this when the user explicitly asks you to remove specific worktrees; never on your own initiative or as automatic cleanup. Refuses worktrees with uncommitted changes unless force is true — only pass force after telling the user what would be lost and getting an explicit yes. Cannot remove orchestrators.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number", description: "Worktree id (from task_list)" },
+        force: {
+          type: "boolean",
+          description: "Remove even with uncommitted changes (that work is lost). Only with the user's explicit OK. Default false.",
+        },
+      },
+      required: ["id"],
+    },
+    handler: (a) => apiCall("POST", `/api/worktrees/${a.id}/remove`, { force: a.force === true }),
+  },
+  {
     name: "task_list",
     description: "List all worktrees with their live agent status (working / idle / needs_input).",
     inputSchema: { type: "object", properties: {} },

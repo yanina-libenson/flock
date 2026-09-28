@@ -360,7 +360,7 @@ pub fn worktrees_list(state: State<'_, AppState>, repo_id: i64) -> AppResult<Vec
 /// resume-on-input lock, remove its git worktree (or scratch dir, for an
 /// orchestrator), and delete its DB row. `force` is passed to
 /// `git::remove_worktree` so callers can delete even dirty/unpushed trees.
-fn teardown_worktree(state: &State<'_, AppState>, w: &Worktree, force: bool) -> AppResult<()> {
+fn teardown_worktree(state: &AppState, w: &Worktree, force: bool) -> AppResult<()> {
     // Tear down the tmux session and the PTY client before removing the
     // worktree directory, otherwise tmux's pane cwd points at a vanishing dir
     // and the server logs get noisy.
@@ -399,6 +399,45 @@ pub fn worktree_remove(
         }
     }
     teardown_worktree(&state, &w, force)
+}
+
+/// Why an orchestrator's remove request was refused, so the API can map each
+/// case to a clear status instead of a generic 400.
+#[derive(Debug)]
+pub enum RemoveRefusal {
+    NotFound,
+    /// Orchestrators (and their fleets) are removed from the UI only.
+    IsOrchestrator,
+    /// Uncommitted changes and `force` wasn't set — ask the user first.
+    Dirty(git::DirtySummary),
+    Other(AppError),
+}
+
+/// Remove a worktree on an orchestrator's behalf — the same teardown the
+/// sidebar's ✕ does, with two extra guards the UI covers with a confirm()
+/// dialog: never an orchestrator, and never a dirty worktree unless `force`.
+/// The git branch itself is kept (only the checkout + session go away).
+pub fn remove_worktree_for_orchestrator(
+    app: &AppHandle,
+    state: &AppState,
+    id: i64,
+    force: bool,
+) -> Result<(), RemoveRefusal> {
+    let w = state.db.get_worktree(id).map_err(|_| RemoveRefusal::NotFound)?;
+    if w.kind == "orchestrator" {
+        return Err(RemoveRefusal::IsOrchestrator);
+    }
+    if !force {
+        // A missing/broken checkout reads as clean — nothing left to lose.
+        if let Ok(d) = git::dirty_summary(Path::new(&w.path)) {
+            if d.staged + d.unstaged + d.untracked > 0 {
+                return Err(RemoveRefusal::Dirty(d));
+            }
+        }
+    }
+    teardown_worktree(state, &w, force).map_err(RemoveRefusal::Other)?;
+    let _ = app.emit("worktree:removed", id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -760,6 +799,7 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool) -> String {
          - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
+         - task_remove(id, force?): remove a worktree — the same as the ✕ in Flock's sidebar (kills its session, deletes the checkout; the git branch is kept). ONLY call this when the user explicitly asks you to remove specific worktrees in this conversation — never on your own initiative, never as cleanup after a task finishes. Confirm which ids you're about to remove if there's any ambiguity. It refuses dirty worktrees unless force:true; only pass force after telling the user what uncommitted work would be lost and getting an explicit yes. It can't remove orchestrators.\n\
          - kb_search / kb_read / kb_ingest: your durable memory across sessions."
     } else {
         "The Flock MCP tools could not be auto-wired. Ask the user to enable Remote access in Flock settings and add the Flock MCP, then restart you."
@@ -1350,6 +1390,13 @@ mod tests {
         assert!(req(Some(1), Some("sonnet"), Some("medium")).is_ok());
         // No parent (desktop / plain API callers) keeps the old behavior.
         assert!(req(None, None, None).is_ok());
+    }
+
+    #[test]
+    fn orchestrator_prompt_gates_task_remove_on_user_request() {
+        let sys = super::orchestrator_system_prompt(&[], true);
+        assert!(sys.contains("task_remove(id, force?)"));
+        assert!(sys.contains("ONLY call this when the user explicitly asks"));
     }
 
     #[test]
