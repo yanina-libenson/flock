@@ -260,7 +260,15 @@ export interface CreateOrchestratorArgs {
   permission_mode?: PermissionMode | null;
   /// Env profile name to run under. Null = default account (resolve by path).
   env?: string | null;
+  /// Claude `--model` for the orchestrator. Always explicit.
+  model: string;
+  /// Claude `--effort` for the orchestrator. Always explicit.
+  effort: string;
 }
+
+/// Models offered in the UI. Mirrors (a subset of) ALLOWED_MODELS in commands.rs.
+export const MODEL_OPTIONS = ["opus", "sonnet", "haiku", "fable"] as const;
+export const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 /// Spawn a repo-less orchestrator session (Flock MCP auto-wired). Returns the
 /// new worktree so the UI can open it.
@@ -349,6 +357,13 @@ export const onWorktreeHibernated = (
 /// the REST API) — the backend pushes the full row so the sidebar can add it
 /// live, without a manual refresh. The desktop's own create flows add the row
 /// directly, so this mainly surfaces spawned/fleet worktrees.
+/// A worktree was removed out-of-band (an orchestrator's task_remove) — drop it
+/// from the sidebar and close its pane. Payload is the worktree id.
+export const onWorktreeRemoved = (
+  cb: (id: number) => void,
+): Promise<UnlistenFn> =>
+  listen<number>("worktree:removed", (e) => cb(e.payload));
+
 export const onWorktreeCreated = (
   cb: (w: Worktree) => void,
 ): Promise<UnlistenFn> =>

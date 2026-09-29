@@ -220,6 +220,19 @@ export function addWorktree(w: Worktree) {
   });
 }
 
+/// Drop a worktree removed out-of-band (worktree:removed) from the store.
+export function removeWorktreeFromStore(id: number) {
+  setStore("orchestrators", (prev) => prev.filter((o) => o.id !== id));
+  setStore("worktreesByRepo", (prev) => {
+    const next: typeof prev = {};
+    for (const [repoId, list] of Object.entries(prev)) {
+      next[Number(repoId)] = (list ?? []).filter((w) => w.id !== id);
+    }
+    return next;
+  });
+  closePane(id);
+}
+
 export function setWorktreeStatus(worktreeId: number, status: WorktreeStatus) {
   setStore("statusByWorktree", worktreeId, status);
 }

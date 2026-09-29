@@ -160,9 +160,12 @@ const ALLOWED_MODELS: &[&str] = &[
     "sonnet",
     "haiku",
     "fable",
-    "claude-opus-4-8",
+    "claude-opus-5-5",
     "claude-sonnet-5",
     "claude-haiku-4-5-20251001",
+    "claude-fable-5-1",
+    // Older ids, still accepted so existing schedules/rows keep working.
+    "claude-opus-4-8",
     "claude-fable-5",
 ];
 
@@ -177,6 +180,34 @@ fn validate_model(model: &str) -> AppResult<()> {
             "invalid model {model:?}; must be one of {ALLOWED_MODELS:?}"
         )))
     }
+}
+
+/// Orchestrator-spawned work (tasks and schedules with a `parent_id`) must name
+/// its model and effort: the CLI defaults change over time, so relying on them
+/// makes a fleet's behavior drift silently. Human/API callers without a parent
+/// are unaffected.
+pub fn require_explicit_model_and_effort(
+    parent_id: Option<i64>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> AppResult<()> {
+    if parent_id.is_none() {
+        return Ok(());
+    }
+    let missing = |v: Option<&str>| v.map(str::trim).unwrap_or("").is_empty();
+    if missing(model) {
+        return Err(AppError::msg(format!(
+            "model is required when an orchestrator spawns work — pass one of \
+             {ALLOWED_MODELS:?} explicitly (never rely on the default, it changes)"
+        )));
+    }
+    if missing(effort) {
+        return Err(AppError::msg(format!(
+            "effort is required when an orchestrator spawns work — pass one of \
+             {ALLOWED_EFFORTS:?} explicitly (never rely on the default, it changes)"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_effort(effort: &str) -> AppResult<()> {
@@ -329,7 +360,7 @@ pub fn worktrees_list(state: State<'_, AppState>, repo_id: i64) -> AppResult<Vec
 /// resume-on-input lock, remove its git worktree (or scratch dir, for an
 /// orchestrator), and delete its DB row. `force` is passed to
 /// `git::remove_worktree` so callers can delete even dirty/unpushed trees.
-fn teardown_worktree(state: &State<'_, AppState>, w: &Worktree, force: bool) -> AppResult<()> {
+fn teardown_worktree(state: &AppState, w: &Worktree, force: bool) -> AppResult<()> {
     // Tear down the tmux session and the PTY client before removing the
     // worktree directory, otherwise tmux's pane cwd points at a vanishing dir
     // and the server logs get noisy.
@@ -368,6 +399,45 @@ pub fn worktree_remove(
         }
     }
     teardown_worktree(&state, &w, force)
+}
+
+/// Why an orchestrator's remove request was refused, so the API can map each
+/// case to a clear status instead of a generic 400.
+#[derive(Debug)]
+pub enum RemoveRefusal {
+    NotFound,
+    /// Orchestrators (and their fleets) are removed from the UI only.
+    IsOrchestrator,
+    /// Uncommitted changes and `force` wasn't set — ask the user first.
+    Dirty(git::DirtySummary),
+    Other(AppError),
+}
+
+/// Remove a worktree on an orchestrator's behalf — the same teardown the
+/// sidebar's ✕ does, with two extra guards the UI covers with a confirm()
+/// dialog: never an orchestrator, and never a dirty worktree unless `force`.
+/// The git branch itself is kept (only the checkout + session go away).
+pub fn remove_worktree_for_orchestrator(
+    app: &AppHandle,
+    state: &AppState,
+    id: i64,
+    force: bool,
+) -> Result<(), RemoveRefusal> {
+    let w = state.db.get_worktree(id).map_err(|_| RemoveRefusal::NotFound)?;
+    if w.kind == "orchestrator" {
+        return Err(RemoveRefusal::IsOrchestrator);
+    }
+    if !force {
+        // A missing/broken checkout reads as clean — nothing left to lose.
+        if let Ok(d) = git::dirty_summary(Path::new(&w.path)) {
+            if d.staged + d.unstaged + d.untracked > 0 {
+                return Err(RemoveRefusal::Dirty(d));
+            }
+        }
+    }
+    teardown_worktree(state, &w, force).map_err(RemoveRefusal::Other)?;
+    let _ = app.emit("worktree:removed", id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -725,10 +795,11 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool) -> String {
     };
     let tools = if has_mcp {
         "You have the Flock MCP tools:\n\
-         - task_create(repo, prompt, model?, effort?, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `model`/`effort` are optional — see \"Choosing model/effort\" below. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
+         - task_create(repo, prompt, model, effort, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `model` and `effort` are both REQUIRED — see \"Choosing model/effort\" below. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
          - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
+         - task_remove(id, force?): remove a worktree — the same as the ✕ in Flock's sidebar (kills its session, deletes the checkout; the git branch is kept). ONLY call this when the user explicitly asks you to remove specific worktrees in this conversation — never on your own initiative, never as cleanup after a task finishes. Confirm which ids you're about to remove if there's any ambiguity. It refuses dirty worktrees unless force:true; only pass force after telling the user what uncommitted work would be lost and getting an explicit yes. It can't remove orchestrators.\n\
          - kb_search / kb_read / kb_ingest: your durable memory across sessions."
     } else {
         "The Flock MCP tools could not be auto-wired. Ask the user to enable Remote access in Flock settings and add the Flock MCP, then restart you."
@@ -756,13 +827,15 @@ a branch and (eventually) a PR in a SPECIFIC repo, and benefits from running \
 independently of your session (long-running, resumable later, tracked in Flock's UI). A \
 task titled \"Research: ...\" or \"Investigate: ...\" is a strong signal it belongs in a \
 native subagent, not a worktree.\n\n\
-Choosing model/effort (optional on task_create, omit for the default): use `haiku` for \
+Choosing model/effort (ALWAYS explicit on task_create — never rely on the default, \
+it changes over time and task_create rejects calls without `model` or `effort`): use `haiku` for \
 mechanical, well-specified work — renames, formatting, boilerplate, simple scripted \
-changes — it's the cheapest and fastest. Omit `model` (default) for most everyday \
-feature work, bug fixes, and typical PRs. Use `opus` with `effort: \"high\"` or `\"xhigh\"` \
-for hard architecture decisions, ambiguous or high-stakes changes, security-sensitive \
-work, or anything you'd want a second, careful pass on. When unsure, omit both rather \
-than guessing.\n\n\
+changes — it's the cheapest and fastest. Use `sonnet` for most everyday feature work, \
+bug fixes, and typical PRs. Use `opus` with `effort: \"high\"` or `\"xhigh\"` for hard \
+architecture decisions, ambiguous or high-stakes changes, security-sensitive work, or \
+anything you'd want a second, careful pass on. `effort` is required too: \
+`low`/`medium` for mechanical work, `medium`/`high` for everyday work. When unsure, \
+pick `sonnet` + `medium` explicitly rather than omitting.\n\n\
 Following your fleet: you are NOT notified when a child changes state — Flock \
 doesn't ping you. When you want to know where a child stands, check it yourself with \
 task_status (the whole fleet's states) or task_read (one child's transcript). A \
@@ -785,7 +858,12 @@ pub fn start_orchestrator_core(
     title: Option<String>,
     permission_mode: Option<String>,
     env: Option<String>,
+    model: &str,
+    effort: &str,
 ) -> AppResult<Worktree> {
+    // Validate before touching disk so a bad value leaves no scratch dir behind.
+    validate_model(model)?;
+    validate_effort(effort)?;
     let repo = ensure_internal_repo(&state.db)?;
     let root = orchestrators_root()?;
 
@@ -827,8 +905,8 @@ pub fn start_orchestrator_core(
         "orchestrator",
         None,
         env.as_deref(),
-        None,
-        None,
+        Some(model),
+        Some(effort),
     )?;
 
     // The MCP talks to the REST API — make sure it's running.
@@ -849,7 +927,17 @@ pub fn start_orchestrator_core(
         Some(name) => env_profiles::resolve_vars_by_name(&cfg, Some(name)),
         None => env_profiles::resolve_vars(&cfg, &path.to_string_lossy()),
     };
-    pty::start_detached(w.id, &path, pm, &env_vars, Some(prompt), Some(&sys), None, None, None)?;
+    pty::start_detached(
+        w.id,
+        &path,
+        pm,
+        &env_vars,
+        Some(prompt),
+        Some(&sys),
+        None,
+        Some(model),
+        Some(effort),
+    )?;
     state.db.touch_worktree(w.id)?;
     let _ = app.emit("worktree:created", &w);
     Ok(w)
@@ -863,6 +951,11 @@ pub struct CreateOrchestratorArgs {
     /// Name of the env profile to run under. None resolves by scratch path
     /// (i.e. the default account).
     pub env: Option<String>,
+    /// Claude `--model` for the orchestrator. Required — never rely on the
+    /// CLI's default, which changes over time.
+    pub model: String,
+    /// Claude `--effort` for the orchestrator. Required, same reason as model.
+    pub effort: String,
 }
 
 /// Spawn an orchestrator session from the desktop. Returns the new worktree so
@@ -880,6 +973,8 @@ pub fn orchestrator_create(
         args.title,
         args.permission_mode,
         args.env,
+        &args.model,
+        &args.effort,
     )
 }
 
@@ -1285,6 +1380,40 @@ pub fn kb_search(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn orchestrated_work_requires_explicit_model_and_effort() {
+        use super::require_explicit_model_and_effort as req;
+        assert!(req(Some(1), None, Some("high")).is_err());
+        assert!(req(Some(1), Some("  "), Some("high")).is_err());
+        assert!(req(Some(1), Some("sonnet"), None).is_err());
+        assert!(req(Some(1), Some("sonnet"), Some("")).is_err());
+        assert!(req(Some(1), Some("sonnet"), Some("medium")).is_ok());
+        // No parent (desktop / plain API callers) keeps the old behavior.
+        assert!(req(None, None, None).is_ok());
+    }
+
+    #[test]
+    fn orchestrator_prompt_gates_task_remove_on_user_request() {
+        let sys = super::orchestrator_system_prompt(&[], true);
+        assert!(sys.contains("task_remove(id, force?)"));
+        assert!(sys.contains("ONLY call this when the user explicitly asks"));
+    }
+
+    #[test]
+    fn orchestrator_prompt_tells_it_to_always_pass_a_model() {
+        let sys = super::orchestrator_system_prompt(&[], true);
+        assert!(sys.contains("task_create(repo, prompt, model, effort,"));
+        assert!(sys.contains("ALWAYS explicit on task_create"));
+        assert!(!sys.contains("omit for the default"));
+    }
+
+    #[test]
+    fn current_model_ids_are_allowed() {
+        for m in ["claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-fable-5-1"] {
+            assert!(super::validate_model(m).is_ok(), "{m}");
+        }
+    }
+
     use super::*;
 
     #[test]

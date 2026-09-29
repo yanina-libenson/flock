@@ -368,6 +368,56 @@ async fn input(
 /// Map a `DeliverError` to a clear HTTP response. A dead, unknown, or
 /// unresumable session yields 404 / 409 / 500 with a message — never an opaque
 /// 502 (the pre-fix failure mode that made callers think the API was down).
+#[derive(Deserialize, Default)]
+struct RemoveWorktreeBody {
+    #[serde(default)]
+    force: bool,
+}
+
+/// Remove a worktree (the sidebar ✕), for orchestrators. `{"force?": bool}`.
+async fn remove_worktree_h(
+    State(ctx): State<ApiCtx>,
+    Path(id): Path<i64>,
+    body: Option<Json<RemoveWorktreeBody>>,
+) -> Response {
+    let force = body.map(|b| b.0.force).unwrap_or(false);
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        crate::commands::remove_worktree_for_orchestrator(&app, &st, id, force)
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => remove_refusal_response(e, id),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "join failed").into_response(),
+    }
+}
+
+fn remove_refusal_response(err: crate::commands::RemoveRefusal, id: i64) -> Response {
+    use crate::commands::RemoveRefusal;
+    match err {
+        RemoveRefusal::NotFound => {
+            (StatusCode::NOT_FOUND, format!("worktree {id} not found")).into_response()
+        }
+        RemoveRefusal::IsOrchestrator => (
+            StatusCode::FORBIDDEN,
+            format!("worktree {id} is an orchestrator — orchestrators can only be removed from the Flock UI"),
+        )
+            .into_response(),
+        RemoveRefusal::Dirty(d) => (
+            StatusCode::CONFLICT,
+            format!(
+                "worktree {id} has uncommitted changes ({} staged, {} unstaged, {} untracked). \
+                 Tell the user what would be lost and only retry with force:true if they explicitly agree.",
+                d.staged, d.unstaged, d.untracked
+            ),
+        )
+            .into_response(),
+        RemoveRefusal::Other(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
 fn input_error_response(err: crate::commands::DeliverError, id: i64) -> Response {
     use crate::commands::DeliverError;
     match err {
@@ -403,11 +453,11 @@ struct CreateTaskBody {
     /// Orchestrator worktree id that's spawning this task, so the child links
     /// back into its fleet. Sent by the Flock MCP (from FLOCK_WORKTREE_ID).
     parent_id: Option<i64>,
-    /// Claude `--model` override. Omit for no override. Validated against
-    /// `commands::ALLOWED_MODELS`.
+    /// Claude `--model` override. Validated against `commands::ALLOWED_MODELS`.
+    /// Required when `parent_id` is set (orchestrator-spawned); optional otherwise.
     model: Option<String>,
-    /// Claude `--effort` override. Omit for no override. Validated against
-    /// `commands::ALLOWED_EFFORTS`.
+    /// Claude `--effort` override. Validated against `commands::ALLOWED_EFFORTS`.
+    /// Required when `parent_id` is set (orchestrator-spawned); optional otherwise.
     effort: Option<String>,
     /// Explicit override for the cross-account safety check: when `parent_id`
     /// is set and the target repo resolves to a different Claude account than
@@ -438,6 +488,13 @@ async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>
     let Some(repo_id) = repo_id else {
         return (StatusCode::BAD_REQUEST, format!("unknown repo {:?}", body.repo)).into_response();
     };
+    if let Err(e) = crate::commands::require_explicit_model_and_effort(
+        body.parent_id,
+        body.model.as_deref(),
+        body.effort.as_deref(),
+    ) {
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
 
     // Git + tmux work is blocking — keep it off the async executor.
     let app = ctx.app.clone();
@@ -508,6 +565,13 @@ async fn schedule_create_h(
     let Some(repo_id) = repo_id else {
         return (StatusCode::BAD_REQUEST, format!("unknown repo {:?}", body.repo)).into_response();
     };
+    if let Err(e) = crate::commands::require_explicit_model_and_effort(
+        body.parent_id,
+        body.model.as_deref(),
+        body.effort.as_deref(),
+    ) {
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
     match crate::commands::schedule_create_core(
         &st.db,
         repo_id,
@@ -969,6 +1033,7 @@ fn build_router(ctx: ApiCtx) -> Router {
         .route("/worktrees/:id/input", post(input))
         .route("/worktrees/:id/resize", post(resize_window))
         .route("/worktrees/:id/transcript", get(transcript_h))
+        .route("/worktrees/:id/remove", post(remove_worktree_h))
         .route("/tasks", post(create_task))
         .route("/repos", get(repos))
         .route("/schedules", get(schedules_list).post(schedule_create_h))
@@ -1098,6 +1163,18 @@ mod tests {
         assert_eq!(map_key("ctrl-c"), Some("C-c"));
         assert_eq!(map_key("rm -rf"), None);
         assert_eq!(map_key(""), None);
+    }
+
+    #[test]
+    fn remove_refusals_map_to_clear_codes() {
+        use crate::commands::RemoveRefusal;
+        assert_eq!(remove_refusal_response(RemoveRefusal::NotFound, 1).status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            remove_refusal_response(RemoveRefusal::IsOrchestrator, 1).status(),
+            StatusCode::FORBIDDEN
+        );
+        let d = crate::git::DirtySummary { staged: 1, unstaged: 0, untracked: 2 };
+        assert_eq!(remove_refusal_response(RemoveRefusal::Dirty(d), 1).status(), StatusCode::CONFLICT);
     }
 
     #[test]

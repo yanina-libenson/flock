@@ -77,17 +77,18 @@ const TOOLS = [
             "sonnet",
             "haiku",
             "fable",
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             "claude-sonnet-5",
             "claude-haiku-4-5-20251001",
-            "claude-fable-5",
+            "claude-fable-5-1",
           ],
-          description: "Optional model override for this agent's session (alias or full model id). Omit to use the default.",
+          description:
+            "REQUIRED. Model for this agent's session (alias or full model id). Always choose explicitly — never rely on the default, it changes over time. haiku = mechanical work, sonnet = everyday features/fixes, opus = hard/ambiguous/high-stakes.",
         },
         effort: {
           type: "string",
           enum: ["low", "medium", "high", "xhigh", "max"],
-          description: "Optional reasoning-effort override for this agent's session. Omit to use the default.",
+          description: "REQUIRED. Reasoning effort for this agent's session. Always choose explicitly (low/medium for mechanical, medium/high for everyday, high/xhigh for hard work).",
         },
         confirm_cross_account: {
           type: "boolean",
@@ -95,7 +96,7 @@ const TOOLS = [
             "Flock refuses to create a task whose repo resolves to a different Claude account than you (the calling orchestrator) are running under — this catches spawning into a mismatched/wrong repo. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
         },
       },
-      required: ["repo", "prompt"],
+      required: ["repo", "prompt", "model", "effort"],
     },
     handler: (a) =>
       apiCall("POST", "/api/tasks", {
@@ -114,6 +115,23 @@ const TOOLS = [
           ? Number(process.env.FLOCK_WORKTREE_ID)
           : undefined,
       }),
+  },
+  {
+    name: "task_remove",
+    description:
+      "Remove a worktree — same as the ✕ in Flock's sidebar: kills its session and deletes the checkout (the git branch is kept). ONLY use this when the user explicitly asks you to remove specific worktrees; never on your own initiative or as automatic cleanup. Refuses worktrees with uncommitted changes unless force is true — only pass force after telling the user what would be lost and getting an explicit yes. Cannot remove orchestrators.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number", description: "Worktree id (from task_list)" },
+        force: {
+          type: "boolean",
+          description: "Remove even with uncommitted changes (that work is lost). Only with the user's explicit OK. Default false.",
+        },
+      },
+      required: ["id"],
+    },
+    handler: (a) => apiCall("POST", `/api/worktrees/${a.id}/remove`, { force: a.force === true }),
   },
   {
     name: "task_list",
@@ -190,17 +208,17 @@ const TOOLS = [
             "sonnet",
             "haiku",
             "fable",
-            "claude-opus-4-8",
+            "claude-opus-5-5",
             "claude-sonnet-5",
             "claude-haiku-4-5-20251001",
-            "claude-fable-5",
+            "claude-fable-5-1",
           ],
-          description: "Optional model override applied to every task this schedule fires. Omit to use the default.",
+          description: "REQUIRED. Model applied to every task this schedule fires. Always choose explicitly — never rely on the default, it changes over time.",
         },
         effort: {
           type: "string",
           enum: ["low", "medium", "high", "xhigh", "max"],
-          description: "Optional reasoning-effort override applied to every task this schedule fires. Omit to use the default.",
+          description: "REQUIRED. Reasoning effort applied to every task this schedule fires. Always choose explicitly — never rely on the default.",
         },
         confirm_cross_account: {
           type: "boolean",
@@ -208,7 +226,7 @@ const TOOLS = [
             "Flock refuses to create a schedule whose repo resolves to a different Claude account than you (the calling orchestrator) are running under. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
         },
       },
-      required: ["repo", "prompt", "spec"],
+      required: ["repo", "prompt", "spec", "model", "effort"],
     },
     handler: (a) =>
       apiCall("POST", "/api/schedules", {
