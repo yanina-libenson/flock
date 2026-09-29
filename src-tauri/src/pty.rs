@@ -833,27 +833,73 @@ pub fn tmux_capture_pane_ansi(worktree_id: i64) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Max bytes of literal text per `send-keys -l` call. DO NOT raise this or
+/// collapse the chunks back into a single call: Claude Code's TUI treats any
+/// single input read above ~512–900 bytes as a *paste*. One big `send-keys`
+/// reaches it as ~1022-byte pty reads, so a long message either loses every
+/// chunk but the last (the child sees only the tail) or becomes a
+/// "[Pasted text #N]" that is submitted wrapped in `<pasted_content>` tags —
+/// which the child treats as untrusted data and may refuse to act on.
+/// Bracketed paste (`paste-buffer -p`) has the same wrapping problem. 256
+/// bytes with a short gap was verified byte-exact on a ~2KB message; 900 was not.
+const SEND_CHUNK_BYTES: usize = 256;
+/// Gap between chunks so each lands as its own small read (see above).
+const SEND_CHUNK_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Split `s` into consecutive pieces of at most `max` bytes, never cutting a
+/// UTF-8 codepoint. `max` must be ≥ 4 (the longest codepoint).
+fn utf8_chunks(s: &str, max: usize) -> Vec<&str> {
+    assert!(max >= 4, "chunk size must fit any UTF-8 codepoint");
+    let mut out = Vec::new();
+    let mut rest = s;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(max);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (head, tail) = rest.split_at(end);
+        out.push(head);
+        rest = tail;
+    }
+    out
+}
+
 /// Send input to a worktree's tmux session. Literal text goes through
-/// `send-keys -l` (typed verbatim); otherwise `payload` is a tmux key name
-/// (`Enter`, `Escape`, `C-c`, …). Goes straight to tmux (args, no shell) so
-/// the text is never interpreted as a command. Returns false if tmux or the
-/// session is unavailable.
+/// `send-keys -l` (typed verbatim), in `SEND_CHUNK_BYTES` pieces when long so
+/// Claude Code doesn't treat it as a paste; otherwise `payload` is a tmux key
+/// name (`Enter`, `Escape`, `C-c`, …). Goes straight to tmux (args, no shell)
+/// so the text is never interpreted as a command. Returns false if tmux or the
+/// session is unavailable, or any chunk fails.
 pub fn tmux_send(worktree_id: i64, literal: bool, payload: &str) -> bool {
     let Some(bin) = tmux_bin() else {
         return false;
     };
     let name = tmux_session_name(worktree_id);
-    let mut args: Vec<&str> = vec!["-L", TMUX_SOCKET, "send-keys", "-t", name.as_str()];
-    if literal {
-        args.push("-l");
-        args.push("--");
+    let send = |literal: bool, text: &str| {
+        let mut args: Vec<&str> = vec!["-L", TMUX_SOCKET, "send-keys", "-t", name.as_str()];
+        if literal {
+            args.push("-l");
+            args.push("--");
+        }
+        args.push(text);
+        std::process::Command::new(bin)
+            .args(&args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !literal || payload.len() <= SEND_CHUNK_BYTES {
+        return send(literal, payload);
     }
-    args.push(payload);
-    std::process::Command::new(bin)
-        .args(&args)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    for (i, chunk) in utf8_chunks(payload, SEND_CHUNK_BYTES).into_iter().enumerate() {
+        if i > 0 {
+            std::thread::sleep(SEND_CHUNK_DELAY);
+        }
+        if !send(true, chunk) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Does `tmux` exist on the user's PATH? We invoke via the login shell
@@ -870,7 +916,33 @@ pub fn tmux_available() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::claude_invocation;
+    use super::{claude_invocation, utf8_chunks, SEND_CHUNK_BYTES};
+
+    #[test]
+    fn utf8_chunks_empty_and_short() {
+        assert!(utf8_chunks("", SEND_CHUNK_BYTES).is_empty());
+        assert_eq!(utf8_chunks("hi — ▾", SEND_CHUNK_BYTES), vec!["hi — ▾"]);
+        let exact = "a".repeat(SEND_CHUNK_BYTES);
+        assert_eq!(utf8_chunks(&exact, SEND_CHUNK_BYTES), vec![exact.as_str()]);
+    }
+
+    #[test]
+    fn utf8_chunks_respect_char_boundaries() {
+        // Multi-byte chars (3-byte —/▾/ⓘ, 4-byte emoji) at every offset
+        // relative to the chunk edge, plus newlines.
+        let unit = "ab — ▾ ⓘ 🦆\nline two\n";
+        for pad in 0..8 {
+            let s = format!("{}{}", "x".repeat(pad), unit.repeat(60));
+            for max in [4, 5, 7, 256] {
+                let chunks = utf8_chunks(&s, max);
+                assert_eq!(chunks.concat(), s, "pad={pad} max={max}");
+                assert!(chunks.iter().all(|c| !c.is_empty() && c.len() <= max));
+                if max == SEND_CHUNK_BYTES {
+                    assert!(chunks.len() > 1);
+                }
+            }
+        }
+    }
 
     #[test]
     fn plain_attach_has_no_resume_or_prompt() {
