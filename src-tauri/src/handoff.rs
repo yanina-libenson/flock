@@ -25,6 +25,9 @@ const RECENT_COMMITS: usize = 10;
 /// Everything the handoff prompt is built from. Gathered by `gather`, rendered
 /// by `render` (pure, so it's unit-tested).
 pub struct HandoffContext {
+    /// An orchestrator hands over its fleet, not a branch: its scratch dir
+    /// isn't a git repo, and its work lives in the children it spawned.
+    pub orchestrator: bool,
     pub original_task: Option<String>,
     pub last_request: Option<String>,
     pub git_status: String,
@@ -100,9 +103,14 @@ pub fn gather(w: &Worktree, env_vars: &[(String, String)], from_agent: &str) -> 
         .cloned()
         .filter(|r| Some(r) != original_task.as_ref());
 
-    let (git_status, diff_stat, recent_commits) =
-        crate::git::handoff_snapshot(Path::new(&w.path), RECENT_COMMITS);
+    let orchestrator = w.kind == "orchestrator";
+    let (git_status, diff_stat, recent_commits) = if orchestrator {
+        Default::default()
+    } else {
+        crate::git::handoff_snapshot(Path::new(&w.path), RECENT_COMMITS)
+    };
     HandoffContext {
+        orchestrator,
         original_task,
         last_request,
         git_status,
@@ -134,14 +142,25 @@ fn cap_lines(s: &str, max: usize) -> String {
 pub fn render(from_agent: &str, to_agent: &str, ctx: &HandoffContext) -> String {
     let from = agent_label(from_agent);
     let to = agent_label(to_agent);
-    let mut out = format!(
-        "{HANDOFF_HEADER} You ({to}) are taking over this worktree from {from}. \
+    let mut out = if ctx.orchestrator {
+        format!(
+            "{HANDOFF_HEADER} You ({to}) are taking over this orchestrator session from \
+{from}. The {from} session was stopped and its conversation can't be transferred, but \
+the fleet of agents it spawned keeps running in their own worktrees — they are your \
+fleet now. Start by checking where they stand with task_list / task_status (and \
+task_read for detail), then continue the mission from where it was left. Don't \
+re-spawn work that a child already has in progress.\n"
+        )
+    } else {
+        format!(
+            "{HANDOFF_HEADER} You ({to}) are taking over this worktree from {from}. \
 The {from} session was stopped and its conversation can't be transferred — the git \
 branch carries the work. Review the current state below (inspect the diff and commits \
 yourself as needed), then continue the task from where it was left. Don't redo work \
 that is already committed or in the working tree.\n"
-    );
-    out.push_str("\n## Original task\n");
+        )
+    };
+    out.push_str(if ctx.orchestrator { "\n## Mission\n" } else { "\n## Original task\n" });
     out.push_str(
         &ctx.original_task
             .as_deref()
@@ -153,6 +172,9 @@ that is already committed or in the working tree.\n"
         out.push_str("\n## Most recent request\n");
         out.push_str(&cap_chars(last, MAX_REQUEST_CHARS));
         out.push('\n');
+    }
+    if ctx.orchestrator {
+        return out;
     }
     out.push_str("\n## Current state\n");
     out.push_str("git status --short --branch:\n");
@@ -195,6 +217,7 @@ mod tests {
 
     fn ctx() -> HandoffContext {
         HandoffContext {
+            orchestrator: false,
             original_task: Some("Fix the checkout race".into()),
             last_request: Some("also add a test".into()),
             git_status: "## flock/fix-race\n M src/checkout.rs\n".into(),
@@ -219,6 +242,7 @@ mod tests {
     #[test]
     fn render_back_to_claude_and_missing_pieces() {
         let c = HandoffContext {
+            orchestrator: false,
             original_task: None,
             last_request: None,
             git_status: String::new(),
@@ -230,6 +254,19 @@ mod tests {
         assert!(p.contains("## Original task\n(not recorded)"));
         assert!(!p.contains("## Most recent request"));
         assert!(p.contains("Uncommitted changes (git diff --stat HEAD):\n(none)"));
+    }
+
+    #[test]
+    fn orchestrator_handoff_points_at_the_fleet_not_git() {
+        let mut c = ctx();
+        c.orchestrator = true;
+        let p = render("claude", "codex", &c);
+        assert!(p.starts_with("[Flock handoff] You (Codex) are taking over this orchestrator session from Claude."));
+        assert!(p.contains("task_list / task_status"));
+        assert!(p.contains("## Mission\nFix the checkout race\n"));
+        assert!(p.contains("## Most recent request\nalso add a test\n"));
+        assert!(!p.contains("git status"));
+        assert!(user_requests(&[msg("user", &p)]).is_empty());
     }
 
     #[test]

@@ -11,7 +11,8 @@ import {
   worktreeRefreshPrStatus,
   worktreeSetTitle,
   worktreeLabel,
-  codexRepoIds,
+  codexOptions,
+  CODEX_MODEL_OPTIONS,
   type Repo,
   type Worktree,
   type PrStatus,
@@ -115,9 +116,11 @@ export function Sidebar(props: {
     setAppStore("worktreesByRepo", nextWorktrees);
     setExpanded(nextExpanded);
     try {
-      setAppStore("codexRepoIds", await codexRepoIds());
+      const codex = await codexOptions();
+      setAppStore("codexRepoIds", codex.repo_ids);
+      setAppStore("codexProfile", codex.profile);
     } catch (e) {
-      console.error("codexRepoIds failed", e);
+      console.error("codexOptions failed", e);
     }
     // Orchestrators live in an internal repo hidden from the list above; load
     // them separately into their own section.
@@ -388,12 +391,21 @@ export function Sidebar(props: {
                 </Show>
                 {/* Model/effort override, when this session isn't running the
                     default — e.g. "haiku" or "opus · high". Hidden otherwise.
-                    A Codex worktree always says so ("codex · high"); its
-                    Claude model is kept for switching back but unused. */}
+                    A Codex worktree always says so ("codex · high"), plus its
+                    Codex model when one was picked; a leftover Claude model is
+                    kept for switching back but unused. */}
                 <Show when={w.agent === "codex" || w.model || w.effort}>
                   <span class="truncate text-[10px] font-mono text-[var(--color-fg-dim)] mt-px">
                     {(w.agent === "codex"
-                      ? ["codex", w.effort]
+                      ? [
+                          "codex",
+                          (CODEX_MODEL_OPTIONS as readonly string[]).includes(
+                            w.model ?? "",
+                          ) && w.model !== "default"
+                            ? w.model
+                            : null,
+                          w.effort !== "default" ? w.effort : null,
+                        ]
                       : [w.model, w.effort]
                     )
                       .filter(Boolean)

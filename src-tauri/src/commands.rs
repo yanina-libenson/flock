@@ -49,6 +49,7 @@ pub fn repo_add(state: State<'_, AppState>, path: String) -> AppResult<Repo> {
                 None,
                 None,
                 None,
+                AGENT_CLAUDE,
             );
         }
     }
@@ -128,6 +129,11 @@ pub struct CreateWorktreeArgs {
     /// server-side against `ALLOWED_EFFORTS`.
     #[serde(default)]
     pub effort: Option<String>,
+    /// `"claude"` (default) or `"codex"`. Model/effort are validated against
+    /// that agent's options. Set by the task path; the desktop's plain
+    /// "new worktree" never sends it.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Permission-mode values forwarded to `claude --permission-mode`.
@@ -198,13 +204,15 @@ pub fn require_explicit_model_and_effort(
     if missing(model) {
         return Err(AppError::msg(format!(
             "model is required when an orchestrator spawns work — pass one of \
-             {ALLOWED_MODELS:?} explicitly (never rely on the default, it changes)"
+             {ALLOWED_MODELS:?} for a Claude agent or {CODEX_MODELS:?} for a Codex \
+             agent explicitly (never rely on the default, it changes)"
         )));
     }
     if missing(effort) {
         return Err(AppError::msg(format!(
             "effort is required when an orchestrator spawns work — pass one of \
-             {ALLOWED_EFFORTS:?} explicitly (never rely on the default, it changes)"
+             {ALLOWED_EFFORTS:?} (Codex also accepts \"default\") explicitly (never \
+             rely on the default, it changes)"
         )));
     }
     Ok(())
@@ -218,6 +226,79 @@ fn validate_effort(effort: &str) -> AppResult<()> {
             "invalid effort {effort:?}; must be one of {ALLOWED_EFFORTS:?}"
         )))
     }
+}
+
+/// `-m` values for a Codex session — the models codex-cli 0.160 lists in its
+/// picker — plus `"default"`, which passes no `-m` so Codex uses its own
+/// configured default. Mirrored in `lib/ipc.ts` and the MCP's task_create.
+pub const CODEX_MODELS: &[&str] = &[
+    "default",
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+];
+
+/// `model_reasoning_effort` values for a Codex session (the scale every listed
+/// model supports), plus `"default"` (don't override).
+pub const CODEX_EFFORTS: &[&str] = &["default", "low", "medium", "high", "xhigh", "max"];
+
+fn validate_agent(agent: &str) -> AppResult<()> {
+    if agent == AGENT_CLAUDE || agent == AGENT_CODEX {
+        Ok(())
+    } else {
+        Err(AppError::msg(format!(
+            "invalid agent {agent:?}; must be {AGENT_CLAUDE:?} or {AGENT_CODEX:?}"
+        )))
+    }
+}
+
+/// Model validation for the agent that will run it: Claude aliases/ids for
+/// Claude, `CODEX_MODELS` for Codex. Rejecting the cross-over (e.g. `sonnet`
+/// for a Codex child) with a pointed message beats silently running the
+/// other agent's default.
+fn validate_model_for(agent: &str, model: &str) -> AppResult<()> {
+    if agent != AGENT_CODEX {
+        return validate_model(model);
+    }
+    if CODEX_MODELS.contains(&model) {
+        Ok(())
+    } else {
+        Err(AppError::msg(format!(
+            "invalid model {model:?} for a Codex agent; must be one of {CODEX_MODELS:?} \
+             (or pass agent: \"claude\" to use a Claude model)"
+        )))
+    }
+}
+
+fn validate_effort_for(agent: &str, effort: &str) -> AppResult<()> {
+    if agent != AGENT_CODEX {
+        return validate_effort(effort);
+    }
+    if CODEX_EFFORTS.contains(&effort) {
+        Ok(())
+    } else {
+        Err(AppError::msg(format!(
+            "invalid effort {effort:?} for a Codex agent; must be one of {CODEX_EFFORTS:?}"
+        )))
+    }
+}
+
+/// The agent a spawned task runs: the explicit `agent` when given, else the
+/// spawning orchestrator's own agent (a Codex orchestrator is usually running
+/// because Claude is out of credit, so its children should be Codex too), else
+/// Claude.
+pub fn resolve_child_agent(explicit: Option<&str>, parent_agent: Option<&str>) -> AppResult<String> {
+    let agent = explicit
+        .filter(|a| !a.trim().is_empty())
+        .or(parent_agent)
+        .unwrap_or(AGENT_CLAUDE);
+    validate_agent(agent)?;
+    Ok(agent.to_string())
 }
 
 #[tauri::command]
@@ -291,11 +372,13 @@ fn create_worktree_core(db: &Db, args: CreateWorktreeArgs) -> AppResult<Worktree
         .as_deref()
         .unwrap_or(DEFAULT_PERMISSION_MODE);
     validate_permission_mode(permission_mode)?;
+    let agent = args.agent.as_deref().unwrap_or(AGENT_CLAUDE);
+    validate_agent(agent)?;
     if let Some(m) = args.model.as_deref() {
-        validate_model(m)?;
+        validate_model_for(agent, m)?;
     }
     if let Some(e) = args.effort.as_deref() {
-        validate_effort(e)?;
+        validate_effort_for(agent, e)?;
     }
 
     let w = db.insert_worktree(
@@ -309,6 +392,7 @@ fn create_worktree_core(db: &Db, args: CreateWorktreeArgs) -> AppResult<Worktree
         None,
         args.model.as_deref(),
         args.effort.as_deref(),
+        agent,
     )?;
     Ok(w)
 }
@@ -538,6 +622,9 @@ pub struct CreateTaskArgs {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    /// `"claude"` (default) or `"codex"` (Thanx repos only).
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Safety net for the "wrong repo, wrong account" failure mode: an
@@ -600,10 +687,31 @@ pub fn start_task_core(
     parent_id: Option<i64>,
     model: Option<String>,
     effort: Option<String>,
+    agent: Option<String>,
     confirm_cross_account: bool,
 ) -> AppResult<Worktree> {
     let repo = state.db.get_repo(repo_id)?;
     check_cross_account(&state.db, parent_id, confirm_cross_account, &repo)?;
+    // Settle the agent and validate everything that depends on it before any
+    // git work, so a refused task leaves no worktree behind.
+    let parent_agent = parent_id
+        .and_then(|p| state.db.get_worktree(p).ok())
+        .map(|p| p.agent);
+    let agent = resolve_child_agent(agent.as_deref(), parent_agent.as_deref())?;
+    if let Some(m) = model.as_deref() {
+        validate_model_for(&agent, m)?;
+    }
+    if let Some(e) = effort.as_deref() {
+        validate_effort_for(&agent, e)?;
+    }
+    if agent == AGENT_CODEX && !env_profiles::codex_allowed(&env_profiles::load(), None, &repo.path) {
+        return Err(AppError::msg(format!(
+            "refusing: Codex agents are only allowed in repos on the {} profile, and repo {:?} \
+             isn't one. Pass agent: \"claude\" to spawn a Claude agent there instead.",
+            env_profiles::CODEX_PROFILE,
+            repo.name
+        )));
+    }
     let leaf = branch.unwrap_or_else(|| branch_from_prompt(prompt));
     // Create the worktree, retrying with a numeric suffix on branch collision
     // (the loop caller can't know what names are already taken).
@@ -632,6 +740,7 @@ pub fn start_task_core(
             parent_id,
             model: model.clone(),
             effort: effort.clone(),
+            agent: Some(agent.clone()),
         };
         match create_worktree_core(&state.db, args) {
             Ok(created) => {
@@ -785,7 +894,10 @@ fn write_orchestrator_mcp_config(dir: &Path, mjs: &Path) {
 
 /// The orchestrator's appended system prompt: what it is, the repos it can spawn
 /// into, and how to drive + watch its fleet via the Flock MCP tools.
-fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool) -> String {
+/// `agent` is the orchestrator's own agent: it decides the default `agent` for
+/// task_create and which model/effort guidance it gets. Claude receives this via
+/// `--append-system-prompt`, Codex via `developer_instructions`.
+fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool, agent: &str) -> String {
     let repo_list = if repos.is_empty() {
         "(none registered yet — ask the user to add repos in Flock)".to_string()
     } else {
@@ -797,8 +909,8 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool) -> String {
     };
     let tools = if has_mcp {
         "You have the Flock MCP tools:\n\
-         - task_create(repo, prompt, model, effort, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `model` and `effort` are both REQUIRED — see \"Choosing model/effort\" below. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
-         - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's model/effort.\n\
+         - task_create(repo, prompt, model, effort, agent?, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `model` and `effort` are both REQUIRED — see \"Choosing model/effort\" below. `agent` is \"claude\" or \"codex\"; omit it to spawn the same agent you are running as. Codex agents are only allowed in repos on the Thanx profile (task_create refuses otherwise), and `model`/`effort` must be valid for the agent you spawn. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
+         - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's agent/model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
          - task_remove(id, force?): remove a worktree — the same as the ✕ in Flock's sidebar (kills its session, deletes the checkout; the git branch is kept). ONLY call this when the user explicitly asks you to remove specific worktrees in this conversation — never on your own initiative, never as cleanup after a task finishes. Confirm which ids you're about to remove if there's any ambiguity. It refuses dirty worktrees unless force:true; only pass force after telling the user what uncommitted work would be lost and getting an explicit yes. It can't remove orchestrators.\n\
@@ -806,9 +918,45 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool) -> String {
     } else {
         "The Flock MCP tools could not be auto-wired. Ask the user to enable Remote access in Flock settings and add the Flock MCP, then restart you."
     };
+    let choosing = if agent == AGENT_CODEX {
+        format!(
+            "Choosing agent/model/effort (ALWAYS explicit on task_create — never rely \
+on the default, it changes over time and task_create rejects calls without `model` or \
+`effort`): you are running as Codex — usually because the Claude account is out of \
+credit — so the agents you spawn default to Codex too. For a Codex agent, `model` is \
+`default` (Codex's configured default model, the right choice most of the time) or one \
+of {models}; `effort` is `default` or one of `low`/`medium`/`high`/`xhigh`/`max`. Use \
+`low`/`medium` effort for mechanical, well-specified work (renames, formatting, \
+boilerplate), `medium` for most everyday features and fixes, and `high`/`xhigh` for \
+hard, ambiguous, high-stakes or security-sensitive work. When unsure, pick `default` + \
+`medium` explicitly. Only pass `agent: \"claude\"` when the user asks for a Claude \
+agent — then use Claude models (`haiku`/`sonnet`/`opus`) and efforts \
+(`low`…`max`).",
+            models = CODEX_MODELS
+                .iter()
+                .filter(|m| **m != "default")
+                .map(|m| format!("`{m}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        "Choosing model/effort (ALWAYS explicit on task_create — never rely on the default, \
+it changes over time and task_create rejects calls without `model` or `effort`): use `haiku` for \
+mechanical, well-specified work — renames, formatting, boilerplate, simple scripted \
+changes — it's the cheapest and fastest. Use `sonnet` for most everyday feature work, \
+bug fixes, and typical PRs. Use `opus` with `effort: \"high\"` or `\"xhigh\"` for hard \
+architecture decisions, ambiguous or high-stakes changes, security-sensitive work, or \
+anything you'd want a second, careful pass on. `effort` is required too: \
+`low`/`medium` for mechanical work, `medium`/`high` for everyday work. When unsure, \
+pick `sonnet` + `medium` explicitly rather than omitting. Agents you spawn are Claude \
+unless you pass `agent: \"codex\"` — do that only when the user asks for Codex (e.g. \
+Claude is out of credit), and then use a Codex `model` (`default` or a `gpt-…` id) and \
+effort (`default` or `low`…`max`)."
+            .to_string()
+    };
     format!(
         "You are an ORCHESTRATOR session in Flock. You don't ship code yourself — \
-you direct a fleet of Claude agents, each working in its own git worktree/branch \
+you direct a fleet of coding agents (Claude Code or Codex), each working in its own git worktree/branch \
 in a real repo. You run in a scratch directory, so use it freely for plans and \
 notes, but the actual code changes happen in the agents you spawn.\n\n\
 Registered repos you can spawn agents into:\n{repo_list}\n\n{tools}\n\n\
@@ -817,7 +965,7 @@ task_create (in parallel when independent), follow their progress with task_read
 and unblock any that need input with task_input. Give each agent a crisp, \
 self-contained prompt describing ONLY the task; it can't see this conversation. Do \
 NOT paste organization-level policies/instructions into the prompt — a spawned agent's \
-own Claude Code session already receives those automatically, the same way you did. \
+own session already receives those automatically, the same way you did. \
 Re-pasting them is redundant and pollutes the auto-derived branch name with banner text \
 instead of the task.\n\n\
 Native subagent vs. task_create — pick deliberately, don't default to one: use your \
@@ -829,15 +977,7 @@ a branch and (eventually) a PR in a SPECIFIC repo, and benefits from running \
 independently of your session (long-running, resumable later, tracked in Flock's UI). A \
 task titled \"Research: ...\" or \"Investigate: ...\" is a strong signal it belongs in a \
 native subagent, not a worktree.\n\n\
-Choosing model/effort (ALWAYS explicit on task_create — never rely on the default, \
-it changes over time and task_create rejects calls without `model` or `effort`): use `haiku` for \
-mechanical, well-specified work — renames, formatting, boilerplate, simple scripted \
-changes — it's the cheapest and fastest. Use `sonnet` for most everyday feature work, \
-bug fixes, and typical PRs. Use `opus` with `effort: \"high\"` or `\"xhigh\"` for hard \
-architecture decisions, ambiguous or high-stakes changes, security-sensitive work, or \
-anything you'd want a second, careful pass on. `effort` is required too: \
-`low`/`medium` for mechanical work, `medium`/`high` for everyday work. When unsure, \
-pick `sonnet` + `medium` explicitly rather than omitting.\n\n\
+{choosing}\n\n\
 Following your fleet: you are NOT notified when a child changes state — Flock \
 doesn't ping you. When you want to know where a child stands, check it yourself with \
 task_status (the whole fleet's states) or task_read (one child's transcript). A \
@@ -853,6 +993,7 @@ message."
 /// Create an orchestrator session: a repo-less scratch dir with the Flock MCP
 /// auto-wired and an orchestration system prompt. Shared by the command and any
 /// future headless caller.
+#[allow(clippy::too_many_arguments)]
 pub fn start_orchestrator_core(
     app: &AppHandle,
     state: &AppState,
@@ -862,10 +1003,21 @@ pub fn start_orchestrator_core(
     env: Option<String>,
     model: &str,
     effort: &str,
+    agent: &str,
 ) -> AppResult<Worktree> {
     // Validate before touching disk so a bad value leaves no scratch dir behind.
-    validate_model(model)?;
-    validate_effort(effort)?;
+    validate_agent(agent)?;
+    validate_model_for(agent, model)?;
+    validate_effort_for(agent, effort)?;
+    let cfg = env_profiles::load();
+    // Same Thanx-only rule as worktrees. The scratch dir matches no binding, so
+    // this is really "the chosen Profile is Thanx".
+    if agent == AGENT_CODEX && !env_profiles::codex_allowed(&cfg, env.as_deref(), "") {
+        return Err(AppError::msg(format!(
+            "Codex orchestrators need the {} profile",
+            env_profiles::CODEX_PROFILE
+        )));
+    }
     let repo = ensure_internal_repo(&state.db)?;
     let root = orchestrators_root()?;
 
@@ -880,11 +1032,13 @@ pub fn start_orchestrator_core(
     std::fs::create_dir_all(&path)?;
 
     // .claude/settings.local.json with enableAllProjectMcpServers so the project
-    // .mcp.json loads without a prompt.
+    // .mcp.json loads without a prompt. Written for Codex orchestrators too, so
+    // a later switch to Claude finds its MCP wiring in place.
     bootstrap_claude_settings(Path::new(&repo.path), &path);
 
     // Best-effort: install + wire the Flock MCP so the orchestrator can spawn
-    // and watch agents out of the box.
+    // and watch agents out of the box. (Codex gets the same server per
+    // invocation — see `pty::codex_invocation`.)
     let mcp_path = crate::mcp::ensure_installed(app);
     if let Some(mjs) = &mcp_path {
         write_orchestrator_mcp_config(&path, mjs);
@@ -909,6 +1063,7 @@ pub fn start_orchestrator_core(
         env.as_deref(),
         Some(model),
         Some(effort),
+        agent,
     )?;
 
     // The MCP talks to the REST API — make sure it's running.
@@ -920,11 +1075,10 @@ pub fn start_orchestrator_core(
         .into_iter()
         .filter(|r| !is_internal_repo(r))
         .collect();
-    let sys = orchestrator_system_prompt(&repos, mcp_path.is_some());
+    let sys = orchestrator_system_prompt(&repos, mcp_path.is_some(), agent);
 
     // An orchestrator has no repo path to match a binding on, so honor its
     // explicitly chosen profile; fall back to path-based resolution otherwise.
-    let cfg = env_profiles::load();
     let env_vars = match env.as_deref() {
         Some(name) => env_profiles::resolve_vars_by_name(&cfg, Some(name)),
         None => env_profiles::resolve_vars(&cfg, &path.to_string_lossy()),
@@ -939,7 +1093,7 @@ pub fn start_orchestrator_core(
         None,
         Some(model),
         Some(effort),
-        AGENT_CLAUDE,
+        agent,
     )?;
     state.db.touch_worktree(w.id)?;
     let _ = app.emit("worktree:created", &w);
@@ -954,11 +1108,15 @@ pub struct CreateOrchestratorArgs {
     /// Name of the env profile to run under. None resolves by scratch path
     /// (i.e. the default account).
     pub env: Option<String>,
-    /// Claude `--model` for the orchestrator. Required — never rely on the
-    /// CLI's default, which changes over time.
+    /// `--model` for the orchestrator (a Claude model, or for Codex a Codex
+    /// model or `"default"`). Required — never rely on the CLI's default,
+    /// which changes over time.
     pub model: String,
-    /// Claude `--effort` for the orchestrator. Required, same reason as model.
+    /// `--effort` for the orchestrator. Required, same reason as model.
     pub effort: String,
+    /// `"claude"` (default) or `"codex"` (Thanx profile only).
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Spawn an orchestrator session from the desktop. Returns the new worktree so
@@ -978,6 +1136,7 @@ pub fn orchestrator_create(
         args.env,
         &args.model,
         &args.effort,
+        args.agent.as_deref().unwrap_or(AGENT_CLAUDE),
     )
 }
 
@@ -1012,6 +1171,7 @@ pub fn task_create(
         None,
         args.model,
         args.effort,
+        args.agent,
         false,
     )
 }
@@ -1060,18 +1220,17 @@ pub fn worktree_set_permission_mode(
 /// the incoming agent already has a session here (a previous switch), it's
 /// resumed with the handoff as its next turn, so it keeps its own context.
 ///
-/// Codex is only offered for worktrees on the Thanx profile
-/// (`env_profiles::codex_allowed`); switching back to Claude is always allowed.
+/// Codex is only offered on the Thanx profile (`env_profiles::codex_allowed`);
+/// switching back to Claude is always allowed. An orchestrator also gets its
+/// orchestration instructions again, written for the new agent (Claude via
+/// `--append-system-prompt`, Codex via `developer_instructions`), and a handoff
+/// that points it at its still-running fleet instead of a git branch.
 /// Returns the updated row; the desktop remounts the pane, which reattaches to
 /// the new tmux session. `async` so the transcript reads and tmux spawn run off
 /// the main thread instead of freezing the UI.
 #[tauri::command(async)]
 pub fn worktree_set_agent(state: State<'_, AppState>, id: i64, agent: String) -> AppResult<Worktree> {
-    if agent != AGENT_CLAUDE && agent != AGENT_CODEX {
-        return Err(AppError::msg(format!(
-            "invalid agent {agent:?}; must be {AGENT_CLAUDE:?} or {AGENT_CODEX:?}"
-        )));
-    }
+    validate_agent(&agent)?;
     // Same per-worktree lock as `deliver_input`, so a concurrent task_input
     // can't resume the old agent while we're swapping it out.
     let lock = {
@@ -1089,17 +1248,25 @@ pub fn worktree_set_agent(state: State<'_, AppState>, id: i64, agent: String) ->
     }
     let repo = state.db.get_repo(w.repo_id)?;
     let cfg = env_profiles::load();
-    if agent == AGENT_CODEX
-        && !env_profiles::codex_allowed(&cfg, &w.kind, w.env_profile.as_deref(), &repo.path)
-    {
+    if agent == AGENT_CODEX && !env_profiles::codex_allowed(&cfg, w.env_profile.as_deref(), &repo.path) {
         return Err(AppError::msg(format!(
-            "Codex is only available for {} worktrees",
+            "Codex is only available on the {} profile",
             env_profiles::CODEX_PROFILE
         )));
     }
     let env_vars = env_profiles::resolve_vars_for_worktree(&cfg, w.env_profile.as_deref(), &repo.path);
     let cwd = Path::new(&w.path);
     let prompt = crate::handoff::render(&w.agent, &agent, &crate::handoff::gather(&w, &env_vars, &w.agent));
+    let system_prompt = (w.kind == "orchestrator").then(|| {
+        let repos: Vec<Repo> = state
+            .db
+            .list_repos()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| !is_internal_repo(r))
+            .collect();
+        orchestrator_system_prompt(&repos, crate::mcp::installed_entry().is_some(), &agent)
+    });
 
     state.pty.kill(id).ok();
     pty::tmux_kill_session(id);
@@ -1116,7 +1283,7 @@ pub fn worktree_set_agent(state: State<'_, AppState>, id: i64, agent: String) ->
         &w.permission_mode,
         &env_vars,
         Some(&prompt),
-        None,
+        system_prompt.as_deref(),
         resume_id.as_deref(),
         w.model.as_deref(),
         w.effort.as_deref(),
@@ -1130,19 +1297,29 @@ pub fn worktree_set_agent(state: State<'_, AppState>, id: i64, agent: String) ->
     state.db.get_worktree(id)
 }
 
-/// Ids of the repos whose worktrees may run Codex (bound to the Thanx profile).
-/// The desktop shows the "Continue with Codex" action only for these;
-/// `worktree_set_agent` enforces the same rule.
+/// What the desktop needs to decide where Codex is offered: the one profile it
+/// runs under (orchestrators match on their chosen Profile) and the repos bound
+/// to it (worktrees match on their repo). `worktree_set_agent`,
+/// `start_task_core` and `start_orchestrator_core` enforce the same rule.
+#[derive(serde::Serialize)]
+pub struct CodexOptions {
+    pub profile: &'static str,
+    pub repo_ids: Vec<i64>,
+}
+
 #[tauri::command]
-pub fn codex_repo_ids(state: State<'_, AppState>) -> AppResult<Vec<i64>> {
+pub fn codex_options(state: State<'_, AppState>) -> AppResult<CodexOptions> {
     let cfg = env_profiles::load();
-    Ok(state
-        .db
-        .list_repos()?
-        .into_iter()
-        .filter(|r| env_profiles::codex_allowed(&cfg, "worktree", None, &r.path))
-        .map(|r| r.id)
-        .collect())
+    Ok(CodexOptions {
+        profile: env_profiles::CODEX_PROFILE,
+        repo_ids: state
+            .db
+            .list_repos()?
+            .into_iter()
+            .filter(|r| env_profiles::codex_allowed(&cfg, None, &r.path))
+            .map(|r| r.id)
+            .collect(),
+    })
 }
 
 /// Reflow the worktree's tmux window to a size. The desktop calls this to
@@ -1408,6 +1585,9 @@ pub fn schedule_run_now(
         s.parent_id,
         s.model.clone(),
         s.effort.clone(),
+        // Schedules store Claude-validated models and have no agent column,
+        // so their tasks stay Claude even under a Codex orchestrator.
+        Some(crate::db::AGENT_CLAUDE.to_string()),
         // The cross-account gate was already decided at schedule_create time;
         // replaying it on every fire would silently re-block a schedule that
         // was deliberately confirmed once. parent_id is still passed through
@@ -1490,17 +1670,64 @@ mod tests {
 
     #[test]
     fn orchestrator_prompt_gates_task_remove_on_user_request() {
-        let sys = super::orchestrator_system_prompt(&[], true);
+        let sys = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CLAUDE);
         assert!(sys.contains("task_remove(id, force?)"));
         assert!(sys.contains("ONLY call this when the user explicitly asks"));
     }
 
     #[test]
     fn orchestrator_prompt_tells_it_to_always_pass_a_model() {
-        let sys = super::orchestrator_system_prompt(&[], true);
+        let sys = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CLAUDE);
         assert!(sys.contains("task_create(repo, prompt, model, effort,"));
         assert!(sys.contains("ALWAYS explicit on task_create"));
         assert!(!sys.contains("omit for the default"));
+    }
+
+    #[test]
+    fn child_agent_defaults_to_the_orchestrators_own_agent() {
+        use super::resolve_child_agent as r;
+        assert_eq!(r(None, Some("codex")).unwrap(), "codex");
+        assert_eq!(r(None, Some("claude")).unwrap(), "claude");
+        // No parent (desktop / plain API) → Claude.
+        assert_eq!(r(None, None).unwrap(), "claude");
+        // Explicit wins either way; blank counts as omitted.
+        assert_eq!(r(Some("claude"), Some("codex")).unwrap(), "claude");
+        assert_eq!(r(Some("codex"), None).unwrap(), "codex");
+        assert_eq!(r(Some(" "), Some("codex")).unwrap(), "codex");
+        assert!(r(Some("gemini"), None).is_err());
+    }
+
+    #[test]
+    fn model_and_effort_are_validated_for_the_agent_that_runs_them() {
+        use super::{validate_effort_for as ve, validate_model_for as vm};
+        assert!(vm("codex", "default").is_ok());
+        assert!(vm("codex", "gpt-6.1-sol").is_ok());
+        // A Claude alias for a Codex agent (and vice versa) is refused, with a
+        // hint at the fix.
+        let err = vm("codex", "sonnet").unwrap_err().to_string();
+        assert!(err.contains("agent: \"claude\""), "{err}");
+        assert!(vm("claude", "gpt-6.1-sol").is_err());
+        assert!(vm("claude", "default").is_err());
+        assert!(vm("claude", "sonnet").is_ok());
+        assert!(ve("codex", "default").is_ok());
+        assert!(ve("codex", "xhigh").is_ok());
+        assert!(ve("claude", "default").is_err());
+        assert!(ve("codex", "ultra").is_err());
+    }
+
+    #[test]
+    fn orchestrator_prompt_documents_the_agent_param_for_both_agents() {
+        let claude = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CLAUDE);
+        assert!(claude.contains("task_create(repo, prompt, model, effort, agent?, confirm_cross_account?)"));
+        assert!(claude.contains("unless you pass `agent: \"codex\"`"));
+        let codex = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CODEX);
+        assert!(codex.contains("task_create(repo, prompt, model, effort, agent?, confirm_cross_account?)"));
+        assert!(codex.contains("you are running as Codex"));
+        assert!(codex.contains("`gpt-6.1-sol`"));
+        assert!(codex.contains("ALWAYS explicit on task_create"));
+        // The shared parts (task_remove gate etc.) are in both.
+        assert!(codex.contains("ONLY call this when the user explicitly asks"));
+        assert!(!codex.contains("use `haiku` for"));
     }
 
     #[test]

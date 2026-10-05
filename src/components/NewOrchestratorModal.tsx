@@ -1,10 +1,13 @@
-import { createSignal, Show, onMount, For } from "solid-js";
+import { createEffect, createSignal, Show, onMount, For } from "solid-js";
 import {
   orchestratorCreate,
   envConfigGet,
   DEFAULT_PERMISSION_MODE,
   MODEL_OPTIONS,
   EFFORT_OPTIONS,
+  CODEX_MODEL_OPTIONS,
+  CODEX_EFFORT_OPTIONS,
+  type Agent,
   type PermissionMode,
   type FlockEnvironment,
 } from "../lib/ipc";
@@ -32,8 +35,29 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
   const [submitting, setSubmitting] = createSignal(false);
   const [envs, setEnvs] = createSignal<FlockEnvironment[]>([]);
   const [selectedEnv, setSelectedEnv] = createSignal("");
+  const [agent, setAgentSig] = createSignal<Agent>("claude");
   const [model, setModel] = createSignal<string>("opus");
   const [effort, setEffort] = createSignal<string>("high");
+
+  /// Codex is offered only when the chosen Profile is the Codex one (Thanx);
+  /// the backend refuses it otherwise.
+  const codexAllowed = () =>
+    appStore.codexProfile !== null && selectedEnv() === appStore.codexProfile;
+  const modelOptions = (): readonly string[] =>
+    agent() === "codex" ? CODEX_MODEL_OPTIONS : MODEL_OPTIONS;
+  const effortOptions = (): readonly string[] =>
+    agent() === "codex" ? CODEX_EFFORT_OPTIONS : EFFORT_OPTIONS;
+  /// Each agent has its own model/effort vocabulary, so switching resets both
+  /// to that agent's defaults.
+  function setAgent(a: Agent) {
+    setAgentSig(a);
+    setModel(a === "codex" ? "default" : "opus");
+    setEffort("high");
+  }
+  // Moving off the Thanx profile drops a Codex choice back to Claude.
+  createEffect(() => {
+    if (!codexAllowed() && agent() === "codex") setAgent("claude");
+  });
 
   const permissionMode = (): PermissionMode =>
     autoApprove() ? DEFAULT_PERMISSION_MODE : "default";
@@ -70,6 +94,7 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
       env: selectedEnv() || null,
       model: model(),
       effort: effort(),
+      agent: agent(),
     })
       .then((w) => {
         addWorktree(w);
@@ -149,7 +174,28 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
             />
           </label>
 
-          <div class="grid grid-cols-2 gap-3">
+          <div
+            class="grid gap-3"
+            classList={{
+              "grid-cols-3": codexAllowed(),
+              "grid-cols-2": !codexAllowed(),
+            }}
+          >
+            <Show when={codexAllowed()}>
+              <label class="block">
+                <span class="block text-[11px] uppercase tracking-wide font-semibold text-[var(--color-fg-muted)] mb-1.5">
+                  Agent
+                </span>
+                <select
+                  class="w-full rounded-md bg-[var(--color-bg)] border border-[var(--color-border)] focus:border-[var(--color-accent)] px-3 py-2 text-[13px] text-[var(--color-fg)] outline-none transition"
+                  value={agent()}
+                  onChange={(e) => setAgent(e.currentTarget.value as Agent)}
+                >
+                  <option value="claude">Claude</option>
+                  <option value="codex">Codex</option>
+                </select>
+              </label>
+            </Show>
             <label class="block">
               <span class="block text-[11px] uppercase tracking-wide font-semibold text-[var(--color-fg-muted)] mb-1.5">
                 Model
@@ -159,8 +205,12 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
                 value={model()}
                 onChange={(e) => setModel(e.currentTarget.value)}
               >
-                <For each={MODEL_OPTIONS}>
-                  {(m) => <option value={m}>{m}</option>}
+                <For each={modelOptions()}>
+                  {(m) => (
+                    <option value={m} selected={m === model()}>
+                      {m}
+                    </option>
+                  )}
                 </For>
               </select>
             </label>
@@ -173,8 +223,12 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
                 value={effort()}
                 onChange={(e) => setEffort(e.currentTarget.value)}
               >
-                <For each={EFFORT_OPTIONS}>
-                  {(x) => <option value={x}>{x}</option>}
+                <For each={effortOptions()}>
+                  {(x) => (
+                    <option value={x} selected={x === effort()}>
+                      {x}
+                    </option>
+                  )}
                 </For>
               </select>
             </label>
@@ -195,7 +249,9 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
                 </For>
               </select>
               <span class="block mt-1 text-[11px] text-[var(--color-fg-dim)]">
-                Runs under the {accountLabel(selectedEnvObj())}.
+                {agent() === "codex"
+                  ? "Runs Codex under your Codex CLI (ChatGPT) login."
+                  : `Runs under the ${accountLabel(selectedEnvObj())}.`}
               </span>
             </label>
           </Show>
@@ -242,7 +298,9 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
               <div class="mt-0.5 text-[11px] text-[var(--color-fg-dim)] leading-snug">
                 Launch with{" "}
                 <code class="font-mono text-[10.5px]">
-                  --permission-mode bypassPermissions
+                  {agent() === "codex"
+                    ? "--dangerously-bypass-approvals-and-sandbox"
+                    : "--permission-mode bypassPermissions"}
                 </code>{" "}
                 so the orchestrator can spawn agents without prompting.
               </div>

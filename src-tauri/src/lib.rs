@@ -54,7 +54,7 @@ pub fn run() {
             commands::worktree_refresh_pr_status,
             commands::worktree_set_permission_mode,
             commands::worktree_set_agent,
-            commands::codex_repo_ids,
+            commands::codex_options,
             commands::worktree_set_title,
             commands::worktree_resize_window,
             commands::env_config_get,

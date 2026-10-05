@@ -417,6 +417,12 @@ fn claude_invocation(
 /// depending on the worktree's `agent` column. `cwd` and `mcp_entry` (the
 /// installed Flock MCP server, see `mcp::installed_entry`) are only used by
 /// Codex; Claude gets its MCP servers from its own config.
+///
+/// A row keeps its model/effort across agent switches, so each agent only
+/// receives values it understands: Claude never gets a Codex model id (or
+/// `"default"`), Codex never gets a Claude alias. Anything else is dropped and
+/// the agent falls back to its own default. `append_system_prompt` (an
+/// orchestrator's instructions) maps to Codex's `developer_instructions`.
 #[allow(clippy::too_many_arguments)]
 fn agent_invocation(
     agent: &str,
@@ -429,9 +435,21 @@ fn agent_invocation(
     cwd: &str,
     mcp_entry: Option<&str>,
 ) -> String {
+    let effort = effort.filter(|e| *e != "default");
     if agent == crate::db::AGENT_CODEX {
-        codex_invocation(permission_mode, initial_prompt, resume_id, effort, cwd, mcp_entry)
+        let model = model.filter(|m| is_codex_model(m));
+        codex_invocation(
+            permission_mode,
+            initial_prompt,
+            resume_id,
+            model,
+            effort,
+            append_system_prompt,
+            cwd,
+            mcp_entry,
+        )
     } else {
+        let model = model.filter(|m| !is_codex_model(m) && *m != "default");
         claude_invocation(
             permission_mode,
             initial_prompt,
@@ -443,9 +461,31 @@ fn agent_invocation(
     }
 }
 
-/// TOML basic-string literal for a `codex -c key=<value>` override.
+/// A concrete Codex model id (`"default"` means "don't pass `-m`").
+fn is_codex_model(m: &str) -> bool {
+    m != "default" && crate::commands::CODEX_MODELS.contains(&m)
+}
+
+/// TOML basic-string literal for a `codex -c key=<value>` override. Escapes
+/// quotes, backslashes and control characters — an orchestrator's
+/// instructions span many lines, and a raw newline isn't valid TOML (Codex
+/// would then take the whole value, quotes included, as a literal string).
 fn toml_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Build the `codex` invocation, mapping the worktree's Claude-shaped settings
@@ -457,10 +497,15 @@ fn toml_str(s: &str) -> String {
 ///   sandbox; `dontAsk` → workspace-write, never ask (a disallowed action
 ///   fails back to the model); `default` / `acceptEdits` → workspace-write,
 ///   ask on request (Codex's standard preset).
-/// - **Model** → not forwarded. Flock's model column holds Claude ids/aliases,
-///   which mean nothing to Codex, so Codex runs its own configured default.
+/// - **Model** → `-m` when it's a Codex model id (`commands::CODEX_MODELS`);
+///   omitted for `"default"` or a leftover Claude alias, so Codex runs its own
+///   configured default.
 /// - **Effort** → `model_reasoning_effort`. Codex accepts the same
 ///   low/medium/high/xhigh/max scale Flock validates against.
+/// - **Developer instructions** → `developer_instructions`, Codex's
+///   counterpart of `--append-system-prompt`: it adds a developer message on
+///   top of Codex's own system prompt (`base_instructions` would replace it).
+///   Only needed on a fresh session; a resumed one replays it from history.
 ///
 /// Every session also gets, per invocation (never written to
 /// `~/.codex/config.toml`):
@@ -470,15 +515,21 @@ fn toml_str(s: &str) -> String {
 /// - the worktree trusted, so a fresh worktree doesn't open on Codex's blocking
 ///   "Trust this folder?" prompt.
 /// - the Flock MCP server (`kb_*`/`task_*` tools), forwarding
-///   `FLOCK_WORKTREE_ID` so the server can identify its worktree.
+///   `FLOCK_WORKTREE_ID` so the server can identify its worktree (that's how
+///   `task_create` links children and runs the cross-account check), plus the
+///   server's optional `FLOCK_API_URL` / `FLOCK_TOKEN` overrides. Codex only
+///   hands an MCP server the env vars it's told to; Claude hands it all.
 ///
 /// Resume is `codex resume <id>`; a prompt goes after `--` so text starting
 /// with `-` can't be read as a flag.
+#[allow(clippy::too_many_arguments)]
 fn codex_invocation(
     permission_mode: &str,
     initial_prompt: Option<&str>,
     resume_id: Option<&str>,
+    model: Option<&str>,
     effort: Option<&str>,
+    developer_instructions: Option<&str>,
     cwd: &str,
     mcp_entry: Option<&str>,
 ) -> String {
@@ -496,8 +547,15 @@ fn codex_invocation(
         _ => "-s workspace-write -a on-request",
     };
     cmd = format!("{cmd} {perm}");
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
+        cmd = format!("{cmd} -m {}", shell_escape(m));
+    }
     if let Some(e) = effort.filter(|e| !e.is_empty()) {
         let kv = format!("model_reasoning_effort={}", toml_str(e));
+        cmd = format!("{cmd} -c {}", shell_escape(&kv));
+    }
+    if let Some(di) = developer_instructions.filter(|d| !d.is_empty()) {
+        let kv = format!("developer_instructions={}", toml_str(di));
         cmd = format!("{cmd} -c {}", shell_escape(&kv));
     }
     let trust = format!("projects={{{}={{trust_level=\"trusted\"}}}}", toml_str(cwd));
@@ -506,7 +564,8 @@ fn codex_invocation(
         for kv in [
             "mcp_servers.flock.command=\"node\"".to_string(),
             format!("mcp_servers.flock.args=[{}]", toml_str(entry)),
-            "mcp_servers.flock.env_vars=[\"FLOCK_WORKTREE_ID\"]".to_string(),
+            "mcp_servers.flock.env_vars=[\"FLOCK_WORKTREE_ID\",\"FLOCK_API_URL\",\"FLOCK_TOKEN\"]"
+                .to_string(),
         ] {
             cmd = format!("{cmd} -c {}", shell_escape(&kv));
         }
@@ -1271,6 +1330,8 @@ mod tests {
             Some("-fix the bug"),
             None,
             None,
+            None,
+            None,
             "/work/wt",
             None,
         );
@@ -1283,21 +1344,21 @@ mod tests {
 
     #[test]
     fn codex_resume_uses_resume_subcommand_with_id_then_prompt() {
-        let cmd = codex_invocation("default", Some("continue"), Some("01a1-uuid"), None, "/w", None);
+        let cmd = codex_invocation("default", Some("continue"), Some("01a1-uuid"), None, None, None, "/w", None);
         assert!(cmd.starts_with("codex resume --no-daemon -s workspace-write -a on-request "));
         assert!(cmd.ends_with(" '01a1-uuid' -- 'continue'"));
         // Plain resume (reattach after the session died): id, no prompt.
-        let plain = codex_invocation("default", None, Some("01a1-uuid"), None, "/w", None);
+        let plain = codex_invocation("default", None, Some("01a1-uuid"), None, None, None, "/w", None);
         assert!(plain.starts_with("codex resume "));
         assert!(plain.ends_with(" '01a1-uuid'"));
         // An empty id is no resume at all.
-        assert!(codex_invocation("default", None, Some(""), None, "/w", None).starts_with("codex --no-daemon "));
+        assert!(codex_invocation("default", None, Some(""), None, None, None, "/w", None).starts_with("codex --no-daemon "));
     }
 
     #[test]
     fn codex_permission_modes_map_to_sandbox_and_approvals() {
         let flags = |mode: &str| {
-            let c = codex_invocation(mode, None, None, None, "/w", None);
+            let c = codex_invocation(mode, None, None, None, None, None, "/w", None);
             c.trim_start_matches("codex --no-daemon ")
                 .split(" -c ")
                 .next()
@@ -1318,7 +1379,9 @@ mod tests {
             "bypassPermissions",
             None,
             None,
+            None,
             Some("high"),
+            None,
             "/Users/y/Application Support/wt",
             Some("/Users/y/Library/Application Support/Flock/mcp/flock-mcp.mjs"),
         );
@@ -1330,16 +1393,77 @@ mod tests {
                 "projects={\"/Users/y/Application Support/wt\"={trust_level=\"trusted\"}}".to_string(),
                 "mcp_servers.flock.command=\"node\"".to_string(),
                 "mcp_servers.flock.args=[\"/Users/y/Library/Application Support/Flock/mcp/flock-mcp.mjs\"]".to_string(),
-                "mcp_servers.flock.env_vars=[\"FLOCK_WORKTREE_ID\"]".to_string(),
+                "mcp_servers.flock.env_vars=[\"FLOCK_WORKTREE_ID\",\"FLOCK_API_URL\",\"FLOCK_TOKEN\"]"
+                .to_string(),
             ]
         );
-        // Claude model ids are never forwarded to Codex.
+        // No model given → no `-m`.
         assert!(!cmd.contains(" -m "));
     }
 
     #[test]
     fn codex_toml_strings_escape_quotes_and_backslashes() {
         assert_eq!(super::toml_str(r#"/a "b" \c"#), r#""/a \"b\" \\c""#);
+    }
+
+    #[test]
+    fn codex_toml_strings_escape_newlines_and_control_chars() {
+        // Raw newlines aren't valid in a TOML basic string; an orchestrator
+        // prompt is full of them.
+        assert_eq!(super::toml_str("a\nb\tc\r\u{1}"), r#""a\nb\tc\r\u0001""#);
+    }
+
+    #[test]
+    fn codex_model_and_developer_instructions_are_forwarded() {
+        let sys = "You are an ORCHESTRATOR.\nUse \"task_create\".";
+        let cmd = codex_invocation(
+            "bypassPermissions",
+            Some("mission"),
+            None,
+            Some("gpt-6-sol"),
+            Some("high"),
+            Some(sys),
+            "/orch",
+            None,
+        );
+        assert!(cmd.contains(" -m 'gpt-6-sol' "));
+        let overrides: Vec<String> = cmd
+            .split(" -- ")
+            .next()
+            .unwrap()
+            .split(" -c ")
+            .skip(1)
+            .map(unquote)
+            .collect();
+        assert!(overrides.contains(
+            &r#"developer_instructions="You are an ORCHESTRATOR.\nUse \"task_create\".""#.to_string()
+        ));
+        // The mission is still the first turn.
+        assert!(cmd.ends_with(" -- 'mission'"));
+    }
+
+    #[test]
+    fn agent_invocation_gives_each_agent_only_values_it_understands() {
+        use super::agent_invocation;
+        // A Codex row keeps its Codex model; switched to Claude it's dropped,
+        // as is the Codex-only "default" effort.
+        let claude = agent_invocation("claude", "default", None, None, None, Some("gpt-6-sol"), Some("default"), "/w", None);
+        assert_eq!(claude, "claude");
+        let codex = agent_invocation("codex", "default", None, None, None, Some("gpt-6-sol"), Some("default"), "/w", None);
+        assert!(codex.contains(" -m 'gpt-6-sol'"));
+        assert!(!codex.contains("model_reasoning_effort"));
+        // A Claude alias or "default" never reaches Codex as -m.
+        for m in ["opus", "default"] {
+            let c = agent_invocation("codex", "default", None, None, None, Some(m), None, "/w", None);
+            assert!(!c.contains(" -m "), "{m}");
+        }
+        // An orchestrator's instructions: --append-system-prompt for Claude,
+        // developer_instructions for Codex.
+        let c = agent_invocation("claude", "default", Some("go"), None, Some("orchestrate"), Some("opus"), Some("high"), "/o", None);
+        assert_eq!(c, "claude --model 'opus' --effort 'high' --append-system-prompt 'orchestrate' 'go'");
+        let x = agent_invocation("codex", "default", Some("go"), None, Some("orchestrate"), None, None, "/o", None);
+        assert!(x.contains("developer_instructions=\"orchestrate\""));
+        assert!(!x.contains("append-system-prompt"));
     }
 
     #[test]

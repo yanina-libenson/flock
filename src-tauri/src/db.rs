@@ -322,13 +322,14 @@ impl Db {
         env_profile: Option<&str>,
         model: Option<&str>,
         effort: Option<&str>,
+        agent: &str,
     ) -> AppResult<Worktree> {
         let c = self.c()?;
         c.execute(
-            "INSERT INTO worktrees (repo_id, branch, path, title, created_at, permission_mode, kind, parent_id, env_profile, model, effort)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO worktrees (repo_id, branch, path, title, created_at, permission_mode, kind, parent_id, env_profile, model, effort, agent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(path) DO UPDATE SET branch=excluded.branch, title=excluded.title",
-            params![repo_id, branch, path, title, now(), permission_mode, kind, parent_id, env_profile, model, effort],
+            params![repo_id, branch, path, title, now(), permission_mode, kind, parent_id, env_profile, model, effort, agent],
         )?;
         let id = c.query_row(
             "SELECT id FROM worktrees WHERE path = ?1",
@@ -713,6 +714,7 @@ mod tests {
                 Some("Personal"),
                 None,
                 None,
+                "claude",
             )
             .unwrap();
         assert_eq!(orch.env_profile.as_deref(), Some("Personal"));
@@ -726,7 +728,7 @@ mod tests {
         let db = temp_db();
         let repo = db.insert_repo("acme", "/tmp/acme-agent").unwrap();
         let w = db
-            .insert_worktree(repo.id, "flock/x", "/tmp/agent-wt", None, "bypassPermissions", "worktree", None, None, None, None)
+            .insert_worktree(repo.id, "flock/x", "/tmp/agent-wt", None, "bypassPermissions", "worktree", None, None, None, None, "claude")
             .unwrap();
         assert_eq!(w.agent, super::AGENT_CLAUDE);
         db.update_worktree_agent(w.id, super::AGENT_CODEX).unwrap();
@@ -761,7 +763,7 @@ mod tests {
         let db = temp_db();
         let repo = db.insert_repo("acme", "/tmp/acme").unwrap();
         let orch = db
-            .insert_worktree(repo.id, "kyoto", "/tmp/orch", None, "bypassPermissions", "orchestrator", None, None, None, None)
+            .insert_worktree(repo.id, "kyoto", "/tmp/orch", None, "bypassPermissions", "orchestrator", None, None, None, None, "claude")
             .unwrap();
         assert_eq!(orch.kind, "orchestrator");
         assert_eq!(orch.parent_id, None);
@@ -778,6 +780,7 @@ mod tests {
                 None,
                 None,
                 None,
+                "claude",
             )
             .unwrap();
         assert_eq!(child.kind, "worktree");
@@ -797,10 +800,10 @@ mod tests {
         let db = temp_db();
         let repo = db.insert_repo("acme", "/tmp/acme2").unwrap();
         let orch = db
-            .insert_worktree(repo.id, "lima", "/tmp/orch2", None, "bypassPermissions", "orchestrator", None, None, None, None)
+            .insert_worktree(repo.id, "lima", "/tmp/orch2", None, "bypassPermissions", "orchestrator", None, None, None, None, "claude")
             .unwrap();
         let child = db
-            .insert_worktree(repo.id, "flock/oslo", "/tmp/child2", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None)
+            .insert_worktree(repo.id, "flock/oslo", "/tmp/child2", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None, "claude")
             .unwrap();
 
         // ON DELETE SET NULL: the child survives, just loses the link.
@@ -815,16 +818,16 @@ mod tests {
         let db = temp_db();
         let repo = db.insert_repo("acme", "/tmp/acme3").unwrap();
         let orch = db
-            .insert_worktree(repo.id, "cairo", "/tmp/orch3", None, "bypassPermissions", "orchestrator", None, None, None, None)
+            .insert_worktree(repo.id, "cairo", "/tmp/orch3", None, "bypassPermissions", "orchestrator", None, None, None, None, "claude")
             .unwrap();
         let c1 = db
-            .insert_worktree(repo.id, "flock/a", "/tmp/c1", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None)
+            .insert_worktree(repo.id, "flock/a", "/tmp/c1", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None, "claude")
             .unwrap();
         let c2 = db
-            .insert_worktree(repo.id, "flock/b", "/tmp/c2", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None)
+            .insert_worktree(repo.id, "flock/b", "/tmp/c2", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None, "claude")
             .unwrap();
         // An unrelated standalone worktree must not show up in the fleet.
-        db.insert_worktree(repo.id, "flock/loose", "/tmp/loose", None, "bypassPermissions", "worktree", None, None, None, None)
+        db.insert_worktree(repo.id, "flock/loose", "/tmp/loose", None, "bypassPermissions", "worktree", None, None, None, None, "claude")
             .unwrap();
 
         let fleet = db.list_children(orch.id).unwrap();
@@ -834,7 +837,7 @@ mod tests {
 
         // A childless orchestrator has an empty fleet.
         let lonely = db
-            .insert_worktree(repo.id, "tokyo", "/tmp/orch_lonely", None, "bypassPermissions", "orchestrator", None, None, None, None)
+            .insert_worktree(repo.id, "tokyo", "/tmp/orch_lonely", None, "bypassPermissions", "orchestrator", None, None, None, None, "claude")
             .unwrap();
         assert!(db.list_children(lonely.id).unwrap().is_empty());
     }

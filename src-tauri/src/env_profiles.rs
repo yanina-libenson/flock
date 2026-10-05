@@ -149,13 +149,10 @@ pub fn profile_name(cfg: &EnvConfig, repo_path: &str) -> Option<String> {
 /// Personal or Flock ones.
 pub const CODEX_PROFILE: &str = "Thanx";
 
-/// Whether a worktree may run Codex: a normal worktree (not an orchestrator,
-/// which depends on Claude-only flags) whose resolved profile — a persisted
-/// `env_profile`, else the repo path's binding — is `CODEX_PROFILE`.
-pub fn codex_allowed(cfg: &EnvConfig, kind: &str, env_profile: Option<&str>, repo_path: &str) -> bool {
-    if kind == "orchestrator" {
-        return false;
-    }
+/// Whether a worktree or orchestrator may run Codex: its resolved profile — a
+/// persisted `env_profile` (an orchestrator's chosen Profile), else the repo
+/// path's binding — is `CODEX_PROFILE`.
+pub fn codex_allowed(cfg: &EnvConfig, env_profile: Option<&str>, repo_path: &str) -> bool {
     let name = match env_profile {
         Some(n) => Some(n.to_string()),
         None => profile_name(cfg, repo_path),
@@ -346,15 +343,18 @@ mod tests {
     }
 
     #[test]
-    fn codex_is_only_allowed_for_thanx_worktrees() {
+    fn codex_is_only_allowed_for_the_thanx_profile() {
         let c = accounts_cfg();
-        assert!(codex_allowed(&c, "worktree", None, "/Users/y/Code/Thanx/nexus"));
-        assert!(!codex_allowed(&c, "worktree", None, "/Users/y/Code/Personal/ixi"));
-        assert!(!codex_allowed(&c, "worktree", None, "/Users/y/Code/Other/repo"));
-        // Orchestrators never get Codex, even under the Thanx profile.
-        assert!(!codex_allowed(&c, "orchestrator", Some("Thanx"), "/x/orchestrators/kyoto"));
+        assert!(codex_allowed(&c, None, "/Users/y/Code/Thanx/nexus"));
+        assert!(!codex_allowed(&c, None, "/Users/y/Code/Personal/ixi"));
+        assert!(!codex_allowed(&c, None, "/Users/y/Code/Other/repo"));
+        // Orchestrators live in a scratch dir no binding matches: their chosen
+        // profile decides.
+        assert!(codex_allowed(&c, Some("Thanx"), "/x/orchestrators/kyoto"));
+        assert!(!codex_allowed(&c, Some("Personal"), "/x/orchestrators/kyoto"));
+        assert!(!codex_allowed(&c, None, "/x/orchestrators/kyoto"));
         // A persisted profile wins over the path binding.
-        assert!(!codex_allowed(&c, "worktree", Some("Personal"), "/Users/y/Code/Thanx/nexus"));
+        assert!(!codex_allowed(&c, Some("Personal"), "/Users/y/Code/Thanx/nexus"));
     }
 
     #[test]

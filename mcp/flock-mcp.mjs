@@ -61,7 +61,7 @@ const TOOLS = [
   {
     name: "task_create",
     description:
-      "Spawn a new agent task: create a git worktree in the given repo and start Claude on it with an initial prompt. Returns the new worktree.",
+      "Spawn a new agent task: create a git worktree in the given repo and start a coding agent (Claude Code or Codex — see `agent`) on it with an initial prompt. Returns the new worktree.",
     inputSchema: {
       type: "object",
       properties: {
@@ -81,19 +81,35 @@ const TOOLS = [
             "claude-sonnet-5",
             "claude-haiku-4-5-20251001",
             "claude-fable-5-1",
+            // Codex agents (agent: "codex"). "default" = Codex's configured model.
+            "default",
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
           ],
           description:
-            "REQUIRED. Model for this agent's session (alias or full model id). Always choose explicitly — never rely on the default, it changes over time. haiku = mechanical work, sonnet = everyday features/fixes, opus = hard/ambiguous/high-stakes.",
+            "REQUIRED. Model for this agent's session; must match the agent. Claude agents: an alias or full Claude model id — haiku = mechanical work, sonnet = everyday features/fixes, opus = hard/ambiguous/high-stakes. Codex agents: \"default\" (Codex's configured model) or a gpt-… id. Always choose explicitly — never rely on the default, it changes over time.",
         },
         effort: {
           type: "string",
-          enum: ["low", "medium", "high", "xhigh", "max"],
-          description: "REQUIRED. Reasoning effort for this agent's session. Always choose explicitly (low/medium for mechanical, medium/high for everyday, high/xhigh for hard work).",
+          enum: ["low", "medium", "high", "xhigh", "max", "default"],
+          description: "REQUIRED. Reasoning effort for this agent's session. Always choose explicitly (low/medium for mechanical, medium/high for everyday, high/xhigh for hard work). \"default\" is accepted for Codex agents only.",
+        },
+        agent: {
+          type: "string",
+          enum: ["claude", "codex"],
+          description:
+            "Which coding agent runs the task. Omit to spawn the same agent you (the calling orchestrator) are running as — a Codex orchestrator spawns Codex agents by default. Codex is only allowed in repos on the Thanx profile; Flock refuses otherwise.",
         },
         confirm_cross_account: {
           type: "boolean",
           description:
-            "Flock refuses to create a task whose repo resolves to a different Claude account than you (the calling orchestrator) are running under — this catches spawning into a mismatched/wrong repo. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
+            "Flock refuses to create a task whose repo resolves to a different account than you (the calling orchestrator) are running under — this catches spawning into a mismatched/wrong repo. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
         },
       },
       required: ["repo", "prompt", "model", "effort"],
@@ -107,6 +123,7 @@ const TOOLS = [
         title: a.title,
         model: a.model,
         effort: a.effort,
+        agent: a.agent,
         confirm_cross_account: a.confirm_cross_account,
         // Self-identify as the parent so the spawned worktree links into this
         // orchestrator's fleet. Flock injects FLOCK_WORKTREE_ID into every

@@ -462,6 +462,9 @@ struct CreateTaskBody {
     /// Claude `--effort` override. Validated against `commands::ALLOWED_EFFORTS`.
     /// Required when `parent_id` is set (orchestrator-spawned); optional otherwise.
     effort: Option<String>,
+    /// `"claude"` or `"codex"`. Omitted → the spawning orchestrator's own agent
+    /// (see `commands::resolve_child_agent`); Codex only in Thanx repos.
+    agent: Option<String>,
     /// Explicit override for the cross-account safety check: when `parent_id`
     /// is set and the target repo resolves to a different Claude account than
     /// the spawning orchestrator, `start_task_core` refuses the task unless
@@ -515,6 +518,7 @@ async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>
             body.parent_id,
             body.model,
             body.effort,
+            body.agent,
             body.confirm_cross_account,
         )
     })
@@ -619,6 +623,8 @@ async fn schedule_run_h(State(ctx): State<ApiCtx>, Path(id): Path<i64>) -> Respo
             s.parent_id,
             s.model.clone(),
             s.effort.clone(),
+            // Claude, as in commands::schedule_run_now.
+            Some(crate::db::AGENT_CLAUDE.to_string()),
             // Already gated at schedule_create time.
             true,
         )?;

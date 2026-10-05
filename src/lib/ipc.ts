@@ -124,8 +124,14 @@ export const worktreeSetPermissionMode = (id: number, mode: PermissionMode) =>
 /// updated row.
 export const worktreeSetAgent = (id: number, agent: Agent) =>
   invoke<Worktree>("worktree_set_agent", { id, agent });
-/// Repo ids whose worktrees may switch to Codex (Thanx profile).
-export const codexRepoIds = () => invoke<number[]>("codex_repo_ids");
+/// Where Codex is offered: the one env profile it runs under (orchestrators
+/// match on their chosen Profile) and the repos bound to it (worktrees match on
+/// their repo). The backend enforces the same rule.
+export interface CodexOptions {
+  profile: string;
+  repo_ids: number[];
+}
+export const codexOptions = () => invoke<CodexOptions>("codex_options");
 export const worktreeSetTitle = (id: number, title: string) =>
   invoke<void>("worktree_set_title", { id, title });
 export const worktreeRefreshPrStatus = (id: number) =>
@@ -260,6 +266,7 @@ export interface CreateTaskArgs {
   permission_mode?: PermissionMode | null;
   model?: string | null;
   effort?: string | null;
+  agent?: Agent | null;
 }
 
 export const taskCreate = (args: CreateTaskArgs) =>
@@ -277,11 +284,34 @@ export interface CreateOrchestratorArgs {
   model: string;
   /// Claude `--effort` for the orchestrator. Always explicit.
   effort: string;
+  /// Which agent runs the orchestrator. Codex only on the Thanx profile.
+  agent?: Agent;
 }
 
 /// Models offered in the UI. Mirrors (a subset of) ALLOWED_MODELS in commands.rs.
 export const MODEL_OPTIONS = ["opus", "sonnet", "haiku", "fable"] as const;
 export const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"] as const;
+/// Codex options. Mirrors CODEX_MODELS / CODEX_EFFORTS in commands.rs;
+/// "default" leaves the choice to Codex's own config.
+export const CODEX_MODEL_OPTIONS = [
+  "default",
+  "gpt-6.1-sol",
+  "gpt-6-sol",
+  "gpt-6-astra",
+  "gpt-6-luna",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+] as const;
+export const CODEX_EFFORT_OPTIONS = [
+  "default",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
 
 /// Spawn a repo-less orchestrator session (Flock MCP auto-wired). Returns the
 /// new worktree so the UI can open it.
