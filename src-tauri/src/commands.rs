@@ -1,4 +1,4 @@
-use crate::db::{Db, Repo, Schedule, Worktree, DEFAULT_PERMISSION_MODE};
+use crate::db::{Db, Repo, Schedule, Worktree, AGENT_CLAUDE, AGENT_CODEX, DEFAULT_PERMISSION_MODE};
 use crate::env_profiles;
 use crate::error::{AppError, AppResult};
 use crate::git;
@@ -519,6 +519,7 @@ pub fn session_open(
         None,
         w.model.as_deref(),
         w.effort.as_deref(),
+        &w.agent,
     )?;
     state.db.touch_worktree(args.worktree_id)?;
     Ok(())
@@ -665,6 +666,7 @@ pub fn start_task_core(
         None,
         w.model.as_deref(),
         w.effort.as_deref(),
+        &w.agent,
     )?;
     state.db.touch_worktree(w.id)?;
     // Tell the desktop UI a worktree appeared so it shows up live (under its
@@ -937,6 +939,7 @@ pub fn start_orchestrator_core(
         None,
         Some(model),
         Some(effort),
+        AGENT_CLAUDE,
     )?;
     state.db.touch_worktree(w.id)?;
     let _ = app.emit("worktree:created", &w);
@@ -1049,6 +1052,99 @@ pub fn worktree_set_permission_mode(
     Ok(())
 }
 
+/// Switch the coding agent a worktree runs — "Continue with Codex" when the
+/// Claude account is out of credit, and back again. Stops the current session,
+/// persists the new agent, and starts it on the same worktree/branch with a
+/// handoff first prompt (original task, last request, git state — see
+/// `handoff`). Conversations don't transfer; the branch carries the work. If
+/// the incoming agent already has a session here (a previous switch), it's
+/// resumed with the handoff as its next turn, so it keeps its own context.
+///
+/// Codex is only offered for worktrees on the Thanx profile
+/// (`env_profiles::codex_allowed`); switching back to Claude is always allowed.
+/// Returns the updated row; the desktop remounts the pane, which reattaches to
+/// the new tmux session. `async` so the transcript reads and tmux spawn run off
+/// the main thread instead of freezing the UI.
+#[tauri::command(async)]
+pub fn worktree_set_agent(state: State<'_, AppState>, id: i64, agent: String) -> AppResult<Worktree> {
+    if agent != AGENT_CLAUDE && agent != AGENT_CODEX {
+        return Err(AppError::msg(format!(
+            "invalid agent {agent:?}; must be {AGENT_CLAUDE:?} or {AGENT_CODEX:?}"
+        )));
+    }
+    // Same per-worktree lock as `deliver_input`, so a concurrent task_input
+    // can't resume the old agent while we're swapping it out.
+    let lock = {
+        let mut locks = state.input_locks.lock().unwrap();
+        locks
+            .entry(id)
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let _guard = lock.lock().unwrap();
+
+    let w = state.db.get_worktree(id)?;
+    if w.agent == agent {
+        return Ok(w);
+    }
+    let repo = state.db.get_repo(w.repo_id)?;
+    let cfg = env_profiles::load();
+    if agent == AGENT_CODEX
+        && !env_profiles::codex_allowed(&cfg, &w.kind, w.env_profile.as_deref(), &repo.path)
+    {
+        return Err(AppError::msg(format!(
+            "Codex is only available for {} worktrees",
+            env_profiles::CODEX_PROFILE
+        )));
+    }
+    let env_vars = env_profiles::resolve_vars_for_worktree(&cfg, w.env_profile.as_deref(), &repo.path);
+    let cwd = Path::new(&w.path);
+    let prompt = crate::handoff::render(&w.agent, &agent, &crate::handoff::gather(&w, &env_vars, &w.agent));
+
+    state.pty.kill(id).ok();
+    pty::tmux_kill_session(id);
+    state.db.update_worktree_agent(id, &agent)?;
+
+    let resume_id = pty::latest_session_id_for(&agent, cwd, &env_vars);
+    eprintln!(
+        "flock: worktree {id} switching {} → {agent} (resume={resume_id:?})",
+        w.agent
+    );
+    if let Err(e) = pty::start_detached(
+        id,
+        cwd,
+        &w.permission_mode,
+        &env_vars,
+        Some(&prompt),
+        None,
+        resume_id.as_deref(),
+        w.model.as_deref(),
+        w.effort.as_deref(),
+        &agent,
+    ) {
+        // Leave the row pointing at the agent that's actually resumable.
+        let _ = state.db.update_worktree_agent(id, &w.agent);
+        return Err(e);
+    }
+    state.db.touch_worktree(id)?;
+    state.db.get_worktree(id)
+}
+
+/// Ids of the repos whose worktrees may run Codex (bound to the Thanx profile).
+/// The desktop shows the "Continue with Codex" action only for these;
+/// `worktree_set_agent` enforces the same rule.
+#[tauri::command]
+pub fn codex_repo_ids(state: State<'_, AppState>) -> AppResult<Vec<i64>> {
+    let cfg = env_profiles::load();
+    Ok(state
+        .db
+        .list_repos()?
+        .into_iter()
+        .filter(|r| env_profiles::codex_allowed(&cfg, "worktree", None, &r.path))
+        .map(|r| r.id)
+        .collect())
+}
+
 /// Reflow the worktree's tmux window to a size. The desktop calls this to
 /// reclaim its full width when its pane becomes active (after the phone may
 /// have narrowed the session). See `pty::tmux_resize_window`.
@@ -1132,9 +1228,8 @@ pub fn deliver_input(
             ),
             Err(_) => Vec::new(),
         };
-        let resume_id =
-            pty::latest_session_id(cwd, crate::transcript::config_dir_from_env(&env_vars))
-                .ok_or(DeliverError::NoResumable)?;
+        let resume_id = pty::latest_session_id_for(&w.agent, cwd, &env_vars)
+            .ok_or(DeliverError::NoResumable)?;
         if w.model.is_some() || w.effort.is_some() {
             eprintln!(
                 "flock: worktree {} launching model={:?} effort={:?}",
@@ -1153,9 +1248,10 @@ pub fn deliver_input(
             Some(&resume_id),
             w.model.as_deref(),
             w.effort.as_deref(),
+            &w.agent,
         )
         .map_err(|e| DeliverError::Spawn(e.to_string()))?;
-        // Wait for Claude's input UI before typing; on timeout, send anyway.
+        // Wait for the agent's input UI before typing; on timeout, send anyway.
         pty::wait_until_ready(id, RESUME_READY_TIMEOUT);
     }
 

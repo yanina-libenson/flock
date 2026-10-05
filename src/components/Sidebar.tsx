@@ -11,6 +11,7 @@ import {
   worktreeRefreshPrStatus,
   worktreeSetTitle,
   worktreeLabel,
+  codexRepoIds,
   type Repo,
   type Worktree,
   type PrStatus,
@@ -26,6 +27,8 @@ import {
   setWorktreePrStatus,
   sidebarMode,
   setSidebarMode,
+  canUseCodex,
+  confirmSwitchAgent,
 } from "../lib/store";
 import {
   FolderGit2,
@@ -36,6 +39,7 @@ import {
   Network,
   ChevronRight,
   ChevronDown,
+  ArrowLeftRight,
 } from "lucide-solid";
 
 export function Sidebar(props: {
@@ -110,6 +114,11 @@ export function Sidebar(props: {
     }
     setAppStore("worktreesByRepo", nextWorktrees);
     setExpanded(nextExpanded);
+    try {
+      setAppStore("codexRepoIds", await codexRepoIds());
+    } catch (e) {
+      console.error("codexRepoIds failed", e);
+    }
     // Orchestrators live in an internal repo hidden from the list above; load
     // them separately into their own section.
     try {
@@ -378,10 +387,17 @@ export function Sidebar(props: {
                   </span>
                 </Show>
                 {/* Model/effort override, when this session isn't running the
-                    default — e.g. "haiku" or "opus · high". Hidden otherwise. */}
-                <Show when={w.model || w.effort}>
+                    default — e.g. "haiku" or "opus · high". Hidden otherwise.
+                    A Codex worktree always says so ("codex · high"); its
+                    Claude model is kept for switching back but unused. */}
+                <Show when={w.agent === "codex" || w.model || w.effort}>
                   <span class="truncate text-[10px] font-mono text-[var(--color-fg-dim)] mt-px">
-                    {[w.model, w.effort].filter(Boolean).join(" · ")}
+                    {(w.agent === "codex"
+                      ? ["codex", w.effort]
+                      : [w.model, w.effort]
+                    )
+                      .filter(Boolean)
+                      .join(" · ")}
                   </span>
                 </Show>
               </>
@@ -442,6 +458,25 @@ export function Sidebar(props: {
           >
             <Pencil size={12} />
           </button>
+          {/* Agent switch: offered on Thanx worktrees (and always on a Codex
+              one, to get back to Claude). */}
+          <Show when={w.agent === "codex" || canUseCodex(w)}>
+            <button
+              class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
+              title={
+                w.agent === "codex" ? "Switch back to Claude" : "Continue with Codex"
+              }
+              onClick={(e) => {
+                e.stopPropagation();
+                void confirmSwitchAgent(
+                  w,
+                  w.agent === "codex" ? "claude" : "codex",
+                );
+              }}
+            >
+              <ArrowLeftRight size={12} />
+            </button>
+          </Show>
           <button
             class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
             title="Reveal in Finder"

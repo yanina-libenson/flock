@@ -33,7 +33,13 @@ export interface Worktree {
   /// Claude `--effort` override for this worktree's session. null = no
   /// override.
   effort: string | null;
+  /// Which coding agent runs this worktree's session.
+  agent: Agent;
 }
+
+/// "claude" (default) or "codex" — the fallback when the Claude account is
+/// out of credit. Codex is only offered for Thanx-profile worktrees.
+export type Agent = "claude" | "codex";
 
 export type PermissionMode =
   | "default"
@@ -113,6 +119,13 @@ export const worktreeCurrentBranch = (id: number) =>
   invoke<string>("worktree_current_branch", { id });
 export const worktreeSetPermissionMode = (id: number, mode: PermissionMode) =>
   invoke<void>("worktree_set_permission_mode", { id, mode });
+/// Stop the worktree's current agent and continue on the same branch with
+/// `agent`, handing it the task + git state as its first prompt. Returns the
+/// updated row.
+export const worktreeSetAgent = (id: number, agent: Agent) =>
+  invoke<Worktree>("worktree_set_agent", { id, agent });
+/// Repo ids whose worktrees may switch to Codex (Thanx profile).
+export const codexRepoIds = () => invoke<number[]>("codex_repo_ids");
 export const worktreeSetTitle = (id: number, title: string) =>
   invoke<void>("worktree_set_title", { id, title });
 export const worktreeRefreshPrStatus = (id: number) =>
@@ -321,6 +334,13 @@ export interface WorktreeHibernatedEvent {
   detail?: string | null;
 }
 
+/// Claude's usage-limit / out-of-credit notice appeared on (limited: true) or
+/// left (false) a session's screen. Drives the "Continue with Codex" hint.
+export interface WorktreeUsageLimitEvent {
+  worktree_id: number;
+  limited: boolean;
+}
+
 /// What to show for a worktree: its auto-generated title when present, else
 /// the branch name (the place slug).
 export function worktreeLabel(w: Worktree): string {
@@ -347,6 +367,11 @@ export const onWorktreePrStatus = (
   cb: (e: WorktreePrStatusEvent) => void,
 ): Promise<UnlistenFn> =>
   listen<WorktreePrStatusEvent>("worktree:pr_status", (e) => cb(e.payload));
+
+export const onWorktreeUsageLimit = (
+  cb: (e: WorktreeUsageLimitEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<WorktreeUsageLimitEvent>("worktree:usage_limit", (e) => cb(e.payload));
 
 export const onWorktreeHibernated = (
   cb: (e: WorktreeHibernatedEvent) => void,

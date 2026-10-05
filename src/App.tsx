@@ -25,6 +25,7 @@ import {
   addWorktree,
   removeWorktreeFromStore,
   hibernatePane,
+  setUsageLimit,
   jumpToNextNeedingInput,
   worktreesNeedingInput,
   sidebarVisible,
@@ -36,6 +37,7 @@ import {
   onWorktreeTitle,
   onWorktreePrStatus,
   onWorktreeHibernated,
+  onWorktreeUsageLimit,
   onWorktreeCreated,
   onWorktreeRemoved,
   onPtyExit,
@@ -218,6 +220,12 @@ function App() {
           : undefined,
       ),
     );
+    // Claude's usage-limit notice appeared on / left a session's screen —
+    // the pane shows a dismissible "Continue with Codex" suggestion. Never
+    // switches on its own.
+    const usageLimitUnlisten = onWorktreeUsageLimit((e) =>
+      setUsageLimit(e.worktree_id, e.limited),
+    );
     // Clicking a notification jumps to its worktree. Primary: onAction (when it
     // fires). Reliable fallback: the window regaining focus while a jump is
     // armed (a notification click activates the app).
@@ -252,6 +260,7 @@ function App() {
       removedUnlisten.then((f) => f());
       prStatusUnlisten.then((f) => f());
       hibernateUnlisten.then((f) => f());
+      usageLimitUnlisten.then((f) => f());
       actionUnlisten.then((l) => l.unregister());
       focusUnlisten.then((f) => f());
       dragUnlisten.then((f) => f());
