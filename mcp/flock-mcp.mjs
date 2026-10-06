@@ -136,7 +136,7 @@ const TOOLS = [
   {
     name: "task_remove",
     description:
-      "Remove a worktree — same as the ✕ in Flock's sidebar: kills its session and deletes the checkout (the git branch is kept). ONLY use this when the user explicitly asks you to remove specific worktrees; never on your own initiative or as automatic cleanup. Refuses worktrees with uncommitted changes unless force is true — only pass force after telling the user what would be lost and getting an explicit yes. Cannot remove orchestrators.",
+      "Remove a worktree — same as the ✕ in Flock's sidebar: kills its session and deletes the checkout (the git branch is kept). ONLY use this when the user explicitly asks you to remove specific worktrees; never on your own initiative or as automatic cleanup. The user must approve every removal: Flock shows them a confirm dialog and this call waits up to 2 minutes for the answer. It returns {result: \"removed\"} if they approve; otherwise it fails saying the user declined, or that nobody answered in time (treated as declined). Either way the worktree stays: don't retry unless the user asks you to. Refuses worktrees with uncommitted changes unless force is true — only pass force after telling the user what would be lost and getting an explicit yes. Cannot remove orchestrators.",
     inputSchema: {
       type: "object",
       properties: {
@@ -148,7 +148,14 @@ const TOOLS = [
       },
       required: ["id"],
     },
-    handler: (a) => apiCall("POST", `/api/worktrees/${a.id}/remove`, { force: a.force === true }),
+    handler: (a) =>
+      apiCall("POST", `/api/worktrees/${a.id}/remove`, {
+        force: a.force === true,
+        // Names this orchestrator in the user's confirm dialog.
+        requested_by: process.env.FLOCK_WORKTREE_ID
+          ? Number(process.env.FLOCK_WORKTREE_ID)
+          : undefined,
+      }),
   },
   {
     name: "task_list",

@@ -1,7 +1,14 @@
 import { createStore } from "solid-js/store";
 import { createEffect, createSignal } from "solid-js";
 import { worktreeLabel, worktreeSetAgent } from "./ipc";
-import type { Agent, PrStatus, Repo, Worktree, WorktreeStatus } from "./ipc";
+import type {
+  Agent,
+  PrStatus,
+  RemoveRequest,
+  Repo,
+  Worktree,
+  WorktreeStatus,
+} from "./ipc";
 
 export interface AppStoreState {
   repos: Repo[];
@@ -37,6 +44,9 @@ export interface AppStoreState {
   /// Worktrees whose screen currently shows Claude's usage-limit notice, from
   /// the backend monitor. Drives the "Continue with Codex" suggestion banner.
   usageLimitByWorktree: Record<number, boolean>;
+  /// Orchestrators' pending task_remove requests, oldest first. The confirm
+  /// dialog shows the head; each leaves when answered or timed out.
+  removeRequests: RemoveRequest[];
 }
 
 const PERSIST_KEY = "flock.panes.v1";
@@ -74,6 +84,7 @@ const [store, setStore] = createStore<AppStoreState>({
   codexRepoIds: [],
   codexProfile: null,
   usageLimitByWorktree: {},
+  removeRequests: [],
 });
 
 // Persist on any change to pane state.
@@ -243,6 +254,18 @@ export function removeWorktreeFromStore(id: number) {
     return next;
   });
   closePane(id);
+}
+
+export function addRemoveRequest(r: RemoveRequest) {
+  setStore("removeRequests", (prev) =>
+    prev.some((x) => x.request_id === r.request_id) ? prev : [...prev, r],
+  );
+}
+
+export function dropRemoveRequest(requestId: number) {
+  setStore("removeRequests", (prev) =>
+    prev.filter((x) => x.request_id !== requestId),
+  );
 }
 
 export function setWorktreeStatus(worktreeId: number, status: WorktreeStatus) {

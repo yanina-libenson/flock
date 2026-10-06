@@ -566,6 +566,13 @@ fn codex_invocation(
             format!("mcp_servers.flock.args=[{}]", toml_str(entry)),
             "mcp_servers.flock.env_vars=[\"FLOCK_WORKTREE_ID\",\"FLOCK_API_URL\",\"FLOCK_TOKEN\"]"
                 .to_string(),
+            // task_remove waits for the user's answer in Flock's confirm dialog
+            // (up to `commands::REMOVE_CONFIRM_TIMEOUT`); Codex's default tool
+            // timeout is 60s.
+            format!(
+                "mcp_servers.flock.tool_timeout_sec={}",
+                crate::commands::REMOVE_CONFIRM_TIMEOUT.as_secs() + 60
+            ),
         ] {
             cmd = format!("{cmd} -c {}", shell_escape(&kv));
         }
@@ -1395,6 +1402,7 @@ mod tests {
                 "mcp_servers.flock.args=[\"/Users/y/Library/Application Support/Flock/mcp/flock-mcp.mjs\"]".to_string(),
                 "mcp_servers.flock.env_vars=[\"FLOCK_WORKTREE_ID\",\"FLOCK_API_URL\",\"FLOCK_TOKEN\"]"
                 .to_string(),
+                "mcp_servers.flock.tool_timeout_sec=180".to_string(),
             ]
         );
         // No model given → no `-m`.

@@ -375,23 +375,28 @@ async fn input(
 struct RemoveWorktreeBody {
     #[serde(default)]
     force: bool,
+    /// The calling orchestrator's worktree id, shown in the confirm dialog.
+    #[serde(default)]
+    requested_by: Option<i64>,
 }
 
-/// Remove a worktree (the sidebar ✕), for orchestrators. `{"force?": bool}`.
+/// Remove a worktree (the sidebar ✕), for orchestrators, once the user approves
+/// it in the desktop dialog. `{"force?": bool, "requested_by?": id}`. Holds the
+/// request open until the user answers or `REMOVE_CONFIRM_TIMEOUT` passes.
 async fn remove_worktree_h(
     State(ctx): State<ApiCtx>,
     Path(id): Path<i64>,
     body: Option<Json<RemoveWorktreeBody>>,
 ) -> Response {
-    let force = body.map(|b| b.0.force).unwrap_or(false);
+    let RemoveWorktreeBody { force, requested_by } = body.map(|b| b.0).unwrap_or_default();
     let app = ctx.app.clone();
     let res = tokio::task::spawn_blocking(move || {
         let st = app.state::<AppState>();
-        crate::commands::remove_worktree_for_orchestrator(&app, &st, id, force)
+        crate::commands::remove_worktree_for_orchestrator(&app, &st, id, force, requested_by)
     })
     .await;
     match res {
-        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Ok(())) => Json(serde_json::json!({ "id": id, "result": "removed" })).into_response(),
         Ok(Err(e)) => remove_refusal_response(e, id),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "join failed").into_response(),
     }
@@ -414,6 +419,23 @@ fn remove_refusal_response(err: crate::commands::RemoveRefusal, id: i64) -> Resp
                 "worktree {id} has uncommitted changes ({} staged, {} unstaged, {} untracked). \
                  Tell the user what would be lost and only retry with force:true if they explicitly agree.",
                 d.staged, d.unstaged, d.untracked
+            ),
+        )
+            .into_response(),
+        RemoveRefusal::Declined => (
+            StatusCode::FORBIDDEN,
+            format!(
+                "the user declined removing worktree {id} in Flock, so it was not removed. \
+                 Leave it in place; only try again if the user asks you to."
+            ),
+        )
+            .into_response(),
+        RemoveRefusal::TimedOut => (
+            StatusCode::REQUEST_TIMEOUT,
+            format!(
+                "worktree {id} was not removed: the user didn't answer Flock's confirm dialog within {}s \
+                 (treated as declined). Ask the user in chat before trying again.",
+                crate::commands::REMOVE_CONFIRM_TIMEOUT.as_secs()
             ),
         )
             .into_response(),
@@ -1198,6 +1220,12 @@ mod tests {
         );
         let d = crate::git::DirtySummary { staged: 1, unstaged: 0, untracked: 2 };
         assert_eq!(remove_refusal_response(RemoveRefusal::Dirty(d), 1).status(), StatusCode::CONFLICT);
+        // The user's "no" and no answer at all are both refusals, never a 2xx.
+        assert_eq!(remove_refusal_response(RemoveRefusal::Declined, 1).status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            remove_refusal_response(RemoveRefusal::TimedOut, 1).status(),
+            StatusCode::REQUEST_TIMEOUT
+        );
     }
 
     #[test]

@@ -51,6 +51,9 @@ function stringToB64(s: string): string {
 /// actual session state (scrollback, mode negotiation, claude process
 /// lifetime) lives in the tmux server — this component is a thin client.
 export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
+  // Captured once: when the worktree is removed, the store drops it before this
+  // pane is disposed, so `props.worktree` is undefined by cleanup time.
+  const worktreeId = props.worktree.id;
   let containerRef!: HTMLDivElement;
   const [status, setStatus] = createSignal<"connecting" | "ready" | "exited">(
     "connecting",
@@ -151,7 +154,6 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
     term.open(containerRef);
     fit.fit();
 
-    const worktreeId = props.worktree.id;
     const cols = term.cols;
     const rows = term.rows;
 
@@ -276,7 +278,7 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
     // emitting pty:output events into the void. The tmux *session* stays
     // alive — Claude keeps running inside tmux, and reopening the pane
     // reattaches. Full session teardown happens in `worktree_remove`.
-    sessionClose(props.worktree.id).catch(() => {});
+    sessionClose(worktreeId).catch(() => {});
   });
 
   return (

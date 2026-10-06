@@ -1,5 +1,6 @@
 mod api;
 mod commands;
+mod confirm;
 mod db;
 mod env_profiles;
 mod error;
@@ -49,6 +50,7 @@ pub fn run() {
             commands::worktree_create,
             commands::worktrees_list,
             commands::worktree_remove,
+            commands::worktree_remove_answer,
             commands::worktree_dirty,
             commands::worktree_current_branch,
             commands::worktree_refresh_pr_status,

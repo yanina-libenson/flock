@@ -13,6 +13,7 @@ import { TerminalPane } from "./components/TerminalPane";
 import { NewWorktreeModal } from "./components/NewWorktreeModal";
 import { NewOrchestratorModal } from "./components/NewOrchestratorModal";
 import { SettingsModal, remoteEnabledPref } from "./components/SettingsModal";
+import { RemoveRequestModal } from "./components/RemoveRequestModal";
 import {
   appStore,
   closePane,
@@ -24,6 +25,8 @@ import {
   applyWorktreeTitle,
   addWorktree,
   removeWorktreeFromStore,
+  addRemoveRequest,
+  dropRemoveRequest,
   hibernatePane,
   setUsageLimit,
   jumpToNextNeedingInput,
@@ -40,6 +43,8 @@ import {
   onWorktreeUsageLimit,
   onWorktreeCreated,
   onWorktreeRemoved,
+  onWorktreeRemoveRequest,
+  onWorktreeRemoveRequestDone,
   onPtyExit,
   setActiveWorktree,
   sessionWriteText,
@@ -136,7 +141,10 @@ function App() {
     let pendingJump = false;
     const jumpTo = (wid: number | null) => {
       pendingJump = false;
-      if (wid != null) openPane(wid);
+      // The worktree may have been removed since we notified (an orchestrator
+      // removing a child that just finished). Opening it would attach a pane
+      // to a worktree that no longer exists.
+      if (wid != null && worktreesById().has(wid)) openPane(wid);
     };
     const MIN_WORK_MS = 8000; // ignore working blips (focus redraws, quick edits)
     const COOLDOWN_MS = 30000; // at most one ping per worktree per 30s
@@ -202,8 +210,28 @@ function App() {
     // cron, or the REST API) — add it live so it shows in the sidebar without a
     // manual refresh.
     const createdUnlisten = onWorktreeCreated((w) => addWorktree(w));
-    // An orchestrator removed a worktree (task_remove) — drop it live.
+    // A worktree was removed (sidebar, cascade, or an approved task_remove) —
+    // drop it live, pane and fleet entry included.
     const removedUnlisten = onWorktreeRemoved((id) => removeWorktreeFromStore(id));
+    // An orchestrator wants to remove a worktree: queue the confirm dialog, and
+    // ping the user if they're not looking at Flock — the orchestrator is
+    // blocked until they answer.
+    const removeRequestUnlisten = onWorktreeRemoveRequest((r) => {
+      addRemoveRequest(r);
+      if (document.hasFocus()) return;
+      try {
+        sendNotification({
+          title: "Approve removing a worktree?",
+          body: `${r.requested_by ?? "An orchestrator"} wants to remove "${r.label}"`,
+          sound: "Glass",
+        });
+      } catch {
+        /* permission denied or unavailable */
+      }
+    });
+    const removeRequestDoneUnlisten = onWorktreeRemoveRequestDone((id) =>
+      dropRemoveRequest(id),
+    );
     const prStatusUnlisten = onWorktreePrStatus((e) =>
       setWorktreePrStatus(e.worktree_id, e.status),
     );
@@ -258,6 +286,8 @@ function App() {
       exitUnlisten.then((f) => f());
       createdUnlisten.then((f) => f());
       removedUnlisten.then((f) => f());
+      removeRequestUnlisten.then((f) => f());
+      removeRequestDoneUnlisten.then((f) => f());
       prStatusUnlisten.then((f) => f());
       hibernateUnlisten.then((f) => f());
       usageLimitUnlisten.then((f) => f());
@@ -435,6 +465,7 @@ function App() {
       <Show when={showSettings()}>
         <SettingsModal onClose={() => setShowSettings(false)} />
       </Show>
+      <RemoveRequestModal />
       <Show when={tmuxOk() === false}>
         <TmuxMissingModal />
       </Show>

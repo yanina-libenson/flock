@@ -198,6 +198,16 @@ impl Db {
               word_count  INTEGER NOT NULL DEFAULT 0
             );
 
+            -- Highest worktree id ever handed out, so a removed worktree's id is
+            -- never reused (see insert_worktree). Cheaper than rebuilding the
+            -- table with AUTOINCREMENT, which needs foreign keys off.
+            CREATE TABLE IF NOT EXISTS id_high_water (
+              tbl  TEXT PRIMARY KEY,
+              last INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO id_high_water (tbl, last)
+              SELECT 'worktrees', COALESCE(MAX(id), 0) FROM worktrees;
+
             -- Legacy: earlier versions of Flock persisted PTY scrollback blobs
             -- here. Sessions are now owned by tmux, so this table is dead.
             DROP TABLE IF EXISTS sessions;
@@ -325,16 +335,32 @@ impl Db {
         agent: &str,
     ) -> AppResult<Worktree> {
         let c = self.c()?;
+        // Never reuse a removed worktree's id (SQLite's plain INTEGER PRIMARY KEY
+        // hands out max(id)+1). The tmux session `flock-<id>`, the UI's
+        // persisted panes and orchestrators' notes all key on it, so a recycled
+        // id collides with leftovers ("duplicate session: flock-317") or points
+        // them at the wrong worktree.
+        let next: i64 = c.query_row(
+            "SELECT MAX(COALESCE((SELECT MAX(id) FROM worktrees), 0),
+                        COALESCE((SELECT last FROM id_high_water WHERE tbl = 'worktrees'), 0)) + 1",
+            [],
+            |r| r.get(0),
+        )?;
         c.execute(
-            "INSERT INTO worktrees (repo_id, branch, path, title, created_at, permission_mode, kind, parent_id, env_profile, model, effort, agent)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "INSERT INTO worktrees (id, repo_id, branch, path, title, created_at, permission_mode, kind, parent_id, env_profile, model, effort, agent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(path) DO UPDATE SET branch=excluded.branch, title=excluded.title",
-            params![repo_id, branch, path, title, now(), permission_mode, kind, parent_id, env_profile, model, effort, agent],
+            params![next, repo_id, branch, path, title, now(), permission_mode, kind, parent_id, env_profile, model, effort, agent],
         )?;
         let id = c.query_row(
             "SELECT id FROM worktrees WHERE path = ?1",
             params![path],
             |r| r.get::<_, i64>(0),
+        )?;
+        c.execute(
+            "INSERT INTO id_high_water (tbl, last) VALUES ('worktrees', ?1)
+             ON CONFLICT(tbl) DO UPDATE SET last = MAX(last, excluded.last)",
+            params![id],
         )?;
         drop(c);
         self.get_worktree(id)
@@ -397,6 +423,19 @@ impl Db {
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Ids of every worktree row. The monitor uses it to spot tmux sessions
+    /// whose worktree is gone.
+    pub fn worktree_ids(&self) -> AppResult<std::collections::HashSet<i64>> {
+        let c = self.c()?;
+        let mut stmt = c.prepare("SELECT id FROM worktrees")?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        let mut out = std::collections::HashSet::new();
+        for r in rows {
+            out.insert(r?);
         }
         Ok(out)
     }
@@ -693,6 +732,58 @@ mod tests {
         );
         p.push(uniq);
         Db::open_at(&p).expect("open temp db")
+    }
+
+    fn add_wt(db: &Db, repo_id: i64, path: &str) -> i64 {
+        db.insert_worktree(
+            repo_id, path, path, None, "bypassPermissions", "worktree", None, None, None, None,
+            "claude",
+        )
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn removed_worktree_ids_are_never_reused() {
+        // A plain INTEGER PRIMARY KEY hands out max(id)+1, so removing the newest
+        // worktree used to give its id to the next task — which then collided
+        // with a leftover `flock-<id>` tmux session.
+        let db = temp_db();
+        let repo = db.insert_repo("acme", "/tmp/acme-ids").unwrap();
+        let a = add_wt(&db, repo.id, "/tmp/acme-ids/a");
+        let b = add_wt(&db, repo.id, "/tmp/acme-ids/b");
+        db.delete_worktree(b).unwrap();
+        let c = add_wt(&db, repo.id, "/tmp/acme-ids/c");
+        assert!(c > b, "id {b} was reused as {c}");
+        db.delete_worktree(c).unwrap();
+        db.delete_worktree(a).unwrap();
+        let d = add_wt(&db, repo.id, "/tmp/acme-ids/d");
+        assert!(d > c, "id {c} was reused as {d}");
+        assert_eq!(db.worktree_ids().unwrap(), [d].into_iter().collect());
+    }
+
+    #[test]
+    fn id_high_water_survives_reopen_and_seeds_existing_dbs() {
+        let mut p = std::env::temp_dir();
+        p.push(format!("flock-test-hw-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let top = {
+            let db = Db::open_at(&p).unwrap();
+            let repo = db.insert_repo("acme", "/tmp/acme-hw").unwrap();
+            add_wt(&db, repo.id, "/tmp/acme-hw/a");
+            let top = add_wt(&db, repo.id, "/tmp/acme-hw/b");
+            // A DB from before the high-water table: drop it, so reopening has
+            // to seed it from the rows that are there.
+            db.c().unwrap().execute("DROP TABLE id_high_water", []).unwrap();
+            top
+        };
+        let db = Db::open_at(&p).unwrap();
+        db.delete_worktree(top).unwrap();
+        let repo = db.insert_repo("acme", "/tmp/acme-hw").unwrap();
+        let next = add_wt(&db, repo.id, "/tmp/acme-hw/c");
+        assert!(next > top, "id {top} was reused as {next} after reopen");
+        drop(db);
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
