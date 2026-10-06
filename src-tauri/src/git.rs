@@ -288,6 +288,16 @@ pub fn dirty_summary(path: &Path) -> AppResult<DirtySummary> {
     })
 }
 
+/// Plain-text snapshot of a worktree's state for an agent handoff prompt:
+/// `git status --short --branch`, `git diff --stat HEAD` (uncommitted changes)
+/// and the last `n` commits, oneline. Each part is empty when git fails.
+pub fn handoff_snapshot(path: &Path, n: usize) -> (String, String, String) {
+    let status = run_git(path, ["status", "--short", "--branch"]).unwrap_or_default();
+    let diff_stat = run_git(path, ["diff", "--stat", "HEAD"]).unwrap_or_default();
+    let log = run_git(path, ["log", "--oneline", "-n", &n.to_string()]).unwrap_or_default();
+    (status, diff_stat, log)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirtySummary {
     pub staged: usize,

@@ -85,6 +85,8 @@ struct WorktreeRow {
     has_session: bool,
     model: Option<String>,
     effort: Option<String>,
+    /// `"claude"` or `"codex"` — which agent runs this worktree's session.
+    agent: String,
 }
 
 #[derive(Serialize, Default)]
@@ -222,6 +224,7 @@ async fn worktrees(State(ctx): State<ApiCtx>) -> Json<Vec<WorktreeRow>> {
                         has_session: status.is_some(),
                         model: w.model,
                         effort: w.effort,
+                        agent: w.agent,
                     });
                 }
             }
@@ -459,6 +462,9 @@ struct CreateTaskBody {
     /// Claude `--effort` override. Validated against `commands::ALLOWED_EFFORTS`.
     /// Required when `parent_id` is set (orchestrator-spawned); optional otherwise.
     effort: Option<String>,
+    /// `"claude"` or `"codex"`. Omitted → the spawning orchestrator's own agent
+    /// (see `commands::resolve_child_agent`); Codex only in Thanx repos.
+    agent: Option<String>,
     /// Explicit override for the cross-account safety check: when `parent_id`
     /// is set and the target repo resolves to a different Claude account than
     /// the spawning orchestrator, `start_task_core` refuses the task unless
@@ -512,6 +518,7 @@ async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>
             body.parent_id,
             body.model,
             body.effort,
+            body.agent,
             body.confirm_cross_account,
         )
     })
@@ -616,6 +623,8 @@ async fn schedule_run_h(State(ctx): State<ApiCtx>, Path(id): Path<i64>) -> Respo
             s.parent_id,
             s.model.clone(),
             s.effort.clone(),
+            // Claude, as in commands::schedule_run_now.
+            Some(crate::db::AGENT_CLAUDE.to_string()),
             // Already gated at schedule_create time.
             true,
         )?;
@@ -677,9 +686,10 @@ struct TranscriptResp {
     bytes: u64,
 }
 
-/// Reader feed: the worktree's Claude conversation as clean messages, parsed
-/// from the session JSONL (read-only — never touches the live terminal). Poll
-/// with `?since=<bytes>` to fetch only what's new.
+/// Reader feed: the worktree's agent conversation as clean messages, parsed
+/// from the session JSONL — Claude's transcript, or Codex's rollout for a Codex
+/// worktree (read-only — never touches the live terminal). Poll with
+/// `?since=<bytes>` to fetch only what's new.
 async fn transcript_h(
     State(ctx): State<ApiCtx>,
     Path(id): Path<i64>,
@@ -701,10 +711,19 @@ async fn transcript_h(
             ),
             Err(_) => Vec::new(),
         };
-        let file = crate::transcript::session_file_for(
-            &w.path,
-            crate::transcript::config_dir_from_env(&env_vars),
-        )?;
+        let codex = w.agent == crate::db::AGENT_CODEX;
+        let file = if codex {
+            crate::transcript::codex_session_for(
+                &w.path,
+                crate::transcript::codex_home_from_env(&env_vars),
+            )?
+            .0
+        } else {
+            crate::transcript::session_file_for(
+                &w.path,
+                crate::transcript::config_dir_from_env(&env_vars),
+            )?
+        };
         let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
         let since = q.since.unwrap_or(0);
         let text = if since > 0 && since <= size {
@@ -714,7 +733,11 @@ async fn transcript_h(
                 .map(|b| String::from_utf8_lossy(&b).into_owned())
                 .unwrap_or_default()
         };
-        let mut msgs = crate::transcript::parse_messages(&text);
+        let mut msgs = if codex {
+            crate::transcript::parse_codex_messages(&text)
+        } else {
+            crate::transcript::parse_messages(&text)
+        };
         // Initial load: cap to the most recent slice so the payload is bounded.
         if since == 0 && msgs.len() > 150 {
             msgs = msgs.split_off(msgs.len() - 150);

@@ -1,6 +1,7 @@
 import { createStore } from "solid-js/store";
 import { createEffect, createSignal } from "solid-js";
-import type { PrStatus, Repo, Worktree, WorktreeStatus } from "./ipc";
+import { worktreeLabel, worktreeSetAgent } from "./ipc";
+import type { Agent, PrStatus, Repo, Worktree, WorktreeStatus } from "./ipc";
 
 export interface AppStoreState {
   repos: Repo[];
@@ -28,6 +29,14 @@ export interface AppStoreState {
   /// PR lifecycle status per worktree id, from the backend PR poller. Absent =
   /// no PR and nothing to submit (no badge shown).
   prStatusByWorktree: Record<number, PrStatus>;
+  /// Where Codex is offered, from the backend: repos whose worktrees may
+  /// switch to it (bound to the Thanx profile) and the profile an orchestrator
+  /// must have chosen. Gates the "Continue with Codex" action.
+  codexRepoIds: number[];
+  codexProfile: string | null;
+  /// Worktrees whose screen currently shows Claude's usage-limit notice, from
+  /// the backend monitor. Drives the "Continue with Codex" suggestion banner.
+  usageLimitByWorktree: Record<number, boolean>;
 }
 
 const PERSIST_KEY = "flock.panes.v1";
@@ -62,6 +71,9 @@ const [store, setStore] = createStore<AppStoreState>({
   statusByWorktree: {},
   hibernationNoteByWorktree: {},
   prStatusByWorktree: {},
+  codexRepoIds: [],
+  codexProfile: null,
+  usageLimitByWorktree: {},
 });
 
 // Persist on any change to pane state.
@@ -263,6 +275,77 @@ export function setWorktreePrStatus(
     });
   } else {
     setStore("prStatusByWorktree", worktreeId, status);
+  }
+}
+
+/// Whether this worktree may run Codex: a worktree in a Thanx repo, or an
+/// orchestrator whose chosen Profile is Thanx (it has no repo of its own). The
+/// backend enforces the same rule in `worktree_set_agent`.
+export function canUseCodex(w: Worktree): boolean {
+  if (w.kind === "orchestrator") {
+    return store.codexProfile !== null && w.env_profile === store.codexProfile;
+  }
+  return store.codexRepoIds.includes(w.repo_id);
+}
+
+export function setUsageLimit(worktreeId: number, limited: boolean) {
+  setStore("usageLimitByWorktree", worktreeId, limited);
+}
+
+/// Swap a worktree row in place (e.g. after its agent changed). Orchestrators
+/// live in their own list, not under a repo.
+function replaceWorktree(w: Worktree) {
+  if (w.kind === "orchestrator") {
+    setStore("orchestrators", (prev) =>
+      prev.map((x) => (x.id === w.id ? w : x)),
+    );
+    return;
+  }
+  setStore("worktreesByRepo", w.repo_id, (prev) =>
+    (prev ?? []).map((x) => (x.id === w.id ? w : x)),
+  );
+}
+
+/// Stop the worktree's agent and continue on the same branch with `agent`
+/// (the backend sends it a handoff prompt). The old PTY client died with the
+/// old session, so the pane is unmounted and reopened — it reattaches to the
+/// new agent's tmux session.
+export async function switchAgent(w: Worktree, agent: Agent) {
+  const updated = await worktreeSetAgent(w.id, agent);
+  replaceWorktree(updated);
+  setUsageLimit(w.id, false);
+  setStore("activatedPaneIds", (ids) => ids.filter((id) => id !== w.id));
+  setTimeout(() => openPane(w.id), 0);
+}
+
+/// `switchAgent` behind a confirm dialog — the switch kills the running
+/// session, so it's never a one-click accident. Shared by the sidebar action
+/// and the usage-limit banner.
+export async function confirmSwitchAgent(w: Worktree, agent: Agent) {
+  const label = worktreeLabel(w);
+  const orch = w.kind === "orchestrator";
+  const msg =
+    agent === "codex"
+      ? `Continue "${label}" with Codex?\n\n` +
+        (orch
+          ? `This stops the Claude orchestrator and starts Codex in its place, ` +
+            `with the same orchestrator instructions and Flock tools. Its fleet ` +
+            `keeps running; new agents it spawns will be Codex by default. `
+          : `This stops the Claude session and starts Codex on the same branch. ` +
+            `Codex gets the original task, the last request and the current git ` +
+            `state as its first prompt. `) +
+        `The conversation itself doesn't carry over.`
+      : `Switch "${label}" back to Claude?\n\n` +
+        (orch
+          ? `This stops Codex and resumes the Claude orchestrator. Its fleet keeps running.`
+          : `This stops Codex and resumes the Claude session on the same branch, ` +
+            `with the current git state as its next prompt.`);
+  if (!confirm(msg)) return;
+  try {
+    await switchAgent(w, agent);
+  } catch (e) {
+    console.error("switchAgent failed", e);
+    alert(`Couldn't switch agent:\n${String(e)}`);
   }
 }
 

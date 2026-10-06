@@ -4,6 +4,7 @@ mod db;
 mod env_profiles;
 mod error;
 mod git;
+mod handoff;
 mod kb;
 mod mcp;
 mod monitor;
@@ -52,6 +53,8 @@ pub fn run() {
             commands::worktree_current_branch,
             commands::worktree_refresh_pr_status,
             commands::worktree_set_permission_mode,
+            commands::worktree_set_agent,
+            commands::codex_options,
             commands::worktree_set_title,
             commands::worktree_resize_window,
             commands::env_config_get,

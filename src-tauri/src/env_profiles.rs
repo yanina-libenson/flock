@@ -133,6 +133,33 @@ pub fn resolve_vars_for_worktree(
     }
 }
 
+/// The name of the environment a repo at `repo_path` binds to — the same
+/// longest-prefix match as `resolve_vars`, but returning the binding's env name
+/// instead of its vars. None when nothing matches.
+pub fn profile_name(cfg: &EnvConfig, repo_path: &str) -> Option<String> {
+    cfg.bindings
+        .iter()
+        .filter(|b| path_is_prefix(&b.path, repo_path))
+        .max_by_key(|b| b.path.trim_end_matches('/').len())
+        .map(|b| b.env.clone())
+}
+
+/// The only env profile Codex is offered for. Codex runs on the user's work
+/// ChatGPT login, so it's a fallback for work (Thanx) worktrees only — never
+/// Personal or Flock ones.
+pub const CODEX_PROFILE: &str = "Thanx";
+
+/// Whether a worktree or orchestrator may run Codex: its resolved profile — a
+/// persisted `env_profile` (an orchestrator's chosen Profile), else the repo
+/// path's binding — is `CODEX_PROFILE`.
+pub fn codex_allowed(cfg: &EnvConfig, env_profile: Option<&str>, repo_path: &str) -> bool {
+    let name = match env_profile {
+        Some(n) => Some(n.to_string()),
+        None => profile_name(cfg, repo_path),
+    };
+    name.as_deref() == Some(CODEX_PROFILE)
+}
+
 /// The resolved `CLAUDE_CONFIG_DIR` for a worktree — honoring a persisted
 /// `env_profile` override, else path-based resolution, same precedence as
 /// `resolve_vars_for_worktree`. `None` means the default `~/.claude` account
@@ -313,6 +340,21 @@ mod tests {
             ),
             Some("/Users/y/.claude-personal".to_string())
         );
+    }
+
+    #[test]
+    fn codex_is_only_allowed_for_the_thanx_profile() {
+        let c = accounts_cfg();
+        assert!(codex_allowed(&c, None, "/Users/y/Code/Thanx/nexus"));
+        assert!(!codex_allowed(&c, None, "/Users/y/Code/Personal/ixi"));
+        assert!(!codex_allowed(&c, None, "/Users/y/Code/Other/repo"));
+        // Orchestrators live in a scratch dir no binding matches: their chosen
+        // profile decides.
+        assert!(codex_allowed(&c, Some("Thanx"), "/x/orchestrators/kyoto"));
+        assert!(!codex_allowed(&c, Some("Personal"), "/x/orchestrators/kyoto"));
+        assert!(!codex_allowed(&c, None, "/x/orchestrators/kyoto"));
+        // A persisted profile wins over the path binding.
+        assert!(!codex_allowed(&c, Some("Personal"), "/Users/y/Code/Thanx/nexus"));
     }
 
     #[test]

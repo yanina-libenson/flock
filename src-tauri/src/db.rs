@@ -53,6 +53,11 @@ pub struct Worktree {
     /// `high`, `xhigh`, `max`). NULL means no override. Persisted for the same
     /// reason as `model`.
     pub effort: Option<String>,
+    /// Which coding agent runs in this worktree's session: `"claude"` (default)
+    /// or `"codex"` (OpenAI Codex CLI — the fallback when the Claude account is
+    /// out of credit). Spawn, resume, transcript reading and handoff all branch
+    /// on it. See `AGENT_CLAUDE` / `AGENT_CODEX`.
+    pub agent: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +115,10 @@ pub struct KbListItem {
 
 pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
+/// `worktrees.agent` values.
+pub const AGENT_CLAUDE: &str = "claude";
+pub const AGENT_CODEX: &str = "codex";
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -155,7 +164,8 @@ impl Db {
               parent_id       INTEGER REFERENCES worktrees(id) ON DELETE SET NULL,
               env_profile     TEXT,
               model           TEXT,
-              effort          TEXT
+              effort          TEXT,
+              agent           TEXT NOT NULL DEFAULT 'claude'
             );
 
             CREATE INDEX IF NOT EXISTS idx_worktrees_repo ON worktrees(repo_id);
@@ -211,6 +221,10 @@ impl Db {
         let _ = conn.execute("ALTER TABLE worktrees ADD COLUMN env_profile TEXT", []);
         let _ = conn.execute("ALTER TABLE worktrees ADD COLUMN model TEXT", []);
         let _ = conn.execute("ALTER TABLE worktrees ADD COLUMN effort TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE worktrees ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE schedules ADD COLUMN model TEXT", []);
         let _ = conn.execute("ALTER TABLE schedules ADD COLUMN effort TEXT", []);
         let _ = conn.execute(
@@ -308,13 +322,14 @@ impl Db {
         env_profile: Option<&str>,
         model: Option<&str>,
         effort: Option<&str>,
+        agent: &str,
     ) -> AppResult<Worktree> {
         let c = self.c()?;
         c.execute(
-            "INSERT INTO worktrees (repo_id, branch, path, title, created_at, permission_mode, kind, parent_id, env_profile, model, effort)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO worktrees (repo_id, branch, path, title, created_at, permission_mode, kind, parent_id, env_profile, model, effort, agent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(path) DO UPDATE SET branch=excluded.branch, title=excluded.title",
-            params![repo_id, branch, path, title, now(), permission_mode, kind, parent_id, env_profile, model, effort],
+            params![repo_id, branch, path, title, now(), permission_mode, kind, parent_id, env_profile, model, effort, agent],
         )?;
         let id = c.query_row(
             "SELECT id FROM worktrees WHERE path = ?1",
@@ -340,13 +355,14 @@ impl Db {
             env_profile: row.get(10)?,
             model: row.get(11)?,
             effort: row.get(12)?,
+            agent: row.get(13)?,
         })
     }
 
     pub fn get_worktree(&self, id: i64) -> AppResult<Worktree> {
         let c = self.c()?;
         let w = c.query_row(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort, agent
              FROM worktrees WHERE id = ?1",
             params![id],
             Self::row_to_worktree,
@@ -357,7 +373,7 @@ impl Db {
     pub fn list_worktrees(&self, repo_id: i64) -> AppResult<Vec<Worktree>> {
         let c = self.c()?;
         let mut stmt = c.prepare(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort, agent
              FROM worktrees WHERE repo_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![repo_id], Self::row_to_worktree)?;
@@ -374,7 +390,7 @@ impl Db {
     pub fn list_all_worktrees(&self) -> AppResult<Vec<Worktree>> {
         let c = self.c()?;
         let mut stmt = c.prepare(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort, agent
              FROM worktrees ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], Self::row_to_worktree)?;
@@ -390,7 +406,7 @@ impl Db {
     pub fn list_children(&self, parent_id: i64) -> AppResult<Vec<Worktree>> {
         let c = self.c()?;
         let mut stmt = c.prepare(
-            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort
+            "SELECT id, repo_id, branch, path, title, created_at, last_used, permission_mode, kind, parent_id, env_profile, model, effort, agent
              FROM worktrees WHERE parent_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![parent_id], Self::row_to_worktree)?;
@@ -405,6 +421,14 @@ impl Db {
         self.c()?.execute(
             "UPDATE worktrees SET permission_mode = ?1 WHERE id = ?2",
             params![mode, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_worktree_agent(&self, id: i64, agent: &str) -> AppResult<()> {
+        self.c()?.execute(
+            "UPDATE worktrees SET agent = ?1 WHERE id = ?2",
+            params![agent, id],
         )?;
         Ok(())
     }
@@ -690,6 +714,7 @@ mod tests {
                 Some("Personal"),
                 None,
                 None,
+                "claude",
             )
             .unwrap();
         assert_eq!(orch.env_profile.as_deref(), Some("Personal"));
@@ -699,11 +724,46 @@ mod tests {
     }
 
     #[test]
+    fn agent_defaults_to_claude_and_persists_a_switch() {
+        let db = temp_db();
+        let repo = db.insert_repo("acme", "/tmp/acme-agent").unwrap();
+        let w = db
+            .insert_worktree(repo.id, "flock/x", "/tmp/agent-wt", None, "bypassPermissions", "worktree", None, None, None, None, "claude")
+            .unwrap();
+        assert_eq!(w.agent, super::AGENT_CLAUDE);
+        db.update_worktree_agent(w.id, super::AGENT_CODEX).unwrap();
+        assert_eq!(db.get_worktree(w.id).unwrap().agent, super::AGENT_CODEX);
+    }
+
+    #[test]
+    fn agent_column_is_added_to_a_db_that_predates_it() {
+        // A DB created before the agent column existed must migrate in place,
+        // with existing rows reading back as "claude".
+        let mut p = std::env::temp_dir();
+        p.push(format!("flock-test-legacy-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        {
+            let c = Connection::open(&p).unwrap();
+            c.execute_batch(
+                "CREATE TABLE repos (id INTEGER PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
+                 CREATE TABLE worktrees (id INTEGER PRIMARY KEY, repo_id INTEGER NOT NULL, branch TEXT NOT NULL, path TEXT NOT NULL UNIQUE, title TEXT, created_at INTEGER NOT NULL, last_used INTEGER);
+                 INSERT INTO repos VALUES (1, 'acme', '/tmp/legacy', 0);
+                 INSERT INTO worktrees (id, repo_id, branch, path, created_at) VALUES (1, 1, 'main', '/tmp/legacy-wt', 0);",
+            )
+            .unwrap();
+        }
+        let db = Db::open_at(&p).unwrap();
+        assert_eq!(db.get_worktree(1).unwrap().agent, super::AGENT_CLAUDE);
+        drop(db);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
     fn worktree_kind_and_parent_roundtrip() {
         let db = temp_db();
         let repo = db.insert_repo("acme", "/tmp/acme").unwrap();
         let orch = db
-            .insert_worktree(repo.id, "kyoto", "/tmp/orch", None, "bypassPermissions", "orchestrator", None, None, None, None)
+            .insert_worktree(repo.id, "kyoto", "/tmp/orch", None, "bypassPermissions", "orchestrator", None, None, None, None, "claude")
             .unwrap();
         assert_eq!(orch.kind, "orchestrator");
         assert_eq!(orch.parent_id, None);
@@ -720,6 +780,7 @@ mod tests {
                 None,
                 None,
                 None,
+                "claude",
             )
             .unwrap();
         assert_eq!(child.kind, "worktree");
@@ -739,10 +800,10 @@ mod tests {
         let db = temp_db();
         let repo = db.insert_repo("acme", "/tmp/acme2").unwrap();
         let orch = db
-            .insert_worktree(repo.id, "lima", "/tmp/orch2", None, "bypassPermissions", "orchestrator", None, None, None, None)
+            .insert_worktree(repo.id, "lima", "/tmp/orch2", None, "bypassPermissions", "orchestrator", None, None, None, None, "claude")
             .unwrap();
         let child = db
-            .insert_worktree(repo.id, "flock/oslo", "/tmp/child2", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None)
+            .insert_worktree(repo.id, "flock/oslo", "/tmp/child2", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None, "claude")
             .unwrap();
 
         // ON DELETE SET NULL: the child survives, just loses the link.
@@ -757,16 +818,16 @@ mod tests {
         let db = temp_db();
         let repo = db.insert_repo("acme", "/tmp/acme3").unwrap();
         let orch = db
-            .insert_worktree(repo.id, "cairo", "/tmp/orch3", None, "bypassPermissions", "orchestrator", None, None, None, None)
+            .insert_worktree(repo.id, "cairo", "/tmp/orch3", None, "bypassPermissions", "orchestrator", None, None, None, None, "claude")
             .unwrap();
         let c1 = db
-            .insert_worktree(repo.id, "flock/a", "/tmp/c1", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None)
+            .insert_worktree(repo.id, "flock/a", "/tmp/c1", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None, "claude")
             .unwrap();
         let c2 = db
-            .insert_worktree(repo.id, "flock/b", "/tmp/c2", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None)
+            .insert_worktree(repo.id, "flock/b", "/tmp/c2", None, "bypassPermissions", "worktree", Some(orch.id), None, None, None, "claude")
             .unwrap();
         // An unrelated standalone worktree must not show up in the fleet.
-        db.insert_worktree(repo.id, "flock/loose", "/tmp/loose", None, "bypassPermissions", "worktree", None, None, None, None)
+        db.insert_worktree(repo.id, "flock/loose", "/tmp/loose", None, "bypassPermissions", "worktree", None, None, None, None, "claude")
             .unwrap();
 
         let fleet = db.list_children(orch.id).unwrap();
@@ -776,7 +837,7 @@ mod tests {
 
         // A childless orchestrator has an empty fleet.
         let lonely = db
-            .insert_worktree(repo.id, "tokyo", "/tmp/orch_lonely", None, "bypassPermissions", "orchestrator", None, None, None, None)
+            .insert_worktree(repo.id, "tokyo", "/tmp/orch_lonely", None, "bypassPermissions", "orchestrator", None, None, None, None, "claude")
             .unwrap();
         assert!(db.list_children(lonely.id).unwrap().is_empty());
     }

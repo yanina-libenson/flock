@@ -96,6 +96,163 @@ pub fn parse_messages(jsonl: &str) -> Vec<Msg> {
     out
 }
 
+// ---------- Codex ----------
+//
+// Codex CLI writes one rollout JSONL per session under
+// `<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` (CODEX_HOME
+// defaults to `~/.codex`). Unlike Claude, the path doesn't encode the cwd —
+// the first line is a `session_meta` record carrying the session `id` and its
+// `cwd`. So a worktree is tied to its Codex session by matching that `cwd`
+// against the worktree path, newest rollout first: the same "newest session
+// for this cwd is the live one" rule the Claude side uses.
+
+/// `CODEX_HOME` from a session's resolved env vars, if a profile sets one.
+pub fn codex_home_from_env(env_vars: &[(String, String)]) -> Option<&str> {
+    env_vars
+        .iter()
+        .find(|(k, _)| k == "CODEX_HOME")
+        .map(|(_, v)| v.as_str())
+}
+
+fn codex_sessions_dir(codex_home: Option<&str>) -> Option<PathBuf> {
+    match codex_home {
+        Some(d) => Some(PathBuf::from(d).join("sessions")),
+        None => Some(dirs::home_dir()?.join(".codex/sessions")),
+    }
+}
+
+/// The interactive session a rollout's first (`session_meta`) line describes,
+/// as `(id, cwd)`. None for anything else — including non-interactive
+/// `codex exec` runs and sub-agent threads, which can share the worktree's cwd
+/// (e.g. a Claude session shelling out to `codex exec` for a review) but are
+/// never the session to resume.
+fn codex_session_meta(first_line: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(first_line).ok()?;
+    if v.get("type").and_then(|x| x.as_str()) != Some("session_meta") {
+        return None;
+    }
+    let p = v.get("payload")?;
+    if p.get("source").and_then(|x| x.as_str()) == Some("exec") {
+        return None;
+    }
+    if let Some(ts) = p.get("thread_source").and_then(|x| x.as_str()) {
+        if ts != "user" {
+            return None;
+        }
+    }
+    let id = p.get("id").and_then(|x| x.as_str())?.to_string();
+    let cwd = p.get("cwd").and_then(|x| x.as_str())?.to_string();
+    Some((id, cwd))
+}
+
+fn same_dir(a: &str, b: &str) -> bool {
+    let a = a.trim_end_matches('/');
+    let b = b.trim_end_matches('/');
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// The newest interactive Codex session for a worktree, as `(rollout file,
+/// session id)`, or None if Codex has never run there. `codex_home` is the
+/// session's `CODEX_HOME` (see `codex_home_from_env`); None → `~/.codex`.
+pub fn codex_session_for(
+    worktree_path: &str,
+    codex_home: Option<&str>,
+) -> Option<(PathBuf, String)> {
+    use std::io::BufRead;
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut stack = vec![codex_sessions_dir(codex_home)?];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                if let Some(mt) = entry.metadata().ok().and_then(|m| m.modified().ok()) {
+                    files.push((mt, path));
+                }
+            }
+        }
+    }
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
+    for (_, path) in files {
+        let Ok(f) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut first = String::new();
+        if std::io::BufReader::new(f).read_line(&mut first).is_err() {
+            continue;
+        }
+        if let Some((id, cwd)) = codex_session_meta(&first) {
+            if same_dir(&cwd, worktree_path) {
+                return Some((path, id));
+            }
+        }
+    }
+    None
+}
+
+/// Flatten a Codex rollout into the same clean user/assistant text the Claude
+/// Reader shows. Reads the `event_msg` stream rather than the raw
+/// `response_item`s, because the latter also carry injected context (AGENTS.md,
+/// environment blocks) as "user" messages. Handles both rollout generations:
+/// `user_message` / `agent_message` events (older CLIs) and `item_completed`
+/// events wrapping `UserMessage` / `AgentMessage` items (current CLIs).
+pub fn parse_codex_messages(jsonl: &str) -> Vec<Msg> {
+    let mut out = Vec::new();
+    for line in jsonl.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|x| x.as_str()) != Some("event_msg") {
+            continue;
+        }
+        let Some(p) = v.get("payload") else {
+            continue;
+        };
+        let (role, text) = match p.get("type").and_then(|x| x.as_str()) {
+            Some("user_message") => ("user", p.get("message").and_then(|x| x.as_str()).unwrap_or("").to_string()),
+            Some("agent_message") => ("assistant", p.get("message").and_then(|x| x.as_str()).unwrap_or("").to_string()),
+            Some("item_completed") => {
+                let item = p.get("item");
+                let role = match item.and_then(|i| i.get("type")).and_then(|x| x.as_str()) {
+                    Some("UserMessage") => "user",
+                    Some("AgentMessage") => "assistant",
+                    _ => continue,
+                };
+                let text = item
+                    .and_then(|i| i.get("content"))
+                    .and_then(|c| c.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|b| b.get("text").and_then(|x| x.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                (role, text)
+            }
+            _ => continue,
+        };
+        if !text.trim().is_empty() {
+            out.push(Msg { role: role.to_string(), text });
+        }
+    }
+    out
+}
+
 fn extract_text(content: Option<&serde_json::Value>) -> String {
     match content {
         Some(serde_json::Value::String(s)) => s.clone(),
@@ -157,6 +314,89 @@ mod tests {
         ];
         assert_eq!(config_dir_from_env(&env), Some("/Users/y/.claude-personal"));
         assert_eq!(config_dir_from_env(&[]), None);
+    }
+
+    #[test]
+    fn parses_current_codex_rollout_events() {
+        // Trimmed from a real codex-cli 0.160 rollout. The injected AGENTS.md
+        // "user" response_item and the tool calls must not show up.
+        let jsonl = r##"
+{"timestamp":"t","type":"session_meta","payload":{"id":"01a1","cwd":"/w","source":"cli","thread_source":"user"}}
+{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\n..."}]}}
+{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"List the files"}]}}
+{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"List the files","text_elements":[]}]}}}
+{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"I'll list them."}],"phase":"commentary"}}}
+{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["/bin/zsh","-lc","ls"]}}}
+{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"a.txt"}]}}
+{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"a.txt"}],"phase":"final_answer"}}}
+{"timestamp":"t","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"a.txt"}}
+"##;
+        let msgs = parse_codex_messages(jsonl);
+        assert_eq!(
+            msgs,
+            vec![
+                Msg { role: "user".into(), text: "List the files".into() },
+                Msg { role: "assistant".into(), text: "I'll list them.".into() },
+                Msg { role: "assistant".into(), text: "a.txt".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_legacy_codex_rollout_events() {
+        let jsonl = r#"
+{"type":"event_msg","payload":{"type":"user_message","message":"implement it","images":[]}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Done."}}
+{"type":"event_msg","payload":{"type":"token_count","info":null}}
+not json
+"#;
+        let msgs = parse_codex_messages(jsonl);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0], Msg { role: "user".into(), text: "implement it".into() });
+        assert_eq!(msgs[1], Msg { role: "assistant".into(), text: "Done.".into() });
+    }
+
+    #[test]
+    fn codex_session_meta_skips_exec_and_subagent_sessions() {
+        let tui = r#"{"type":"session_meta","payload":{"id":"abc","cwd":"/w","source":"cli","thread_source":"user"}}"#;
+        assert_eq!(codex_session_meta(tui), Some(("abc".into(), "/w".into())));
+        // Older rollouts carry no thread_source at all.
+        let old = r#"{"type":"session_meta","payload":{"id":"old","cwd":"/w","source":"vscode"}}"#;
+        assert_eq!(codex_session_meta(old), Some(("old".into(), "/w".into())));
+        let exec = r#"{"type":"session_meta","payload":{"id":"x","cwd":"/w","source":"exec","thread_source":"user"}}"#;
+        assert_eq!(codex_session_meta(exec), None);
+        let sub = r#"{"type":"session_meta","payload":{"id":"y","cwd":"/w","source":"cli","thread_source":"subagent"}}"#;
+        assert_eq!(codex_session_meta(sub), None);
+        assert_eq!(codex_session_meta(r#"{"type":"event_msg","payload":{}}"#), None);
+    }
+
+    #[test]
+    fn codex_session_for_picks_newest_interactive_rollout_for_cwd() {
+        let home = std::env::temp_dir().join(format!("flock-codex-home-{}", std::process::id()));
+        let day = home.join("sessions/2026/10/05");
+        std::fs::create_dir_all(&day).unwrap();
+        let meta = |id: &str, cwd: &str, source: &str| {
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{cwd}\",\"source\":\"{source}\",\"thread_source\":\"user\"}}}}\n"
+            )
+        };
+        let write = |name: &str, body: String| {
+            std::fs::write(day.join(name), body).unwrap();
+            // Distinct mtimes so "newest" is well defined.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        write("rollout-a.jsonl", meta("old-session", "/work/wt", "cli"));
+        write("rollout-b.jsonl", meta("other-cwd", "/work/other", "cli"));
+        write("rollout-c.jsonl", meta("new-session", "/work/wt/", "cli"));
+        // Newest of all, same cwd, but a `codex exec` run → skipped.
+        write("rollout-d.jsonl", meta("exec-run", "/work/wt", "exec"));
+
+        let home_s = home.to_string_lossy().into_owned();
+        let (file, id) = codex_session_for("/work/wt", Some(&home_s)).unwrap();
+        assert_eq!(id, "new-session");
+        assert!(file.ends_with("rollout-c.jsonl"));
+        assert_eq!(codex_session_for("/work/none", Some(&home_s)), None);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

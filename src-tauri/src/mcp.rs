@@ -94,6 +94,18 @@ pub fn ensure_installed(app: &AppHandle) -> Option<PathBuf> {
     Some(entry)
 }
 
+/// The installed server's entry point (as a string, ready for a command line)
+/// if `ensure_installed` has already set it up — without copying or running
+/// npm, so it's cheap enough for every session spawn. Codex sessions use it to
+/// wire the Flock MCP per invocation (see `pty::codex_invocation`); `prewarm`
+/// installs it at app startup.
+pub fn installed_entry() -> Option<String> {
+    let dir = data_mcp_dir().ok()?;
+    let entry = dir.join("flock-mcp.mjs");
+    let ready = entry.exists() && dir.join("node_modules").join("@modelcontextprotocol").exists();
+    ready.then(|| entry.to_string_lossy().into_owned())
+}
+
 /// Minimal single-quote shell escaping for the one path we interpolate.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))

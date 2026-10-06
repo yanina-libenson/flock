@@ -13,7 +13,14 @@ import {
   worktreeResizeWindow,
   type Worktree,
 } from "../lib/ipc";
-import { appStore, clearHibernationNote, closePane } from "../lib/store";
+import {
+  appStore,
+  canUseCodex,
+  clearHibernationNote,
+  closePane,
+  confirmSwitchAgent,
+  setUsageLimit,
+} from "../lib/store";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { IDisposable } from "@xterm/xterm";
 
@@ -51,6 +58,11 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
   // Live monitor status for this session — drives the iTerm-style "working" bar.
   const working = () =>
     appStore.statusByWorktree[props.worktree.id] === "working";
+  // Claude hit its usage limit on a worktree that can fall back to Codex.
+  const suggestCodex = () =>
+    !!appStore.usageLimitByWorktree[props.worktree.id] &&
+    props.worktree.agent === "claude" &&
+    canUseCodex(props.worktree);
 
   let term: Terminal | null = null;
   let fit: FitAddon | null = null;
@@ -281,20 +293,44 @@ export function TerminalPane(props: { worktree: Worktree; active: boolean }) {
       <Show when={working()}>
         <div class="flock-working-bar" />
       </Show>
-      <Show when={appStore.hibernationNoteByWorktree[props.worktree.id]}>
-        {(note) => (
-          <div class="absolute top-0 inset-x-0 z-10 flex items-start gap-2 px-3 py-2 text-[11px] bg-[var(--color-warn)]/15 text-[var(--color-warn)] border-b border-[var(--color-warn)]/30 pointer-events-auto">
-            <span class="flex-1 leading-snug">{note()}</span>
+      {/* Top banners stack instead of overlapping. */}
+      <div class="absolute top-0 inset-x-0 z-10 flex flex-col pointer-events-none">
+        <Show when={appStore.hibernationNoteByWorktree[props.worktree.id]}>
+          {(note) => (
+            <div class="flex items-start gap-2 px-3 py-2 text-[11px] bg-[var(--color-warn)]/15 text-[var(--color-warn)] border-b border-[var(--color-warn)]/30 pointer-events-auto">
+              <span class="flex-1 leading-snug">{note()}</span>
+              <button
+                class="shrink-0 px-1.5 rounded hover:bg-[var(--color-warn)]/25 transition"
+                title="Dismiss"
+                onClick={() => clearHibernationNote(props.worktree.id)}
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </Show>
+        <Show when={suggestCodex()}>
+          <div class="flex items-center gap-2 px-3 py-2 text-[11px] bg-[var(--color-accent)]/15 text-[var(--color-accent)] border-b border-[var(--color-accent)]/30 pointer-events-auto">
+            <span class="flex-1 leading-snug">
+              Claude hit its usage limit. You can keep going on this branch with
+              Codex.
+            </span>
             <button
-              class="shrink-0 px-1.5 rounded hover:bg-[var(--color-warn)]/25 transition"
+              class="shrink-0 px-2 py-0.5 rounded font-medium bg-[var(--color-accent)]/20 hover:bg-[var(--color-accent)]/30 transition"
+              onClick={() => void confirmSwitchAgent(props.worktree, "codex")}
+            >
+              Continue with Codex
+            </button>
+            <button
+              class="shrink-0 px-1.5 rounded hover:bg-[var(--color-accent)]/25 transition"
               title="Dismiss"
-              onClick={() => clearHibernationNote(props.worktree.id)}
+              onClick={() => setUsageLimit(props.worktree.id, false)}
             >
               ✕
             </button>
           </div>
-        )}
-      </Show>
+        </Show>
+      </div>
       <div
         ref={(el) => (containerRef = el)}
         class="absolute inset-0"

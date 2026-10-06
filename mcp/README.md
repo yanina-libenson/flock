@@ -26,7 +26,7 @@ with `FLOCK_TOKEN` / `FLOCK_API_URL` env vars if needed.
 
 | Tool              | What it does                                                        |
 | ----------------- | ------------------------------------------------------------------- |
-| `task_create`     | Create a worktree + start Claude on it with an initial prompt       |
+| `task_create`     | Create a worktree + start Claude (or Codex, `agent`) with a prompt  |
 | `task_list`       | List worktrees with live status (working / idle / needs_input)      |
 | `task_status`     | Counts of agents by status                                          |
 | `task_read`       | Read an agent's conversation transcript (follow what a child is doing) |

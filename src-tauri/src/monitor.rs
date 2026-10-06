@@ -13,6 +13,10 @@
 //!     screen, OR the screen is stable and the last transcript line is a
 //!     question (`?`).
 //!   - **idle** — stable, but no prompt and no trailing question.
+//!
+//! The same signals work for Codex worktrees: Codex draws its selection prompts
+//! (approvals, trust) as `› 1.` and its composer as a `› ` line, so the
+//! detectors accept either agent's glyphs rather than branching per worktree.
 
 use crate::pty;
 use crate::state::AppState;
@@ -68,6 +72,15 @@ pub struct WorktreeTitleEvent {
     pub title: String,
 }
 
+/// Claude's usage-limit / out-of-credit message appeared on (or left) a
+/// session's screen. The frontend offers a non-intrusive "Continue with Codex"
+/// suggestion while `limited` is true — it never switches on its own.
+#[derive(Serialize, Clone)]
+pub struct WorktreeUsageLimitEvent {
+    pub worktree_id: i64,
+    pub limited: bool,
+}
+
 #[derive(Serialize, Clone)]
 pub struct WorktreeHibernatedEvent {
     pub worktree_id: i64,
@@ -100,6 +113,9 @@ pub fn spawn(app: AppHandle) {
         let mut last_push: HashMap<i64, Instant> = HashMap::new();
         // Last time the aggregate-memory budget was checked (own slow cadence).
         let mut last_rss_check = Instant::now();
+        // Worktrees whose screen currently shows a usage-limit message — so
+        // `worktree:usage_limit` only fires on a change.
+        let mut limited: HashSet<i64> = HashSet::new();
 
         loop {
             std::thread::sleep(POLL_INTERVAL);
@@ -112,6 +128,7 @@ pub fn spawn(app: AppHandle) {
             last_status.retain(|k, _| live.contains(k));
             titled.retain(|k| live.contains(k));
             last_push.retain(|k, _| live.contains(k));
+            limited.retain(|k| live.contains(k));
 
             // The focused pane is never hibernated. Snapshot it once per tick.
             let active: Option<i64> = match app.try_state::<AppState>() {
@@ -154,6 +171,24 @@ pub fn spawn(app: AppHandle) {
                             crate::api::notify_needs_input("Claude needs you".into(), worktree_label(&app, id));
                         }
                     }
+                }
+
+                // Rides on the capture we already have — a string scan, no
+                // extra tmux or file IO.
+                let hit = usage_limit_hit(&captured);
+                if hit != limited.contains(&id) {
+                    if hit {
+                        limited.insert(id);
+                    } else {
+                        limited.remove(&id);
+                    }
+                    let _ = app.emit(
+                        "worktree:usage_limit",
+                        WorktreeUsageLimitEvent {
+                            worktree_id: id,
+                            limited: hit,
+                        },
+                    );
                 }
 
                 maybe_generate_title(&app, &mut titled, id, &captured);
@@ -285,23 +320,32 @@ pub fn detect_status(captured: &str, prev: Option<&str>) -> WorktreeStatus {
 
 /// Claude's numbered-selection UI: `❯` followed by optional spaces/tabs then
 /// `1.`. The same widget renders permission prompts, AskUserQuestion overlays,
-/// and plan-mode confirms, so matching the shape catches them all.
+/// and plan-mode confirms, so matching the shape catches them all. Codex draws
+/// its approval and trust prompts the same way with `›` (`› 1. Yes, proceed`).
 fn has_selection_prompt(screen: &str) -> bool {
-    let mut rest = screen;
-    while let Some(pos) = rest.find('❯') {
-        let after = &rest[pos + '❯'.len_utf8()..];
-        if after.trim_start_matches([' ', '\t']).starts_with("1.") {
-            return true;
+    ['❯', '›'].into_iter().any(|glyph| {
+        let mut rest = screen;
+        while let Some(pos) = rest.find(glyph) {
+            let after = &rest[pos + glyph.len_utf8()..];
+            if after.trim_start_matches([' ', '\t']).starts_with("1.") {
+                return true;
+            }
+            rest = after;
         }
-        rest = after;
-    }
-    false
+        false
+    })
 }
 
 /// U+00A0 non-breaking space — the discriminator Claude's idle input line
 /// renders after `❯`. Transcript text that merely contains `❯` (the selection
 /// UI, shell prompts) uses a regular space.
 const PROMPT_NBSP: &str = "❯\u{00a0}";
+
+/// Codex's composer line starts with `›` + a regular space at column 0
+/// (`› Ask Codex to do anything`). Earlier user turns echo with the same
+/// prefix, but the composer is always the last one on screen, so taking the
+/// last match anchors on it.
+const CODEX_PROMPT: &str = "› ";
 
 /// True when the last transcript line above Claude's input prompt ends in `?`.
 ///
@@ -314,7 +358,7 @@ fn ends_in_question(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().collect();
     let mut anchor: Option<usize> = None;
     for (i, l) in lines.iter().enumerate() {
-        if l.contains(PROMPT_NBSP) || l.contains('╭') {
+        if l.contains(PROMPT_NBSP) || l.contains('╭') || l.starts_with(CODEX_PROMPT) {
             anchor = Some(i);
         }
     }
@@ -334,17 +378,39 @@ fn ends_in_question(screen: &str) -> bool {
 }
 
 /// UI chrome above the prompt that isn't transcript content: Claude's
-/// spinner-glyph timing line ("✻ Brewed for 12s") or a box-drawing rule.
-/// Transcript lines start with `⏺`/`⎿` or plain text, so neither check can
-/// swallow a real question.
+/// spinner-glyph timing line ("✻ Brewed for 12s"), Codex's turn footer
+/// ("Worked for 1m 6s • 3:55 PM", sometimes drawn inside a `─` rule), or a
+/// box-drawing rule. Transcript lines start with `⏺`/`⎿`/`•` or plain text, so
+/// none of these checks can swallow a real question.
 fn decoration_line(line: &str) -> bool {
     let line = line.trim_start();
+    if line.trim_start_matches(['─', ' ']).starts_with("Worked for ") {
+        return true;
+    }
     let mut chars = line.chars();
     match chars.next() {
         Some('·' | '✢' | '✳' | '✶' | '✻' | '✽') => true,
         Some(_) => line.chars().all(|c| c == '─' || c == '━' || c == '═'),
         None => false,
     }
+}
+
+/// True when the screen shows Claude's usage-limit / out-of-credit notice, e.g.
+/// `You've hit your session limit · resets 9pm`, `You've hit your weekly limit
+/// · …`, `You've reached your Fable limit…` (strings taken from real
+/// transcripts), or the API-key `Credit balance is too low`. Anchored at the
+/// start of a line (after Claude's `⎿`/`⏺` gutters) so a mention of the phrase
+/// mid-sentence — say, in code the agent is editing — doesn't count.
+fn usage_limit_hit(screen: &str) -> bool {
+    screen.lines().any(|l| {
+        let t = l
+            .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '⎿' | '⏺' | '│'))
+            .replace('’', "'");
+        ((t.starts_with("You've hit your ") || t.starts_with("You've reached your "))
+            && t.contains("limit"))
+            || t.starts_with("Claude AI usage limit reached")
+            || t.starts_with("Credit balance is too low")
+    })
 }
 
 /// Human label for a worktree's push body: its title if set, else the branch.
@@ -597,6 +663,55 @@ mod tests {
         assert_eq!(reap_targets(&r, &st, None, 5000), vec![2]);
     }
 
+    // Codex screens below are trimmed from real codex-cli 0.160 captures.
+
+    #[test]
+    fn codex_approval_prompt_is_needs_input() {
+        let screen = "• Running printf 'hello' > b.txt\n  Would you like to run the following command?\n  $ printf 'hello' > b.txt\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again (p)\n  3. No, and tell Codex what to do differently (esc)\n";
+        assert_eq!(detect_status(screen, None), WorktreeStatus::NeedsInput);
+    }
+
+    #[test]
+    fn codex_idle_screen_is_idle() {
+        let screen = "› List the files here with ls, then say DONE.\n\n• a.txt\n  DONE\n\n  Worked for 1m 6s • 3:55 PM\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol default fast · /w\n  ? for shortcuts\n";
+        assert_eq!(detect_status(screen, Some(screen)), WorktreeStatus::Idle);
+    }
+
+    #[test]
+    fn codex_trailing_question_walks_past_turn_footer() {
+        let screen = "› fix it\n\n• Should I also update the tests?\n\n  Worked for 12s • 3:58 PM\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n";
+        assert!(ends_in_question(screen));
+        assert_eq!(detect_status(screen, Some(screen)), WorktreeStatus::NeedsInput);
+        // Footer drawn inside a rule, as some Codex versions do.
+        let ruled = "• Ready to push?\n─ Worked for 3s ──────────────\n› Ask Codex to do anything\n";
+        assert!(ends_in_question(ruled));
+        // A question typed in an *earlier* user turn isn't the agent asking.
+        let answered = "› can you fix it?\n\n• Fixed.\n\n› Ask Codex to do anything\n";
+        assert!(!ends_in_question(answered));
+    }
+
+    #[test]
+    fn usage_limit_messages_are_detected() {
+        for line in [
+            "  ⎿  You've hit your session limit · resets 9:10pm (America/Buenos_Aires)",
+            "⏺ You've hit your weekly limit · resets Sep 25 at 2pm (America/Buenos_Aires)",
+            "You’ve reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
+            "  ⎿  You've hit your monthly spend limit. Run /usage-credits to manage your limit",
+            "  ⎿  Credit balance is too low",
+        ] {
+            assert!(usage_limit_hit(&format!("⏺ working on it\n{line}\n❯\u{00a0}\n")), "{line}");
+        }
+    }
+
+    #[test]
+    fn usage_limit_needs_the_message_at_line_start() {
+        // The phrase mid-line (e.g. in code or prose the agent prints) is not
+        // the notice itself.
+        assert!(!usage_limit_hit("  t.starts_with(\"You've hit your \")\n"));
+        assert!(!usage_limit_hit("⏺ Claude shows You've hit your session limit when…\n"));
+        assert!(!usage_limit_hit("⏺ Done. All tests pass.\n❯\u{00a0}\n"));
+    }
+
     #[test]
     fn hint_line_below_prompt_is_not_the_question() {
         // The `?` belongs to the hint line below the prompt, not a transcript
@@ -605,3 +720,4 @@ mod tests {
         assert!(!ends_in_question(screen));
     }
 }
+

@@ -33,7 +33,13 @@ export interface Worktree {
   /// Claude `--effort` override for this worktree's session. null = no
   /// override.
   effort: string | null;
+  /// Which coding agent runs this worktree's session.
+  agent: Agent;
 }
+
+/// "claude" (default) or "codex" — the fallback when the Claude account is
+/// out of credit. Codex is only offered for Thanx-profile worktrees.
+export type Agent = "claude" | "codex";
 
 export type PermissionMode =
   | "default"
@@ -113,6 +119,19 @@ export const worktreeCurrentBranch = (id: number) =>
   invoke<string>("worktree_current_branch", { id });
 export const worktreeSetPermissionMode = (id: number, mode: PermissionMode) =>
   invoke<void>("worktree_set_permission_mode", { id, mode });
+/// Stop the worktree's current agent and continue on the same branch with
+/// `agent`, handing it the task + git state as its first prompt. Returns the
+/// updated row.
+export const worktreeSetAgent = (id: number, agent: Agent) =>
+  invoke<Worktree>("worktree_set_agent", { id, agent });
+/// Where Codex is offered: the one env profile it runs under (orchestrators
+/// match on their chosen Profile) and the repos bound to it (worktrees match on
+/// their repo). The backend enforces the same rule.
+export interface CodexOptions {
+  profile: string;
+  repo_ids: number[];
+}
+export const codexOptions = () => invoke<CodexOptions>("codex_options");
 export const worktreeSetTitle = (id: number, title: string) =>
   invoke<void>("worktree_set_title", { id, title });
 export const worktreeRefreshPrStatus = (id: number) =>
@@ -247,6 +266,7 @@ export interface CreateTaskArgs {
   permission_mode?: PermissionMode | null;
   model?: string | null;
   effort?: string | null;
+  agent?: Agent | null;
 }
 
 export const taskCreate = (args: CreateTaskArgs) =>
@@ -264,11 +284,34 @@ export interface CreateOrchestratorArgs {
   model: string;
   /// Claude `--effort` for the orchestrator. Always explicit.
   effort: string;
+  /// Which agent runs the orchestrator. Codex only on the Thanx profile.
+  agent?: Agent;
 }
 
 /// Models offered in the UI. Mirrors (a subset of) ALLOWED_MODELS in commands.rs.
 export const MODEL_OPTIONS = ["opus", "sonnet", "haiku", "fable"] as const;
 export const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"] as const;
+/// Codex options. Mirrors CODEX_MODELS / CODEX_EFFORTS in commands.rs;
+/// "default" leaves the choice to Codex's own config.
+export const CODEX_MODEL_OPTIONS = [
+  "default",
+  "gpt-6.1-sol",
+  "gpt-6-sol",
+  "gpt-6-astra",
+  "gpt-6-luna",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+] as const;
+export const CODEX_EFFORT_OPTIONS = [
+  "default",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
 
 /// Spawn a repo-less orchestrator session (Flock MCP auto-wired). Returns the
 /// new worktree so the UI can open it.
@@ -321,6 +364,13 @@ export interface WorktreeHibernatedEvent {
   detail?: string | null;
 }
 
+/// Claude's usage-limit / out-of-credit notice appeared on (limited: true) or
+/// left (false) a session's screen. Drives the "Continue with Codex" hint.
+export interface WorktreeUsageLimitEvent {
+  worktree_id: number;
+  limited: boolean;
+}
+
 /// What to show for a worktree: its auto-generated title when present, else
 /// the branch name (the place slug).
 export function worktreeLabel(w: Worktree): string {
@@ -347,6 +397,11 @@ export const onWorktreePrStatus = (
   cb: (e: WorktreePrStatusEvent) => void,
 ): Promise<UnlistenFn> =>
   listen<WorktreePrStatusEvent>("worktree:pr_status", (e) => cb(e.payload));
+
+export const onWorktreeUsageLimit = (
+  cb: (e: WorktreeUsageLimitEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<WorktreeUsageLimitEvent>("worktree:usage_limit", (e) => cb(e.payload));
 
 export const onWorktreeHibernated = (
   cb: (e: WorktreeHibernatedEvent) => void,
