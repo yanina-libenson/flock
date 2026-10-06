@@ -1018,30 +1018,6 @@ pub fn tmux_resize_window(worktree_id: i64, cols: u16, rows: u16) -> bool {
         .unwrap_or(false)
 }
 
-/// Like `tmux_capture_pane` but keeps escape sequences (`-e`) so colors and
-/// attributes survive — used to paint the live terminal in the PWA via
-/// xterm.js. The monitor uses the plain (escape-stripped) variant instead,
-/// since its text matching would choke on raw ANSI.
-pub fn tmux_capture_pane_ansi(worktree_id: i64) -> Option<String> {
-    let bin = tmux_bin()?;
-    let name = tmux_session_name(worktree_id);
-    // `-S -50`: include ~50 lines of scrollback above the visible screen so the
-    // PWA can scroll back through recent context. Kept modest on purpose:
-    // older lines were printed at the desktop's wider width and can't re-wrap
-    // (terminal scrollback is fixed-width), so deep history reads jagged on a
-    // narrow phone. Recent lines are more likely at the current narrow width.
-    let out = std::process::Command::new(bin)
-        .args([
-            "-L", TMUX_SOCKET, "capture-pane", "-t", &name, "-e", "-p", "-S", "-50",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 /// Max bytes of literal text per `send-keys -l` call. DO NOT raise this or
 /// collapse the chunks back into a single call: Claude Code's TUI treats any
 /// single input read above ~512–900 bytes as a *paste*. One big `send-keys`

@@ -172,12 +172,11 @@ export const setActiveWorktree = (worktreeId: number | null) =>
   invoke<void>("set_active_worktree", { worktreeId });
 export const tmuxCheck = () => invoke<boolean>("tmux_check");
 
-// ---------- Remote API / PWA ----------
+// ---------- Local API (Flock MCP) ----------
 
 export interface RemoteInfo {
   running: boolean;
   token: string;
-  urls: string[];
 }
 
 export const remoteStart = () => invoke<RemoteInfo>("remote_start");

@@ -39,7 +39,7 @@ It's built to feel like a great terminal (it's modeled on iTerm down to the line
 You're already running Claude Code. The bottleneck isn't the model — it's **you**, context-switching between tasks, forgetting which branch had the failing test, missing the moment an agent stopped to ask a question. Flock fixes the orchestration layer:
 
 - **Parallelism without chaos.** Spin up a worktree per task. Each gets an isolated checkout and its own Claude. They don't step on each other.
-- **Never miss "your turn."** A background monitor reads each session and tells you who needs you — on screen, and on your phone.
+- **Never miss "your turn."** A background monitor reads each session and tells you who needs you — on screen.
 - **The ball is always visible.** Every worktree shows where its task sits in the PR lifecycle, so you know if you're blocked or blocking.
 - **It survives everything.** Sessions live in tmux. Close the app, reboot the UI, come back tomorrow — your conversations are right where you left them.
 
@@ -66,10 +66,6 @@ A single status pill per worktree, color-coded by whose turn it is:
 ### 🏷️ Auto-generated titles
 - Each session gets a short, human title summarized by a one-shot `claude -p` (fast model) from what's on screen — so your tabs say *"Fix the checkout race"*, not `feat/kyoto`. Editable inline.
 
-### 📱 Mobile access (PWA over Tailscale)
-- An opt-in local server exposes your worktree list, **live terminals** (streamed to your phone and reflowed to its width), **remote input**, a **New Task** form, web push notifications, and a **Reader** chat view that renders the session transcript directly.
-- Security-first: binds `127.0.0.1` + your Tailscale IP only (never `0.0.0.0`), every API route gated by a locally-generated master token.
-
 ### 🧠 Built-in knowledge base (durable agent memory)
 - Point Flock at an **Obsidian vault**; it indexes your notes into **SQLite FTS5** and serves them over **MCP** (`kb_search`, `kb_read`, `kb_ingest`, …). Your agents get a persistent, searchable memory across sessions.
 
@@ -77,7 +73,7 @@ A single status pill per worktree, color-coded by whose turn it is:
 - **Orchestrator sessions** — a first-class, **repo-less Claude** whose job is to direct a fleet. It runs in a Flock scratch space with the Flock MCP auto-wired, spawns worktrees across *any* of your registered repos, and watches + unblocks them. Its **fleet** shows nested beneath it in the sidebar (each child with its live status pill); click any to drop into it. New worktrees appear **live**, no refresh.
 - **MCP server** (`mcp/flock-mcp.mjs`): other agents (or Claude itself) can `task_create`, `task_list`, `task_status`, `task_read`, `task_input`, and manage schedules — a stdio bridge to Flock's REST API. Spawned tasks auto-link to the orchestrator that created them (via an injected `FLOCK_WORKTREE_ID`).
 - **Per-task model & effort** — each spawned task can pick its own model (`opus` · `sonnet` · `haiku` · `fable`, or a pinned model ID) and reasoning effort (`low` → `max`), baked into the launched `claude` and remembered per worktree — so an orchestrator can run cheap mechanical children on Haiku and hard ones on Opus. Orchestrators themselves pick a model/effort when created, and must always pass an explicit `model` and `effort` to `task_create` / `schedule_create` (the CLI defaults drift over time, so Flock never relies on it).
-- **Codex fallback (work worktrees)** — when Claude runs out of credit, a worktree on the **Thanx** profile can **Continue with Codex** (sidebar ⇄ action, or the banner Flock shows when it spots Claude's usage-limit message on screen — it never switches by itself). Flock stops Claude and starts the [Codex CLI](https://github.com/openai/codex) on the same branch, handing it the original task, the last request and the git state as its first prompt; switch back the same way. Status, the Reader/`task_read`, resume and `task_input` all work for Codex worktrees, and Codex gets the Flock MCP (`kb_*`, `task_*`) wired per invocation — `~/.codex/config.toml` is never touched. **Orchestrators** can run on Codex too (pick *Agent → Codex* in New orchestrator, or ⇄ an existing one): same orchestration instructions (via Codex's `developer_instructions`), same scratch dir and Flock tools, and `task_create` spawns Codex children by default (`agent` overrides; Codex children are Thanx-repo only).
+- **Codex fallback (work worktrees)** — when Claude runs out of credit, a worktree on the **Thanx** profile can **Continue with Codex** (sidebar ⇄ action, or the banner Flock shows when it spots Claude's usage-limit message on screen — it never switches by itself). Flock stops Claude and starts the [Codex CLI](https://github.com/openai/codex) on the same branch, handing it the original task, the last request and the git state as its first prompt; switch back the same way. Status, `task_read`, resume and `task_input` all work for Codex worktrees, and Codex gets the Flock MCP (`kb_*`, `task_*`) wired per invocation — `~/.codex/config.toml` is never touched. **Orchestrators** can run on Codex too (pick *Agent → Codex* in New orchestrator, or ⇄ an existing one): same orchestration instructions (via Codex's `developer_instructions`), same scratch dir and Flock tools, and `task_create` spawns Codex children by default (`agent` overrides; Codex children are Thanx-repo only).
 - **Cross-account guard** — when an orchestrator spawns a child into a repo that resolves to a *different* Claude account than its own, Flock refuses unless you confirm — catching the "wrong repo, wrong account" slip *before* any worktree is created.
 - **Scheduled tasks**: fire a fresh prompted task on a cron-like spec (`@every 30m`, `@every 2h`, `HH:MM`).
 - **Headless task creation**: spawn a worktree + prompted Claude without ever touching the UI.
@@ -144,12 +140,12 @@ Then: add a repo (the sidebar `+`), create a worktree, and Claude starts in it. 
 | `monitor.rs` | reads each tmux session (`capture-pane`), classifies working/idle/needs_input, emits status + auto-titles |
 | `pty.rs` | tmux session lifecycle + the PTY client that bridges xterm ↔ tmux |
 | `db.rs` | SQLite (repos, worktrees, schedules) |
-| `api/mod.rs` | opt-in axum server: REST + SSE for the mobile PWA, token auth, Tailscale binding |
+| `api/mod.rs` | opt-in axum server (localhost only): the REST API behind the MCP server, token auth |
 | `schedule.rs` | cron-spec task firing |
 | `mcp.rs` | self-contained install of Flock's own MCP server (data dir) so orchestrator sessions get the `task_*` tools auto-wired |
 | `kb.rs` | Obsidian vault → FTS5 index, exposed over MCP |
 | `env_profiles.rs` | per-folder env-var injection + per-worktree Claude account (`CLAUDE_CONFIG_DIR`) resolution |
-| `transcript.rs` | reads Claude session JSONL and Codex rollouts (matched to a worktree by `session_meta.cwd`) for the Reader / `task_read` |
+| `transcript.rs` | reads Claude session JSONL and Codex rollouts (matched to a worktree by `session_meta.cwd`) for `task_read` |
 | `handoff.rs` | the first prompt an agent gets when a worktree switches Claude ↔ Codex (task, last request, git state) |
 
 ### Frontend — `src/`
@@ -165,7 +161,6 @@ Then: add a repo (the sidebar `+`), create a worktree, and Claude starts in it. 
 ### The bridges
 
 - **`mcp/flock-mcp.mjs`** — MCP stdio server exposing `task_*`, `schedule_*`, `kb_*` to any agent. Talks to the REST API; reads the token from the data dir or `FLOCK_TOKEN` / `FLOCK_API_URL`.
-- **`pwa/`** — the installable mobile shell (vanilla JS + xterm) served by `api/mod.rs`.
 
 ### Conventions worth keeping
 - New frontend↔backend calls: add the command in `commands.rs`, register it in `lib.rs`'s `generate_handler!`, and add a typed wrapper in `lib/ipc.ts`.

@@ -4,7 +4,7 @@ import {
   X,
   Copy,
   Check,
-  Smartphone,
+  Plug,
   Plus,
   Trash2,
   FolderPlus,
@@ -301,11 +301,11 @@ export function SettingsModal(props: { onClose: () => void }) {
 
         <div class="p-5 max-h-[78vh] overflow-y-auto">
           <div class="flex items-start gap-3">
-            <Smartphone size={16} class="mt-0.5 text-[var(--color-accent)] shrink-0" />
+            <Plug size={16} class="mt-0.5 text-[var(--color-accent)] shrink-0" />
             <div class="flex-1 min-w-0">
               <div class="flex items-center justify-between gap-3">
                 <div class="text-[13px] font-medium text-[var(--color-fg)]">
-                  Remote access (mobile PWA)
+                  Local API (Flock MCP)
                 </div>
                 <button
                   role="switch"
@@ -328,8 +328,8 @@ export function SettingsModal(props: { onClose: () => void }) {
                 </button>
               </div>
               <div class="mt-1 text-[11px] text-[var(--color-fg-dim)] leading-snug">
-                Serve the worktree dashboard to your phone. Binds to localhost +
-                your Tailscale IP only — never exposed to the public internet.
+                The REST API behind Flock's MCP tools (task_*, kb_*, schedules).
+                Binds to localhost only.
               </div>
             </div>
           </div>
@@ -357,32 +357,6 @@ export function SettingsModal(props: { onClose: () => void }) {
                   >
                     {copied() === "token" ? <Check size={12} /> : <Copy size={12} />}
                   </button>
-                </div>
-              </div>
-
-              <div>
-                <div class="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-fg-dim)] mb-1">
-                  Open on your phone
-                </div>
-                <div class="space-y-1.5">
-                  {info()!.urls.map((url) => (
-                    <div class="flex items-center gap-2">
-                      <code class="flex-1 truncate text-[11px] font-mono bg-[var(--color-bg)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-fg-muted)]">
-                        {url.replace(/\?token=.*/, "")}
-                      </code>
-                      <button
-                        class="p-1.5 rounded border border-[var(--color-border)] text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] hover:bg-[var(--color-bg-hover)] transition"
-                        title="Copy URL with token"
-                        onClick={() => copy(url, url)}
-                      >
-                        {copied() === url ? <Check size={12} /> : <Copy size={12} />}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <div class="mt-1.5 text-[11px] text-[var(--color-fg-dim)] leading-snug">
-                  The copied link includes the token. Open it once on your phone;
-                  the token is saved and stripped from the URL.
                 </div>
               </div>
             </div>

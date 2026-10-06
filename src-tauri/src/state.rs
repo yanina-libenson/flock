@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 /// Latest agent status per worktree id, written by the monitor and read by the
-/// REST API. Shared so the PWA can report status without the desktop frontend.
+/// REST API. Shared so the API can report status without the desktop frontend.
 pub type StatusMap = Arc<Mutex<HashMap<i64, WorktreeStatus>>>;
 
 pub struct AppState {

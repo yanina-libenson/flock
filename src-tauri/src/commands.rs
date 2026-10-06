@@ -843,7 +843,7 @@ fn skip_leading_caps_heading(prompt: &str) -> &str {
 //
 // An orchestrator is a repo-less Claude session that directs a fleet of agents
 // across many repos. It's modeled as a worktree row (kind='orchestrator') so it
-// inherits the whole session stack — monitor, titles, transcript, PWA, input,
+// inherits the whole session stack — monitor, titles, transcript, input,
 // hibernation — for free. It lives in a Flock-managed scratch dir, owned by an
 // internal "Orchestrators" repo that exists only to satisfy the repo_id FK and
 // is hidden from the normal repo list.
