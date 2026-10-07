@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Flock MCP server — lets an agent drive Flock the way you do.
 //
-// It's a thin stdio bridge to Flock's REST API (the same surface the PWA uses),
+// It's a thin stdio bridge to Flock's REST API (localhost only),
 // so there's no orchestration logic duplicated here. Add it to an agent with:
 //
 //   claude mcp add flock -- node /absolute/path/to/flock-mcp.mjs
 //
-// Requires Flock's "Remote access" toggle to be ON (it starts the API server).
+// Requires Flock's "Local API (Flock MCP)" toggle to be ON (it starts the API server).
 // Reads the API token from Flock's data dir; override with FLOCK_TOKEN /
 // FLOCK_API_URL env vars if needed.
 

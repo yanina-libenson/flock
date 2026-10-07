@@ -4,7 +4,7 @@
 //! `$CLAUDE_CONFIG_DIR` when set, else `~/.claude`. Flock binds a distinct
 //! `CLAUDE_CONFIG_DIR` per env profile (e.g. a separate Claude for the Personal
 //! folder), so both resume and the Reader must look under the session's own
-//! config dir — not a hardcoded `~/.claude`. Powers the PWA "Reader" view:
+//! config dir — not a hardcoded `~/.claude`. Powers the Reader feed (`/api/worktrees/:id/transcript`):
 //! a clean, reflowable chat that's fully decoupled from the terminal (read-only
 //! file access — never touches the live tmux session or its width).
 

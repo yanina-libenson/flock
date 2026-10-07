@@ -5,11 +5,11 @@ input, and schedule work — by exposing Flock's REST API as MCP tools. This is
 the substrate for "an agent that orchestrates other agents."
 
 It's a thin **stdio bridge**: no orchestration logic lives here, it just calls
-the same REST API the PWA uses.
+Flock's local REST API.
 
 ## Setup
 
-1. Turn on **Remote access** in Flock → Settings (this starts the API server).
+1. Turn on **Local API (Flock MCP)** in Flock → Settings (this starts the API server).
 2. Install deps once:
    ```bash
    cd mcp && npm install
