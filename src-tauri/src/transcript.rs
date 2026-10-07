@@ -71,24 +71,33 @@ pub fn session_file_for(worktree_path: &str, config_dir: Option<&str>) -> Option
     best.map(|(_, p)| p)
 }
 
-/// Flatten the JSONL into a clean conversation: user + assistant **text** only.
-/// Thinking, tool calls, tool results, and metadata lines are dropped — the
-/// Reader is for reading the conversation; the terminal stays for the details.
+/// Flatten the JSONL into a clean conversation: user + assistant **text**, plus
+/// `AskUserQuestion` calls rendered as text (agents often put a whole checkpoint
+/// in one, and an orchestrator must see what a child is blocked on). Thinking,
+/// other tool calls, tool results, and metadata lines are dropped — the Reader
+/// is for reading the conversation; the terminal stays for the details.
 pub fn parse_messages(jsonl: &str) -> Vec<Msg> {
+    let values: Vec<serde_json::Value> = jsonl
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    // tool_use ids that already got a tool_result, i.e. the user answered.
+    let answered: std::collections::HashSet<&str> = values
+        .iter()
+        .filter_map(|v| v.get("message")?.get("content")?.as_array())
+        .flatten()
+        .filter(|b| b.get("type").and_then(|x| x.as_str()) == Some("tool_result"))
+        .filter_map(|b| b.get("tool_use_id")?.as_str())
+        .collect();
     let mut out = Vec::new();
-    for line in jsonl.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
+    for v in &values {
         let role = match v.get("type").and_then(|x| x.as_str()) {
             Some(r @ ("user" | "assistant")) => r.to_string(),
             _ => continue,
         };
-        let text = extract_text(v.get("message").and_then(|m| m.get("content")));
+        let text = extract_text(v.get("message").and_then(|m| m.get("content")), &answered);
         if !text.trim().is_empty() {
             out.push(Msg { role, text });
         }
@@ -253,17 +262,59 @@ pub fn parse_codex_messages(jsonl: &str) -> Vec<Msg> {
     out
 }
 
-fn extract_text(content: Option<&serde_json::Value>) -> String {
+fn extract_text(
+    content: Option<&serde_json::Value>,
+    answered: &std::collections::HashSet<&str>,
+) -> String {
     match content {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Array(arr)) => arr
             .iter()
-            .filter(|b| b.get("type").and_then(|x| x.as_str()) == Some("text"))
-            .filter_map(|b| b.get("text").and_then(|x| x.as_str()))
+            .filter_map(|b| match b.get("type").and_then(|x| x.as_str()) {
+                Some("text") => b.get("text").and_then(|x| x.as_str()).map(str::to_string),
+                Some("tool_use") if b.get("name").and_then(|x| x.as_str()) == Some("AskUserQuestion") => {
+                    let pending = !b
+                        .get("id")
+                        .and_then(|x| x.as_str())
+                        .is_some_and(|id| answered.contains(id));
+                    Some(render_ask_user_question(b.get("input"), pending))
+                }
+                _ => None,
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
     }
+}
+
+/// An `AskUserQuestion` input as readable text: each question, then its options
+/// as a numbered list. `pending` marks one the user hasn't answered yet.
+fn render_ask_user_question(input: Option<&serde_json::Value>, pending: bool) -> String {
+    let mut lines = Vec::new();
+    if pending {
+        lines.push("[waiting for answer]".to_string());
+    }
+    let questions = input
+        .and_then(|i| i.get("questions"))
+        .and_then(|q| q.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    for q in questions {
+        let Some(text) = q.get("question").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let multi = q.get("multiSelect").and_then(|x| x.as_bool()) == Some(true);
+        lines.push(if multi { format!("{text} (multi-select)") } else { text.to_string() });
+        let options = q.get("options").and_then(|o| o.as_array()).map(Vec::as_slice).unwrap_or_default();
+        for (i, o) in options.iter().enumerate() {
+            let label = o.get("label").and_then(|x| x.as_str()).unwrap_or("");
+            match o.get("description").and_then(|x| x.as_str()).filter(|d| !d.is_empty()) {
+                Some(d) => lines.push(format!("{}. {label}: {d}", i + 1)),
+                None => lines.push(format!("{}. {label}", i + 1)),
+            }
+        }
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -283,6 +334,29 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0], Msg { role: "user".into(), text: "hola, arreglá el bug".into() });
         assert_eq!(msgs[1], Msg { role: "assistant".into(), text: "Dale, lo veo.".into() });
+    }
+
+    const ASK: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"AskUserQuestion","input":{"questions":[{"question":"Which plan?","header":"Plan","multiSelect":false,"options":[{"label":"A","description":"fast"},{"label":"B","description":"safe"}]},{"question":"Which envs?","header":"Env","multiSelect":true,"options":[{"label":"dev","description":""}]}]}}]}}"#;
+    const ANSWER: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"A"}]}}"#;
+
+    #[test]
+    fn renders_pending_ask_user_question() {
+        let msgs = parse_messages(ASK);
+        assert_eq!(
+            msgs,
+            vec![Msg {
+                role: "assistant".into(),
+                text: "[waiting for answer]\nWhich plan?\n1. A: fast\n2. B: safe\nWhich envs? (multi-select)\n1. dev".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn answered_ask_user_question_is_not_pending() {
+        let msgs = parse_messages(&format!("{ASK}\n{ANSWER}"));
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].text.starts_with("Which plan?\n1. A: fast"));
+        assert!(!msgs[0].text.contains("waiting"));
     }
 
     #[test]

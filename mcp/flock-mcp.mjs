@@ -172,7 +172,7 @@ const TOOLS = [
   {
     name: "task_read",
     description:
-      "Read a worktree agent's conversation transcript — the clean message history (user + assistant turns), parsed from the session. Use this to follow what a child agent you spawned is actually doing.",
+      "Read a worktree agent's conversation transcript — the clean message history (user + assistant turns), parsed from the session. A pending AskUserQuestion appears as an assistant message prefixed \"[waiting for answer]\" with its options. Use this to follow what a child agent you spawned is actually doing.",
     inputSchema: {
       type: "object",
       properties: {
