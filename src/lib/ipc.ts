@@ -113,6 +113,10 @@ export const worktreesList = (repoId: number) =>
   invoke<Worktree[]>("worktrees_list", { repoId });
 export const worktreeRemove = (id: number, force: boolean) =>
   invoke<void>("worktree_remove", { id, force });
+/// Answer an orchestrator's removal request (`worktree:remove_request`). False
+/// when it already expired or was answered.
+export const worktreeRemoveAnswer = (requestId: number, approve: boolean) =>
+  invoke<boolean>("worktree_remove_answer", { requestId, approve });
 export const worktreeDirty = (id: number) =>
   invoke<DirtySummary>("worktree_dirty", { id });
 export const worktreeCurrentBranch = (id: number) =>
@@ -370,6 +374,21 @@ export interface WorktreeUsageLimitEvent {
   limited: boolean;
 }
 
+/// An orchestrator asked (task_remove) to remove a worktree; the backend waits
+/// for the user's answer before tearing anything down.
+export interface RemoveRequest {
+  request_id: number;
+  worktree_id: number;
+  label: string;
+  branch: string;
+  repo: string;
+  /// The asking orchestrator's label, when it identified itself.
+  requested_by: string | null;
+  /// Uncommitted changes that removal would throw away (only with force).
+  dirty: DirtySummary | null;
+  timeout_secs: number;
+}
+
 /// What to show for a worktree: its auto-generated title when present, else
 /// the branch name (the place slug).
 export function worktreeLabel(w: Worktree): string {
@@ -411,12 +430,25 @@ export const onWorktreeHibernated = (
 /// the REST API) — the backend pushes the full row so the sidebar can add it
 /// live, without a manual refresh. The desktop's own create flows add the row
 /// directly, so this mainly surfaces spawned/fleet worktrees.
-/// A worktree was removed out-of-band (an orchestrator's task_remove) — drop it
-/// from the sidebar and close its pane. Payload is the worktree id.
+/// A worktree was removed (from the sidebar, a cascade, or an orchestrator's
+/// approved task_remove) — drop it from the sidebar and fleet and close its
+/// pane. Payload is the worktree id.
 export const onWorktreeRemoved = (
   cb: (id: number) => void,
 ): Promise<UnlistenFn> =>
   listen<number>("worktree:removed", (e) => cb(e.payload));
+
+export const onWorktreeRemoveRequest = (
+  cb: (r: RemoveRequest) => void,
+): Promise<UnlistenFn> =>
+  listen<RemoveRequest>("worktree:remove_request", (e) => cb(e.payload));
+
+/// A removal request was settled (answered or timed out) — close its dialog.
+/// Payload is the request id.
+export const onWorktreeRemoveRequestDone = (
+  cb: (requestId: number) => void,
+): Promise<UnlistenFn> =>
+  listen<number>("worktree:remove_request_done", (e) => cb(e.payload));
 
 export const onWorktreeCreated = (
   cb: (w: Worktree) => void,

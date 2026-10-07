@@ -1,3 +1,4 @@
+use crate::confirm::PendingConfirms;
 use crate::db::Db;
 use crate::monitor::WorktreeStatus;
 use crate::pty::PtyManager;
@@ -31,6 +32,9 @@ pub struct AppState {
     /// `std::sync::Mutex` because every holder lives on a blocking thread
     /// (spawn_blocking / the monitor's wake thread) — never held across `.await`.
     pub input_locks: Mutex<HashMap<i64, Arc<Mutex<()>>>>,
+    /// Removals requested through the API, waiting on the user's answer in the
+    /// desktop UI (see `commands::remove_worktree_for_orchestrator`).
+    pub remove_confirms: PendingConfirms,
 }
 
 impl AppState {
@@ -43,6 +47,7 @@ impl AppState {
             kb_watcher: Mutex::new(None),
             active_worktree: Mutex::new(None),
             input_locks: Mutex::new(HashMap::new()),
+            remove_confirms: PendingConfirms::default(),
         })
     }
 }

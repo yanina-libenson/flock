@@ -6,7 +6,7 @@ use crate::pty;
 use crate::schedule;
 use crate::state::AppState;
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -440,11 +440,23 @@ pub fn worktrees_list(state: State<'_, AppState>, repo_id: i64) -> AppResult<Vec
     state.db.list_worktrees(repo_id)
 }
 
-/// Tear down a single worktree: kill its tmux session + PTY client, drop its
-/// resume-on-input lock, remove its git worktree (or scratch dir, for an
-/// orchestrator), and delete its DB row. `force` is passed to
+/// Tear down a single worktree: delete its DB row (and tell the UI), kill its
+/// tmux session + PTY client, drop its resume-on-input lock, and remove its git
+/// worktree (or scratch dir, for an orchestrator). `force` is passed to
 /// `git::remove_worktree` so callers can delete even dirty/unpushed trees.
-fn teardown_worktree(state: &AppState, w: &Worktree, force: bool) -> AppResult<()> {
+fn teardown_worktree(app: &AppHandle, state: &AppState, w: &Worktree, force: bool) -> AppResult<()> {
+    // Row first. Everything that starts or attaches a session (`session_open`,
+    // task_input's resume) looks the row up, so once it's gone nothing can
+    // bring `flock-<id>` back while the checkout removal below runs, which takes
+    // seconds on a big repo. The old order (kill, remove checkout, delete row)
+    // left that window open: a pane opened mid-teardown (e.g. clicking the
+    // "Claude finished" notification) recreated the session in the dying dir.
+    // An attach that was already in flight is caught by the monitor's orphan
+    // sweep.
+    state.db.delete_worktree(w.id)?;
+    // Drops the sidebar entry, fleet entry and pane right away, for UI and API
+    // removals alike.
+    let _ = app.emit("worktree:removed", w.id);
     // Tear down the tmux session and the PTY client before removing the
     // worktree directory, otherwise tmux's pane cwd points at a vanishing dir
     // and the server logs get noisy.
@@ -456,16 +468,15 @@ fn teardown_worktree(state: &AppState, w: &Worktree, force: bool) -> AppResult<(
         // An orchestrator isn't a git worktree — it's a plain scratch dir. Just
         // remove the directory.
         let _ = std::fs::remove_dir_all(Path::new(&w.path));
-    } else {
-        let repo = state.db.get_repo(w.repo_id)?;
+    } else if let Ok(repo) = state.db.get_repo(w.repo_id) {
         let _ = git::remove_worktree(Path::new(&repo.path), Path::new(&w.path), force);
     }
-    state.db.delete_worktree(w.id)?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn worktree_remove(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
     force: bool,
@@ -479,10 +490,10 @@ pub fn worktree_remove(
     // git worktrees and tmux sessions, which a SQL cascade alone can't do.
     if w.kind == "orchestrator" {
         for child in state.db.list_children(id)? {
-            teardown_worktree(&state, &child, true)?;
+            teardown_worktree(&app, &state, &child, true)?;
         }
     }
-    teardown_worktree(&state, &w, force)
+    teardown_worktree(&app, &state, &w, force)
 }
 
 /// Why an orchestrator's remove request was refused, so the API can map each
@@ -494,34 +505,108 @@ pub enum RemoveRefusal {
     IsOrchestrator,
     /// Uncommitted changes and `force` wasn't set — ask the user first.
     Dirty(git::DirtySummary),
+    /// The user said no in the desktop confirm dialog.
+    Declined,
+    /// Nobody answered the dialog within `REMOVE_CONFIRM_TIMEOUT`.
+    TimedOut,
     Other(AppError),
 }
 
+/// How long an API removal waits for the user to answer the desktop dialog.
+/// No answer counts as "no". Stays under the MCP client's own limits: Node
+/// fetch gives up on a response after 300s, and Codex's tool timeout is raised
+/// to match in `pty::codex_invocation`.
+pub const REMOVE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// What the desktop confirm dialog shows for an API removal request
+/// (`worktree:remove_request`).
+#[derive(Serialize, Clone)]
+pub struct RemoveRequest {
+    pub request_id: u64,
+    pub worktree_id: i64,
+    /// The worktree's title, or its branch when it has none.
+    pub label: String,
+    pub branch: String,
+    pub repo: String,
+    /// Label of the orchestrator that asked, when the caller identified itself.
+    pub requested_by: Option<String>,
+    /// Uncommitted changes that removing will throw away (only with `force`).
+    pub dirty: Option<git::DirtySummary>,
+    pub timeout_secs: u64,
+}
+
+fn worktree_label(w: &Worktree) -> String {
+    w.title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(&w.branch)
+        .to_string()
+}
+
 /// Remove a worktree on an orchestrator's behalf — the same teardown the
-/// sidebar's ✕ does, with two extra guards the UI covers with a confirm()
-/// dialog: never an orchestrator, and never a dirty worktree unless `force`.
-/// The git branch itself is kept (only the checkout + session go away).
+/// sidebar's ✕ does, but only after the user approves it in a desktop dialog
+/// (orchestrators have removed worktrees nobody asked them to). Never an
+/// orchestrator, and never a dirty worktree unless `force`. The git branch
+/// itself is kept (only the checkout + session go away). `requested_by` is the
+/// calling orchestrator's worktree id, shown in the dialog. Blocks up to
+/// `REMOVE_CONFIRM_TIMEOUT`.
 pub fn remove_worktree_for_orchestrator(
     app: &AppHandle,
     state: &AppState,
     id: i64,
     force: bool,
+    requested_by: Option<i64>,
 ) -> Result<(), RemoveRefusal> {
     let w = state.db.get_worktree(id).map_err(|_| RemoveRefusal::NotFound)?;
     if w.kind == "orchestrator" {
         return Err(RemoveRefusal::IsOrchestrator);
     }
-    if !force {
-        // A missing/broken checkout reads as clean — nothing left to lose.
-        if let Ok(d) = git::dirty_summary(Path::new(&w.path)) {
-            if d.staged + d.unstaged + d.untracked > 0 {
-                return Err(RemoveRefusal::Dirty(d));
-            }
-        }
+    // A missing/broken checkout reads as clean — nothing left to lose.
+    let dirty = git::dirty_summary(Path::new(&w.path))
+        .ok()
+        .filter(|d| d.staged + d.unstaged + d.untracked > 0);
+    if let (Some(d), false) = (&dirty, force) {
+        return Err(RemoveRefusal::Dirty(d.clone()));
     }
-    teardown_worktree(state, &w, force).map_err(RemoveRefusal::Other)?;
-    let _ = app.emit("worktree:removed", id);
-    Ok(())
+    let req = RemoveRequest {
+        request_id: 0,
+        worktree_id: w.id,
+        label: worktree_label(&w),
+        branch: w.branch.clone(),
+        repo: state
+            .db
+            .get_repo(w.repo_id)
+            .map(|r| r.name)
+            .unwrap_or_default(),
+        requested_by: requested_by
+            .and_then(|p| state.db.get_worktree(p).ok())
+            .map(|p| worktree_label(&p)),
+        dirty,
+        timeout_secs: REMOVE_CONFIRM_TIMEOUT.as_secs(),
+    };
+    let mut request_id = 0;
+    let answer = state.remove_confirms.ask(REMOVE_CONFIRM_TIMEOUT, |id| {
+        request_id = id;
+        let _ = app.emit("worktree:remove_request", RemoveRequest { request_id: id, ..req });
+    });
+    // Close the dialog however it ended, including a timeout.
+    let _ = app.emit("worktree:remove_request_done", request_id);
+    match answer {
+        Some(true) => {}
+        Some(false) => return Err(RemoveRefusal::Declined),
+        None => return Err(RemoveRefusal::TimedOut),
+    }
+    // The user may have taken a while; re-read the row in case it went away.
+    let w = state.db.get_worktree(id).map_err(|_| RemoveRefusal::NotFound)?;
+    teardown_worktree(app, state, &w, force).map_err(RemoveRefusal::Other)
+}
+
+/// The desktop's answer to a `worktree:remove_request`. False when the request
+/// already expired or was answered, so a late click is a no-op.
+#[tauri::command]
+pub fn worktree_remove_answer(state: State<'_, AppState>, request_id: u64, approve: bool) -> bool {
+    state.remove_confirms.answer(request_id, approve)
 }
 
 #[tauri::command]
@@ -765,7 +850,8 @@ pub fn start_task_core(
             w.id, w.model, w.effort
         );
     }
-    pty::start_detached(
+    clear_stale_session(state, w.id);
+    if let Err(e) = pty::start_detached(
         w.id,
         Path::new(&w.path),
         &w.permission_mode,
@@ -776,13 +862,33 @@ pub fn start_task_core(
         w.model.as_deref(),
         w.effort.as_deref(),
         &w.agent,
-    )?;
+    ) {
+        // Roll back so a failed start leaves no half-created worktree (a row
+        // with no session that task_input can't resume).
+        let _ = state.db.delete_worktree(w.id);
+        let _ = git::remove_worktree(Path::new(&repo.path), Path::new(&w.path), true);
+        // The branch is brand new (start_task_core always branches), so drop
+        // it too; otherwise a retry gets bumped to `<branch>-2`.
+        let _ = git::delete_branch(Path::new(&repo.path), &w.branch);
+        return Err(e);
+    }
     state.db.touch_worktree(w.id)?;
     // Tell the desktop UI a worktree appeared so it shows up live (under its
     // repo, and — if parent_id is set — in the spawning orchestrator's fleet)
     // without waiting for a manual refresh. Mirrors the other worktree:* events.
     let _ = app.emit("worktree:created", &w);
     Ok(w)
+}
+
+/// A brand-new worktree has no session yet, so a live `flock-<id>` is a
+/// leftover (ids used to be reused) and would make `new-session` fail with
+/// "duplicate session". Kill it first.
+fn clear_stale_session(state: &AppState, id: i64) {
+    if pty::tmux_list_sessions().contains(&id) {
+        eprintln!("flock: killing stale session {} before reuse", pty::tmux_session_name(id));
+        state.pty.kill(id).ok();
+        pty::tmux_kill_session(id);
+    }
 }
 
 fn is_branch_collision(e: &AppError) -> bool {
@@ -913,7 +1019,7 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool, agent: &str) -> Str
          - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's agent/model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
-         - task_remove(id, force?): remove a worktree — the same as the ✕ in Flock's sidebar (kills its session, deletes the checkout; the git branch is kept). ONLY call this when the user explicitly asks you to remove specific worktrees in this conversation — never on your own initiative, never as cleanup after a task finishes. Confirm which ids you're about to remove if there's any ambiguity. It refuses dirty worktrees unless force:true; only pass force after telling the user what uncommitted work would be lost and getting an explicit yes. It can't remove orchestrators.\n\
+         - task_remove(id, force?): remove a worktree — the same as the ✕ in Flock's sidebar (kills its session, deletes the checkout; the git branch is kept). ONLY call this when the user explicitly asks you to remove specific worktrees in this conversation — never on your own initiative, never as cleanup after a task finishes. Confirm which ids you're about to remove if there's any ambiguity. Flock also asks the user to approve every removal in a dialog and waits up to 2 minutes; the result says removed, declined by the user, or timed out (not removed). Respect a decline. It refuses dirty worktrees unless force:true; only pass force after telling the user what uncommitted work would be lost and getting an explicit yes. It can't remove orchestrators.\n\
          - kb_search / kb_read / kb_ingest: your durable memory across sessions."
     } else {
         "The Flock MCP tools could not be auto-wired. Ask the user to enable Remote access in Flock settings and add the Flock MCP, then restart you."
@@ -1083,7 +1189,8 @@ pub fn start_orchestrator_core(
         Some(name) => env_profiles::resolve_vars_by_name(&cfg, Some(name)),
         None => env_profiles::resolve_vars(&cfg, &path.to_string_lossy()),
     };
-    pty::start_detached(
+    clear_stale_session(state, w.id);
+    if let Err(e) = pty::start_detached(
         w.id,
         &path,
         pm,
@@ -1094,7 +1201,12 @@ pub fn start_orchestrator_core(
         Some(model),
         Some(effort),
         agent,
-    )?;
+    ) {
+        // Same rollback as `start_task_core`: no row without a session.
+        let _ = state.db.delete_worktree(w.id);
+        let _ = std::fs::remove_dir_all(&path);
+        return Err(e);
+    }
     state.db.touch_worktree(w.id)?;
     let _ = app.emit("worktree:created", &w);
     Ok(w)

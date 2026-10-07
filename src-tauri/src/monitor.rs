@@ -114,7 +114,27 @@ pub fn spawn(app: AppHandle) {
         loop {
             std::thread::sleep(POLL_INTERVAL);
 
-            let ids = pty::tmux_list_sessions();
+            let mut ids = pty::tmux_list_sessions();
+            // Kill sessions whose worktree row is gone. Removal deletes the row
+            // before killing the session, but an attach or resume already in
+            // flight can still create `flock-<id>` a moment later, in a
+            // deleted dir and holding the id's session name. Read the rows
+            // *after* listing sessions: a row is always inserted before its
+            // session starts, so a listed session without a row is an orphan,
+            // never a task still being created.
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(known) = state.db.worktree_ids() {
+                    for id in orphan_sessions(&ids, &known) {
+                        eprintln!(
+                            "flock: killing orphan session {} (worktree removed)",
+                            pty::tmux_session_name(id)
+                        );
+                        let _ = state.pty.kill(id);
+                        pty::tmux_kill_session(id);
+                    }
+                    ids.retain(|id| known.contains(id));
+                }
+            }
             let live: HashSet<i64> = ids.iter().copied().collect();
             // A vanished session (claude exited, worktree removed) drops out of
             // tracking. The frontend clears its dot off the `pty:exit` event.
@@ -186,6 +206,11 @@ pub fn spawn(app: AppHandle) {
             }
         }
     });
+}
+
+/// Live session ids with no worktree row behind them.
+fn orphan_sessions(live: &[i64], known: &HashSet<i64>) -> Vec<i64> {
+    live.iter().copied().filter(|id| !known.contains(id)).collect()
 }
 
 /// Reap the heaviest non-focused sessions when aggregate RSS exceeds
@@ -521,6 +546,15 @@ fn sanitize_title(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sessions_of_removed_worktrees_are_orphans() {
+        // flock-317 was recreated after its worktree's row was deleted; the
+        // sweep must flag it and leave live worktrees' sessions alone.
+        let known: HashSet<i64> = [312, 313, 318].into_iter().collect();
+        assert_eq!(orphan_sessions(&[312, 317, 318], &known), vec![317]);
+        assert!(orphan_sessions(&[312, 313], &known).is_empty());
+    }
 
     #[test]
     fn selection_prompt_is_needs_input_even_when_changed() {

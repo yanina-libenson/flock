@@ -142,6 +142,12 @@ pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> AppResult<()> {
     Ok(())
 }
 
+/// Force-delete a local branch (`git branch -D`).
+pub fn delete_branch(repo: &Path, branch: &str) -> AppResult<()> {
+    run_git(repo, ["branch", "-D", branch])?;
+    Ok(())
+}
+
 /// Detect the repo's default branch (main / master / something else).
 /// Checks origin/HEAD first, then falls back to common names.
 pub fn detect_default_branch(repo: &Path) -> AppResult<String> {
