@@ -1031,44 +1031,39 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool, agent: &str) -> Str
     } else {
         "The Flock MCP tools could not be auto-wired. Ask the user to enable Remote access in Flock settings and add the Flock MCP, then restart you."
     };
-    let choosing = if agent == AGENT_CODEX {
-        format!(
-            "Choosing agent/model/effort (ALWAYS explicit on task_create — never rely \
-on the default, it changes over time and task_create rejects calls without `model` or \
-`effort`, or `agent`): you are running as Codex — usually because the Claude account is \
-out of credit — so recommend `agent: \"codex\"` unless the user asks for Claude, and \
-always pass it explicitly. For a Codex agent, `model` is \
-`default` (Codex's configured default model, the right choice most of the time) or one \
-of {models}; `effort` is `default` or one of `low`/`medium`/`high`/`xhigh`/`max`. Use \
-`low`/`medium` effort for mechanical, well-specified work (renames, formatting, \
-boilerplate), `medium` for most everyday features and fixes, and `high`/`xhigh` for \
-hard, ambiguous, high-stakes or security-sensitive work. When unsure, pick `default` + \
-`medium` explicitly. Pass `agent: \"claude\"` only when the user asks for a Claude \
-agent — then use Claude models (`haiku`/`sonnet`/`opus`) and efforts \
-(`low`…`max`).",
-            models = CODEX_MODELS
-                .iter()
-                .filter(|m| **m != "default")
-                .map(|m| format!("`{m}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+    let provider_default = if agent == AGENT_CODEX {
+        "You are running as Codex, so DEFAULT to `codex`; use `claude` only if the user \
+asks for Claude."
     } else {
-        "Choosing agent/model/effort (ALWAYS explicit on task_create — never rely on the default, \
-it changes over time and task_create rejects calls without `agent`, `model` or `effort`): \
-recommend `agent: \"claude\"` unless the user asks for Codex (e.g. Claude is out of \
-credit), and always pass it explicitly. For a Claude agent, use `haiku` for \
-mechanical, well-specified work — renames, formatting, boilerplate, simple scripted \
-changes — it's the cheapest and fastest. Use `sonnet` for most everyday feature work, \
-bug fixes, and typical PRs. Use `opus` with `effort: \"high\"` or `\"xhigh\"` for hard \
-architecture decisions, ambiguous or high-stakes changes, security-sensitive work, or \
-anything you'd want a second, careful pass on. `effort` is required too: \
-`low`/`medium` for mechanical work, `medium`/`high` for everyday work. When unsure, \
-pick `sonnet` + `medium` explicitly rather than omitting. If the user asks for Codex, \
-pass `agent: \"codex\"` and use a Codex `model` (`default` or a `gpt-…` id) and \
-effort (`default` or `low`…`max`)."
-            .to_string()
+        "DEFAULT to `claude`; use `codex` ONLY if the user explicitly asks for Codex or \
+tells you the Claude account is out of credit."
     };
+    let codex_models = CODEX_MODELS
+        .iter()
+        .filter(|m| **m != "default")
+        .map(|m| format!("`{m}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let choosing = format!(
+        "Choosing agent/model/effort — `agent`, `model` and `effort` are ALL REQUIRED on \
+every task_create (task_create rejects a call missing any of them; never rely on a \
+default, it changes over time). Decide in this order:\n\n\
+1. AGENT (provider). {provider_default} Codex only works in Thanx-profile repos. Never \
+switch provider on your own initiative (e.g. not for a \"second opinion\").\n\n\
+2. CLAUDE agent — pick the FIRST row that fits (model / effort):\n\
+- Mechanical, fully specified (renames, formatting, boilerplate, dependency bumps, scripted edits): haiku / low\n\
+- Small, well-scoped fix or feature with a clear spec, few files: sonnet / medium\n\
+- Typical feature or bug needing some investigation, multi-file: sonnet / high\n\
+- Ambiguous requirements, architecture/design decisions, cross-cutting refactors, DB migrations, security-sensitive work, production data, payments/money: opus / high\n\
+- Hardest or highest-stakes (subtle concurrency/data-integrity, a previous attempt failed, or the user says \"be extra careful\"): opus / xhigh\n\
+Use `fable` ONLY when the user explicitly asks for it — never pick it yourself. Use \
+effort `max` only when the user asks. When unsure between two rows, pick the higher one.\n\n\
+3. CODEX agent — `model`: `default` almost always; a specific id ({codex_models}) ONLY \
+if the user names it. `effort` by difficulty: mechanical → low, small well-scoped → \
+medium, typical multi-file → high, ambiguous/high-stakes → xhigh; `max` only if the \
+user asks. When unsure between two, pick the higher one. A Codex agent can't take a \
+Claude model/effort and vice versa."
+    );
     format!(
         "You are an ORCHESTRATOR session in Flock. You don't ship code yourself — \
 you direct a fleet of coding agents (Claude Code or Codex), each working in its own git worktree/branch \
@@ -1800,7 +1795,7 @@ mod tests {
     fn orchestrator_prompt_tells_it_to_always_pass_a_model() {
         let sys = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CLAUDE);
         assert!(sys.contains("task_create(repo, prompt, agent, model, effort,"));
-        assert!(sys.contains("ALWAYS explicit on task_create"));
+        assert!(sys.contains("ALL REQUIRED on every task_create"));
         assert!(!sys.contains("omit for the default"));
     }
 
@@ -1852,19 +1847,27 @@ mod tests {
         let claude = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CLAUDE);
         assert!(claude.contains("task_create(repo, prompt, agent, model, effort, confirm_cross_account?)"));
         assert!(claude.contains("`agent`, `model` and `effort` are ALL REQUIRED"));
-        assert!(claude.contains("recommend `agent: \"claude\"` unless the user asks for Codex"));
         assert!(!claude.contains("omit it"));
         let codex = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CODEX);
         assert!(codex.contains("task_create(repo, prompt, agent, model, effort, confirm_cross_account?)"));
         assert!(codex.contains("`agent`, `model` and `effort` are ALL REQUIRED"));
-        assert!(codex.contains("recommend `agent: \"codex\"` unless the user asks for Claude"));
         assert!(!codex.contains("omit it"));
-        assert!(codex.contains("you are running as Codex"));
+        assert!(codex.contains("You are running as Codex"));
         assert!(codex.contains("`gpt-6.1-sol`"));
-        assert!(codex.contains("ALWAYS explicit on task_create"));
+        assert!(codex.contains("ALL REQUIRED on every task_create"));
         // The shared parts (task_remove gate etc.) are in both.
         assert!(codex.contains("ONLY call this when the user explicitly asks"));
-        assert!(!codex.contains("use `haiku` for"));
+        // Both variants carry the full decision rules.
+        for sys in [&claude, &codex] {
+            assert!(sys.contains("Use `fable` ONLY when the user explicitly asks"));
+            assert!(sys.contains("Use effort `max` only when the user asks"));
+            assert!(sys.contains("Never switch provider"));
+            assert!(sys.contains("pick the FIRST row that fits"));
+            assert!(sys.contains("opus / xhigh"));
+            assert!(sys.contains("ALL REQUIRED"));
+        }
+        assert!(claude.contains("DEFAULT to `claude`; use `codex` ONLY if the user explicitly asks"));
+        assert!(codex.contains("DEFAULT to `codex`; use `claude` only if the user asks for Claude"));
     }
 
     #[test]
