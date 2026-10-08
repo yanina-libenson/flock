@@ -359,8 +359,8 @@ struct CreateTaskBody {
     /// Claude `--effort` override. Validated against `commands::ALLOWED_EFFORTS`.
     /// Required when `parent_id` is set (orchestrator-spawned); optional otherwise.
     effort: Option<String>,
-    /// `"claude"` or `"codex"`. Omitted → the spawning orchestrator's own agent
-    /// (see `commands::resolve_child_agent`); Codex only in Thanx repos.
+    /// `"claude"` or `"codex"`. Required when `parent_id` is set
+    /// (orchestrator-spawned); omitted otherwise → Claude. Codex only in Thanx repos.
     agent: Option<String>,
     /// Explicit override for the cross-account safety check: when `parent_id`
     /// is set and the target repo resolves to a different Claude account than
@@ -395,7 +395,9 @@ async fn create_task(State(ctx): State<ApiCtx>, Json(body): Json<CreateTaskBody>
         body.parent_id,
         body.model.as_deref(),
         body.effort.as_deref(),
-    ) {
+    )
+    .and_then(|()| crate::commands::require_explicit_agent(body.parent_id, body.agent.as_deref()))
+    {
         return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
     }
 

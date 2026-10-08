@@ -104,7 +104,7 @@ const TOOLS = [
           type: "string",
           enum: ["claude", "codex"],
           description:
-            "Which coding agent runs the task. Omit to spawn the same agent you (the calling orchestrator) are running as — a Codex orchestrator spawns Codex agents by default. Codex is only allowed in repos on the Thanx profile; Flock refuses otherwise.",
+            "REQUIRED. Which coding agent runs the task: \"claude\" or \"codex\". Always choose explicitly — there is no default (it is not inherited from the calling orchestrator). Codex is only allowed in repos on the Thanx profile; Flock refuses otherwise.",
         },
         confirm_cross_account: {
           type: "boolean",
@@ -112,7 +112,7 @@ const TOOLS = [
             "Flock refuses to create a task whose repo resolves to a different account than you (the calling orchestrator) are running under — this catches spawning into a mismatched/wrong repo. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
         },
       },
-      required: ["repo", "prompt", "model", "effort"],
+      required: ["repo", "prompt", "agent", "model", "effort"],
     },
     handler: (a) =>
       apiCall("POST", "/api/tasks", {
