@@ -1056,6 +1056,138 @@ fn utf8_chunks(s: &str, max: usize) -> Vec<&str> {
     out
 }
 
+/// tmux args (after `-L socket`) that type `text` verbatim into `target`. tmux
+/// reads an argument ending in `;` as a command separator and drops that `;`,
+/// even with `-l` — so a message (or a chunk of one) ending in `;` would lose
+/// it. Trailing semicolons go as hex bytes (`-H 3b`) in a chained `send-keys`.
+fn send_keys_literal_args<'a>(target: &'a str, text: &'a str) -> Vec<&'a str> {
+    let body = text.trim_end_matches(';');
+    let semis = text.len() - body.len();
+    let mut args = vec!["send-keys", "-t", target];
+    if semis == 0 || !body.is_empty() {
+        args.extend(["-l", "--", body]);
+        if semis > 0 {
+            args.extend([";", "send-keys", "-t", target]);
+        }
+    }
+    if semis > 0 {
+        args.push("-H");
+        args.extend(std::iter::repeat_n("3b", semis));
+    }
+    args
+}
+
+/// Press the submit key(s) for `agent`. Codex reads fast typed input as a
+/// paste: it buffers the text until its next frame, and for 120ms after the
+/// last pasted char (`PASTE_ENTER_SUPPRESS_WINDOW`, codex-rs `paste_burst.rs`)
+/// it turns Enter into a newline instead of a submit. Both clocks run on
+/// Codex's side and lag tmux while a turn renders, so a fixed gap left messages
+/// typed but unsent (and the next message appended to them). Any non-text key
+/// makes Codex apply the buffered paste and closes that window, so `End` (a
+/// no-op: the cursor is already at the end) goes first.
+fn tmux_press_submit(worktree_id: i64, agent: &str) -> bool {
+    (agent != crate::db::AGENT_CODEX || tmux_send(worktree_id, false, "End"))
+        && tmux_send(worktree_id, false, "Enter")
+}
+
+/// After each Enter, how long to give the TUI to redraw before checking it took.
+const SUBMIT_CHECK_DELAY: Duration = Duration::from_millis(400);
+/// Extra Enters to press while the message is still sitting in the composer.
+const SUBMIT_RETRIES: usize = 3;
+/// Trailing non-whitespace chars of the message that must sit right before the
+/// cursor for it to count as unsent.
+const SUBMIT_NEEDLE_CHARS: usize = 32;
+
+/// Press Enter to submit what was just typed (after a short gap so the TUI can
+/// ingest it), then confirm it left the composer, pressing Enter again
+/// (bounded) while it hasn't. `typed` is the literal text just sent; `None` (a
+/// key name) skips the check. Returns false only if tmux refused a keystroke.
+pub fn tmux_submit(worktree_id: i64, agent: &str, typed: Option<&str>) -> bool {
+    std::thread::sleep(Duration::from_millis(120));
+    if !tmux_press_submit(worktree_id, agent) {
+        return false;
+    }
+    let Some(typed) = typed else {
+        return true;
+    };
+    for _ in 0..SUBMIT_RETRIES {
+        std::thread::sleep(SUBMIT_CHECK_DELAY);
+        let Some((screen, cursor)) = tmux_capture_with_cursor(worktree_id) else {
+            return true;
+        };
+        if !composer_holds(&screen, cursor, typed) {
+            return true;
+        }
+        eprintln!("flock: worktree {worktree_id} input still in composer; pressing Enter again");
+        if !tmux_press_submit(worktree_id, agent) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The visible pane plus the cursor's (x, y), from one tmux call so both
+/// describe the same frame.
+fn tmux_capture_with_cursor(worktree_id: i64) -> Option<(String, (usize, usize))> {
+    let bin = tmux_bin()?;
+    let name = tmux_session_name(worktree_id);
+    let out = std::process::Command::new(bin)
+        .args([
+            "-L",
+            TMUX_SOCKET,
+            "capture-pane",
+            "-p",
+            "-t",
+            &name,
+            ";",
+            "display-message",
+            "-p",
+            "-t",
+            &name,
+            "#{cursor_x} #{cursor_y}",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (screen, cursor) = text.trim_end_matches('\n').rsplit_once('\n')?;
+    let (x, y) = cursor.split_once(' ')?;
+    Some((screen.to_string(), (x.parse().ok()?, y.parse().ok()?)))
+}
+
+/// Is `typed` still unsent in the agent's input box? Both Claude and Codex
+/// park the cursor at the end of the composer text, so: does the screen up to
+/// the cursor end with the message's tail? Whitespace is ignored because the
+/// TUIs word-wrap and `capture-pane` drops the space at each wrap (and a
+/// swallowed Enter adds a newline). Also true when the text right before the
+/// cursor is a collapsed paste (`[Pasted Content N chars]`,
+/// `[Pasted text #N …]`), which hides the text itself. The cursor row is cut at
+/// `x` chars — wide chars make that keep a little extra, never lose text.
+fn composer_holds(screen: &str, (x, y): (usize, usize), typed: &str) -> bool {
+    let before: String = screen
+        .lines()
+        .take(y + 1)
+        .enumerate()
+        .flat_map(|(i, l)| l.chars().take(if i == y { x } else { usize::MAX }))
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let typed: Vec<char> = typed.chars().filter(|c| !c.is_whitespace()).collect();
+    if typed.is_empty() {
+        return false;
+    }
+    let needle: String = typed[typed.len().saturating_sub(SUBMIT_NEEDLE_CHARS)..]
+        .iter()
+        .collect();
+    if before.ends_with(&needle) {
+        return true;
+    }
+    before
+        .rfind("[Pasted")
+        .is_some_and(|i| before[i..].ends_with(']') && before[i..].matches(']').count() == 1)
+}
+
 /// Send input to a worktree's tmux session. Literal text goes through
 /// `send-keys -l` (typed verbatim), in `SEND_CHUNK_BYTES` pieces when long so
 /// Claude Code doesn't treat it as a paste; otherwise `payload` is a tmux key
@@ -1068,12 +1200,12 @@ pub fn tmux_send(worktree_id: i64, literal: bool, payload: &str) -> bool {
     };
     let name = tmux_session_name(worktree_id);
     let send = |literal: bool, text: &str| {
-        let mut args: Vec<&str> = vec!["-L", TMUX_SOCKET, "send-keys", "-t", name.as_str()];
+        let mut args: Vec<&str> = vec!["-L", TMUX_SOCKET];
         if literal {
-            args.push("-l");
-            args.push("--");
+            args.extend(send_keys_literal_args(&name, text));
+        } else {
+            args.extend(["send-keys", "-t", name.as_str(), text]);
         }
-        args.push(text);
         std::process::Command::new(bin)
             .args(&args)
             .output()
@@ -1108,7 +1240,10 @@ pub fn tmux_available() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{claude_invocation, codex_invocation, utf8_chunks, SEND_CHUNK_BYTES};
+    use super::{
+        claude_invocation, codex_invocation, composer_holds, send_keys_literal_args,
+        utf8_chunks, SEND_CHUNK_BYTES,
+    };
 
     #[test]
     fn utf8_chunks_empty_and_short() {
@@ -1134,6 +1269,82 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn literal_args_send_trailing_semicolons_as_hex() {
+        assert_eq!(
+            send_keys_literal_args("t", "a;b c"),
+            vec!["send-keys", "-t", "t", "-l", "--", "a;b c"]
+        );
+        assert_eq!(send_keys_literal_args("t", ""), vec!["send-keys", "-t", "t", "-l", "--", ""]);
+        assert_eq!(
+            send_keys_literal_args("t", "x\\;;").join(" "),
+            "send-keys -t t -l -- x\\ ; send-keys -t t -H 3b 3b"
+        );
+        assert_eq!(send_keys_literal_args("t", ";"), vec!["send-keys", "-t", "t", "-H", "3b"]);
+    }
+
+    // Screens below are trimmed captures from real Codex 0.160 / Claude Code
+    // 2.1 sessions in an 80-column pane.
+    const CODEX_STUCK: &str = "\
+› Run the shell command: sleep 90 && echo done. Then reply DONE.
+
+• Working (19s • esc to interrupt) · 1 background terminal running
+
+› busy test A: puertos 10482 flag OFF sigue 046f493d. Then check
+  tests/lint en DB (v2.3, #17);
+
+  GPT-6-Astra high · /private/tmp/proj
+  tab to queue message";
+
+    #[test]
+    fn codex_text_before_cursor_is_unsent() {
+        let typed = "busy test A: puertos 10482 flag OFF sigue 046f493d. Then check tests/lint en DB (v2.3, #17);";
+        assert!(composer_holds(CODEX_STUCK, (31, 5), typed));
+        // A swallowed Enter leaves the cursor on a fresh line below the text.
+        let newline = CODEX_STUCK.replace("#17);\n", "#17);\n\n");
+        assert!(composer_holds(&newline, (2, 6), typed));
+        // capture-pane drops the space where the TUI wrapped the line.
+        assert!(composer_holds(CODEX_STUCK, (31, 5), &typed.replace("check tests", "check  tests")));
+        // Only the tail counts: same text earlier on screen, cursor elsewhere.
+        assert!(!composer_holds(CODEX_STUCK, (10, 7), typed));
+    }
+
+    #[test]
+    fn codex_collapsed_paste_before_cursor_is_unsent() {
+        let screen = "› [Pasted Content 2342 chars]\n\n  GPT-6-Astra high · /p\n  tab to queue message";
+        assert!(composer_holds(screen, (29, 0), &"x".repeat(2342)));
+    }
+
+    #[test]
+    fn submitted_message_is_not_unsent() {
+        let typed = "Reply with only the word OK. test 1 idle short 10482.";
+        // Codex: echoed in the transcript, composer back to its placeholder.
+        let codex = format!("› {typed}\n\n• OK\n\n› Ask Codex to do anything\n\n  ? for shortcuts");
+        assert!(!composer_holds(&codex, (2, 4), typed));
+        // Claude: echoed above an empty `❯` input line.
+        let claude = format!(
+            "❯ {typed}\n\n⏺ OK\n\n{rule}\n❯\u{00a0}\n{rule}\n  ⏵⏵ auto mode on",
+            rule = "─".repeat(80)
+        );
+        assert!(!composer_holds(&claude, (2, 5), typed));
+        // A selection menu whose option happens to contain a short message.
+        let menu = "  Allow this command?\n› 1. Yes, proceed (y)\n  2. No (esc)";
+        assert!(!composer_holds(menu, (0, 1), "1"));
+        assert!(!composer_holds(menu, (0, 1), ""));
+    }
+
+    #[test]
+    fn claude_text_before_cursor_is_unsent() {
+        let rule = "─".repeat(80);
+        // A long input scrolls: `❯` marks the top visible row, not the start.
+        let screen = format!(
+            "{rule}\n❯\u{00a0}046f000b tests/lint en DB (11.4); item12: puertos 10492 flag OFF sigue\n  046f000c tests/lint en DB (12.5); item13: puertos 10493 flag OFF sigue\n  046f000d t\n{rule}\n  ⏵⏵ auto mode on"
+        );
+        let typed = "item12: puertos 10492 flag OFF sigue 046f000c tests/lint en DB (12.5); item13: puertos 10493 flag OFF sigue 046f000d t";
+        assert!(composer_holds(&screen, (12, 3), typed));
+        assert!(!composer_holds(&screen, (2, 1), typed));
     }
 
     #[test]
