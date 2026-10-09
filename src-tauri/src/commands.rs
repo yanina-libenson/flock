@@ -311,6 +311,35 @@ pub fn resolve_child_agent(explicit: Option<&str>) -> AppResult<String> {
     Ok(agent.to_string())
 }
 
+/// Settle the agent a task (or every task a schedule fires) runs, and validate
+/// everything that depends on it: `model`/`effort` must suit that agent, and
+/// Codex is only allowed in Thanx-profile repos. Shared by `start_task_core`
+/// and `schedule_create_core` so both refuse before creating anything.
+fn settle_agent(
+    cfg: &env_profiles::EnvConfig,
+    repo: &Repo,
+    agent: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> AppResult<String> {
+    let agent = resolve_child_agent(agent)?;
+    if let Some(m) = model {
+        validate_model_for(&agent, m)?;
+    }
+    if let Some(e) = effort {
+        validate_effort_for(&agent, e)?;
+    }
+    if agent == AGENT_CODEX && !env_profiles::codex_allowed(cfg, None, &repo.path) {
+        return Err(AppError::msg(format!(
+            "refusing: Codex agents are only allowed in repos on the {} profile, and repo {:?} \
+             isn't one. Pass agent: \"claude\" to spawn a Claude agent there instead.",
+            env_profiles::CODEX_PROFILE,
+            repo.name
+        )));
+    }
+    Ok(agent)
+}
+
 #[tauri::command]
 pub fn worktree_create(
     state: State<'_, AppState>,
@@ -789,21 +818,13 @@ pub fn start_task_core(
     check_cross_account(&state.db, parent_id, confirm_cross_account, &repo)?;
     // Settle the agent and validate everything that depends on it before any
     // git work, so a refused task leaves no worktree behind.
-    let agent = resolve_child_agent(agent.as_deref())?;
-    if let Some(m) = model.as_deref() {
-        validate_model_for(&agent, m)?;
-    }
-    if let Some(e) = effort.as_deref() {
-        validate_effort_for(&agent, e)?;
-    }
-    if agent == AGENT_CODEX && !env_profiles::codex_allowed(&env_profiles::load(), None, &repo.path) {
-        return Err(AppError::msg(format!(
-            "refusing: Codex agents are only allowed in repos on the {} profile, and repo {:?} \
-             isn't one. Pass agent: \"claude\" to spawn a Claude agent there instead.",
-            env_profiles::CODEX_PROFILE,
-            repo.name
-        )));
-    }
+    let agent = settle_agent(
+        &env_profiles::load(),
+        &repo,
+        agent.as_deref(),
+        model.as_deref(),
+        effort.as_deref(),
+    )?;
     let leaf = branch.unwrap_or_else(|| branch_from_prompt(prompt));
     // Create the worktree, retrying with a numeric suffix on branch collision
     // (the loop caller can't know what names are already taken).
@@ -1615,6 +1636,9 @@ pub struct CreateScheduleArgs {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    /// `"claude"` (default) or `"codex"` (Thanx repos only).
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Create a scheduled task. Shared validation/insert used by the command and
@@ -1628,21 +1652,19 @@ pub fn schedule_create_core(
     title: Option<&str>,
     model: Option<&str>,
     effort: Option<&str>,
+    agent: Option<&str>,
     parent_id: Option<i64>,
     confirm_cross_account: bool,
 ) -> AppResult<Schedule> {
+    require_explicit_model_and_effort(parent_id, model, effort)?;
+    require_explicit_agent(parent_id, agent)?;
     let repo = db.get_repo(repo_id)?;
     check_cross_account(db, parent_id, confirm_cross_account, &repo)?;
     let parsed = schedule::parse_spec(spec)
         .ok_or_else(|| AppError::msg("invalid spec; use '@every 30m' or 'HH:MM'"))?;
-    if let Some(m) = model {
-        validate_model(m)?;
-    }
-    if let Some(e) = effort {
-        validate_effort(e)?;
-    }
+    let agent = settle_agent(&env_profiles::load(), &repo, agent, model, effort)?;
     let next = schedule::initial_next_run(&parsed, now_unix());
-    db.insert_schedule(repo_id, prompt, spec, title, next, model, effort, parent_id)
+    db.insert_schedule(repo_id, prompt, spec, title, next, model, effort, parent_id, &agent)
 }
 
 #[tauri::command]
@@ -1655,6 +1677,7 @@ pub fn schedule_create(state: State<'_, AppState>, args: CreateScheduleArgs) -> 
         args.title.as_deref(),
         args.model.as_deref(),
         args.effort.as_deref(),
+        args.agent.as_deref(),
         None,
         false,
     )
@@ -1701,9 +1724,9 @@ pub fn schedule_run_now(
         s.parent_id,
         s.model.clone(),
         s.effort.clone(),
-        // Schedules store Claude-validated models and have no agent column,
-        // so their tasks stay Claude even under a Codex orchestrator.
-        Some(crate::db::AGENT_CLAUDE.to_string()),
+        // The agent the schedule was created with (its model/effort were
+        // validated against it).
+        Some(s.agent.clone()),
         // The cross-account gate was already decided at schedule_create time;
         // replaying it on every fire would silently re-block a schedule that
         // was deliberately confirmed once. parent_id is still passed through
@@ -1822,6 +1845,88 @@ mod tests {
         assert_eq!(r(Some("claude")).unwrap(), "claude");
         assert_eq!(r(Some("codex")).unwrap(), "codex");
         assert!(r(Some("gemini")).is_err());
+    }
+
+    fn temp_db() -> crate::db::Db {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "flock-cmd-test-{}-{}.db",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        let _ = std::fs::remove_file(&p);
+        crate::db::Db::open_at(&p).expect("open temp db")
+    }
+
+    #[test]
+    fn orchestrator_schedule_requires_explicit_agent() {
+        let db = temp_db();
+        let repo = db.insert_repo("acme", "/tmp/acme-sched-cmd").unwrap();
+        let orch = db
+            .insert_worktree(
+                repo.id, "kyoto", "/tmp/orch-sched-cmd", None, "bypassPermissions", "orchestrator",
+                None, None, None, None, "claude",
+            )
+            .unwrap();
+        let create = |agent| {
+            // confirm_cross_account: keep the machine's real env profiles out of it.
+            super::schedule_create_core(
+                &db, repo.id, "p", "@every 1h", None, Some("sonnet"), Some("medium"), agent,
+                Some(orch.id), true,
+            )
+        };
+        let err = create(None).unwrap_err().to_string();
+        assert!(err.contains("agent is required: pass \"claude\" or \"codex\" explicitly"), "{err}");
+        assert!(db.list_schedules().unwrap().is_empty());
+        assert_eq!(create(Some("claude")).unwrap().agent, "claude");
+    }
+
+    #[test]
+    fn desktop_schedule_defaults_to_claude() {
+        let db = temp_db();
+        let repo = db.insert_repo("acme", "/tmp/acme-sched-desk").unwrap();
+        let s = super::schedule_create_core(
+            &db, repo.id, "p", "09:00", None, None, None, None, None, false,
+        )
+        .unwrap();
+        assert_eq!(s.agent, "claude");
+        // Claude schedules still reject Codex-only values.
+        assert!(super::schedule_create_core(
+            &db, repo.id, "p", "09:00", None, Some("default"), None, None, None, false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn settle_agent_validates_model_effort_and_thanx_only_codex() {
+        use crate::env_profiles::{Binding, EnvConfig, Environment};
+        let cfg = EnvConfig {
+            environments: vec![Environment { name: "Thanx".into(), vars: Default::default() }],
+            bindings: vec![Binding { path: "/tmp/Thanx".into(), env: "Thanx".into() }],
+        };
+        let repo = |path: &str| crate::db::Repo {
+            id: 1,
+            name: "r".into(),
+            path: path.into(),
+            created_at: 0,
+        };
+        let thanx = repo("/tmp/Thanx/nexus");
+        let s = |r: &crate::db::Repo, a, m, e| super::settle_agent(&cfg, r, a, m, e);
+        // Codex with Codex model/effort → OK.
+        assert_eq!(s(&thanx, Some("codex"), Some("default"), Some("high")).unwrap(), "codex");
+        assert_eq!(s(&thanx, Some("codex"), Some("gpt-5.5"), Some("default")).unwrap(), "codex");
+        // Codex with a Claude-only model/effort → refused.
+        let err = s(&thanx, Some("codex"), Some("sonnet"), Some("high")).unwrap_err().to_string();
+        assert!(err.contains("for a Codex agent"), "{err}");
+        // Claude rejects Codex-only values.
+        assert!(s(&thanx, Some("claude"), Some("gpt-5.5"), Some("high")).is_err());
+        assert!(s(&thanx, Some("claude"), Some("sonnet"), Some("default")).is_err());
+        // Codex only on Thanx-profile repos.
+        let err = s(&repo("/tmp/Personal/ixi"), Some("codex"), Some("default"), Some("high"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Codex agents are only allowed in repos on the Thanx profile"), "{err}");
+        assert_eq!(s(&repo("/tmp/Personal/ixi"), None, Some("sonnet"), Some("high")).unwrap(), "claude");
     }
 
     #[test]

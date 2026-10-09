@@ -31,8 +31,8 @@ with `FLOCK_TOKEN` / `FLOCK_API_URL` env vars if needed.
 | `task_status`     | Counts of agents by status                                          |
 | `task_read`       | Read an agent's conversation transcript (follow what a child is doing) |
 | `task_input`      | Send text or a key (enter/escape/tab/arrows/ctrl-c) to an agent     |
-| `schedule_create` | Schedule a recurring task (`@every 30m` / `@every 1d` / `HH:MM`)    |
-| `schedule_list`   | List scheduled tasks                                                |
+| `schedule_create` | Schedule a recurring task (`@every 30m` / `@every 1d` / `HH:MM`; `agent`, `model`, `effort` required) |
+| `schedule_list`   | List scheduled tasks (with each one's agent/model/effort)          |
 | `kb_search`       | Search the knowledge base (Obsidian vault) — your durable memory    |
 | `kb_read`         | Read a note by vault-relative path                                  |
 | `kb_list`         | List notes, optionally filtered by a path prefix                    |

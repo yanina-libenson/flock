@@ -125,8 +125,8 @@ pub fn spawn(app: AppHandle) {
                 s.parent_id,
                 s.model.clone(),
                 s.effort.clone(),
-                // Claude, as in schedule_run_now (schedules carry Claude models).
-                Some(crate::db::AGENT_CLAUDE.to_string()),
+                // The schedule's own agent, as in schedule_run_now.
+                Some(s.agent.clone()),
                 // Already gated at schedule_create time; see schedule_run_now.
                 true,
             ) {

@@ -236,13 +236,30 @@ const TOOLS = [
             "claude-sonnet-5",
             "claude-haiku-4-5-20251001",
             "claude-fable-5-1",
+            // Codex agents (agent: "codex"). "default" = Codex's configured model.
+            "default",
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
           ],
-          description: "REQUIRED. Model applied to every task this schedule fires. Always choose explicitly — never rely on the default, it changes over time.",
+          description:
+            "REQUIRED. Model applied to every task this schedule fires; must match the agent. Claude agents: an alias or full Claude model id — haiku = mechanical, sonnet = scoped/typical work, opus = ambiguous/high-stakes; fable ONLY if the user asks. Codex agents: \"default\" almost always; a gpt-… id only if the user names it. Always explicit.",
         },
         effort: {
           type: "string",
-          enum: ["low", "medium", "high", "xhigh", "max"],
-          description: "REQUIRED. Reasoning effort applied to every task this schedule fires. Always choose explicitly — never rely on the default.",
+          enum: ["low", "medium", "high", "xhigh", "max", "default"],
+          description: "REQUIRED. Reasoning effort applied to every task this schedule fires. haiku→low; small scoped sonnet→medium; typical multi-file sonnet→high; opus→high, or xhigh for the hardest/highest-stakes; Codex: same difficulty ladder. `max` only if the user asks. If unsure, pick the higher one. \"default\" is accepted for Codex agents only.",
+        },
+        agent: {
+          type: "string",
+          enum: ["claude", "codex"],
+          description:
+            "REQUIRED. \"claude\" or \"codex\" — the agent every fired task runs. Default claude; codex ONLY if the user asks for it, Claude is out of credit, or you are running as Codex. Never switch provider on your own initiative. Codex is only allowed in repos on the Thanx profile; Flock refuses otherwise.",
         },
         confirm_cross_account: {
           type: "boolean",
@@ -250,7 +267,7 @@ const TOOLS = [
             "Flock refuses to create a schedule whose repo resolves to a different Claude account than you (the calling orchestrator) are running under. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
         },
       },
-      required: ["repo", "prompt", "spec", "model", "effort"],
+      required: ["repo", "prompt", "spec", "agent", "model", "effort"],
     },
     handler: (a) =>
       apiCall("POST", "/api/schedules", {
@@ -260,6 +277,7 @@ const TOOLS = [
         title: a.title,
         model: a.model,
         effort: a.effort,
+        agent: a.agent,
         confirm_cross_account: a.confirm_cross_account,
         // Self-identify as the parent, mirroring task_create, so fired tasks
         // link into this orchestrator's fleet and the cross-account guard has
