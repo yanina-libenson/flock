@@ -1508,7 +1508,8 @@ pub enum DeliverError {
 ///
 /// `literal` types `payload` verbatim; otherwise `payload` is a tmux key name.
 /// `submit` presses Enter after literal text (a small gap lets the TUI ingest
-/// the text first), turning the input into a submitted turn.
+/// the text first), turning the input into a submitted turn, and presses it
+/// again if the text is still in the composer (`pty::tmux_submit`).
 pub fn deliver_input(
     state: &AppState,
     id: i64,
@@ -1571,8 +1572,9 @@ pub fn deliver_input(
 
     let sent = pty::tmux_send(id, literal, payload);
     let sent = if sent && submit {
-        std::thread::sleep(Duration::from_millis(120));
-        pty::tmux_send(id, false, "Enter")
+        // Codex needs an extra key before Enter (see `pty::tmux_press_submit`).
+        let agent = state.db.get_worktree(id).map(|w| w.agent).unwrap_or_default();
+        pty::tmux_submit(id, &agent, literal.then_some(payload))
     } else {
         sent
     };
