@@ -9,6 +9,7 @@ mod handoff;
 mod kb;
 mod mcp;
 mod monitor;
+mod notify;
 mod pr;
 mod pty;
 mod schedule;

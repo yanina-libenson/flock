@@ -12,7 +12,12 @@ use tauri::{AppHandle, Emitter};
 
 /// Dedicated tmux socket name — isolates Flock's sessions from any tmux the
 /// user runs in Terminal.app. All tmux invocations share this socket + config.
+#[cfg(not(test))]
 const TMUX_SOCKET: &str = "flock";
+/// Tests get their own tmux server, so they can never touch the user's live
+/// `flock-<id>` sessions.
+#[cfg(test)]
+const TMUX_SOCKET: &str = "flock-test";
 
 /// tmux config Flock ships. Rewritten on every launch so edits by the user
 /// don't accumulate drift. Mouse on is the big one — without it scroll wheel
