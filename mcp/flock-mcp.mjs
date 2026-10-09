@@ -93,18 +93,18 @@ const TOOLS = [
             "gpt-5.5",
           ],
           description:
-            "REQUIRED. Model for this agent's session; must match the agent. Claude agents: an alias or full Claude model id — haiku = mechanical work, sonnet = everyday features/fixes, opus = hard/ambiguous/high-stakes. Codex agents: \"default\" (Codex's configured model) or a gpt-… id. Always choose explicitly — never rely on the default, it changes over time.",
+            "REQUIRED. Model for this agent's session; must match the agent. Claude agents: an alias or full Claude model id — haiku = mechanical, sonnet = scoped/typical work, opus = ambiguous/high-stakes; fable ONLY if the user asks. Codex agents: \"default\" almost always; a gpt-… id only if the user names it. Always explicit.",
         },
         effort: {
           type: "string",
           enum: ["low", "medium", "high", "xhigh", "max", "default"],
-          description: "REQUIRED. Reasoning effort for this agent's session. Always choose explicitly (low/medium for mechanical, medium/high for everyday, high/xhigh for hard work). \"default\" is accepted for Codex agents only.",
+          description: "REQUIRED. Reasoning effort for this agent's session. haiku→low; small scoped sonnet→medium; typical multi-file sonnet→high; opus→high, or xhigh for the hardest/highest-stakes; Codex: same difficulty ladder. `max` only if the user asks. If unsure, pick the higher one. \"default\" is accepted for Codex agents only.",
         },
         agent: {
           type: "string",
           enum: ["claude", "codex"],
           description:
-            "Which coding agent runs the task. Omit to spawn the same agent you (the calling orchestrator) are running as — a Codex orchestrator spawns Codex agents by default. Codex is only allowed in repos on the Thanx profile; Flock refuses otherwise.",
+            "REQUIRED. \"claude\" or \"codex\". Default claude; codex ONLY if the user asks for it, Claude is out of credit, or you are running as Codex. Never switch provider on your own initiative. Codex is only allowed in repos on the Thanx profile; Flock refuses otherwise.",
         },
         confirm_cross_account: {
           type: "boolean",
@@ -112,7 +112,7 @@ const TOOLS = [
             "Flock refuses to create a task whose repo resolves to a different account than you (the calling orchestrator) are running under — this catches spawning into a mismatched/wrong repo. If you deliberately intend to spawn across accounts, set this to true to override. Default false.",
         },
       },
-      required: ["repo", "prompt", "model", "effort"],
+      required: ["repo", "prompt", "agent", "model", "effort"],
     },
     handler: (a) =>
       apiCall("POST", "/api/tasks", {

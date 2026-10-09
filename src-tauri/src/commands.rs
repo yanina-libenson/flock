@@ -218,6 +218,18 @@ pub fn require_explicit_model_and_effort(
     Ok(())
 }
 
+/// Same rule for the agent: an orchestrator (`parent_id` set) must say whether
+/// a child is Claude or Codex rather than inheriting its own. Human/API callers
+/// without a parent keep the Claude default.
+pub fn require_explicit_agent(parent_id: Option<i64>, agent: Option<&str>) -> AppResult<()> {
+    if parent_id.is_some() && agent.map(str::trim).unwrap_or("").is_empty() {
+        return Err(AppError::msg(
+            "agent is required: pass \"claude\" or \"codex\" explicitly",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_effort(effort: &str) -> AppResult<()> {
     if ALLOWED_EFFORTS.contains(&effort) {
         Ok(())
@@ -288,14 +300,12 @@ fn validate_effort_for(agent: &str, effort: &str) -> AppResult<()> {
     }
 }
 
-/// The agent a spawned task runs: the explicit `agent` when given, else the
-/// spawning orchestrator's own agent (a Codex orchestrator is usually running
-/// because Claude is out of credit, so its children should be Codex too), else
-/// Claude.
-pub fn resolve_child_agent(explicit: Option<&str>, parent_agent: Option<&str>) -> AppResult<String> {
+/// The agent a spawned task runs: the explicit `agent` when given, else Claude.
+/// Orchestrator-spawned tasks never reach the fallback — they're rejected
+/// earlier by `require_explicit_agent`.
+pub fn resolve_child_agent(explicit: Option<&str>) -> AppResult<String> {
     let agent = explicit
         .filter(|a| !a.trim().is_empty())
-        .or(parent_agent)
         .unwrap_or(AGENT_CLAUDE);
     validate_agent(agent)?;
     Ok(agent.to_string())
@@ -779,10 +789,7 @@ pub fn start_task_core(
     check_cross_account(&state.db, parent_id, confirm_cross_account, &repo)?;
     // Settle the agent and validate everything that depends on it before any
     // git work, so a refused task leaves no worktree behind.
-    let parent_agent = parent_id
-        .and_then(|p| state.db.get_worktree(p).ok())
-        .map(|p| p.agent);
-    let agent = resolve_child_agent(agent.as_deref(), parent_agent.as_deref())?;
+    let agent = resolve_child_agent(agent.as_deref())?;
     if let Some(m) = model.as_deref() {
         validate_model_for(&agent, m)?;
     }
@@ -1000,8 +1007,8 @@ fn write_orchestrator_mcp_config(dir: &Path, mjs: &Path) {
 
 /// The orchestrator's appended system prompt: what it is, the repos it can spawn
 /// into, and how to drive + watch its fleet via the Flock MCP tools.
-/// `agent` is the orchestrator's own agent: it decides the default `agent` for
-/// task_create and which model/effort guidance it gets. Claude receives this via
+/// `agent` is the orchestrator's own agent: it decides which recommendation
+/// and model/effort guidance it gets (task_create always takes an explicit agent). Claude receives this via
 /// `--append-system-prompt`, Codex via `developer_instructions`.
 fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool, agent: &str) -> String {
     let repo_list = if repos.is_empty() {
@@ -1015,7 +1022,7 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool, agent: &str) -> Str
     };
     let tools = if has_mcp {
         "You have the Flock MCP tools:\n\
-         - task_create(repo, prompt, model, effort, agent?, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `model` and `effort` are both REQUIRED — see \"Choosing model/effort\" below. `agent` is \"claude\" or \"codex\"; omit it to spawn the same agent you are running as. Codex agents are only allowed in repos on the Thanx profile (task_create refuses otherwise), and `model`/`effort` must be valid for the agent you spawn. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
+         - task_create(repo, prompt, agent, model, effort, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `agent`, `model` and `effort` are ALL REQUIRED — see \"Choosing agent/model/effort\" below. `agent` is \"claude\" or \"codex\"; pick it explicitly every time. Codex agents are only allowed in repos on the Thanx profile (task_create refuses otherwise), and `model`/`effort` must be valid for the agent you spawn. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
          - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's agent/model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
@@ -1024,42 +1031,39 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool, agent: &str) -> Str
     } else {
         "The Flock MCP tools could not be auto-wired. Ask the user to enable Remote access in Flock settings and add the Flock MCP, then restart you."
     };
-    let choosing = if agent == AGENT_CODEX {
-        format!(
-            "Choosing agent/model/effort (ALWAYS explicit on task_create — never rely \
-on the default, it changes over time and task_create rejects calls without `model` or \
-`effort`): you are running as Codex — usually because the Claude account is out of \
-credit — so the agents you spawn default to Codex too. For a Codex agent, `model` is \
-`default` (Codex's configured default model, the right choice most of the time) or one \
-of {models}; `effort` is `default` or one of `low`/`medium`/`high`/`xhigh`/`max`. Use \
-`low`/`medium` effort for mechanical, well-specified work (renames, formatting, \
-boilerplate), `medium` for most everyday features and fixes, and `high`/`xhigh` for \
-hard, ambiguous, high-stakes or security-sensitive work. When unsure, pick `default` + \
-`medium` explicitly. Only pass `agent: \"claude\"` when the user asks for a Claude \
-agent — then use Claude models (`haiku`/`sonnet`/`opus`) and efforts \
-(`low`…`max`).",
-            models = CODEX_MODELS
-                .iter()
-                .filter(|m| **m != "default")
-                .map(|m| format!("`{m}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+    let provider_default = if agent == AGENT_CODEX {
+        "You are running as Codex, so DEFAULT to `codex`; use `claude` only if the user \
+asks for Claude."
     } else {
-        "Choosing model/effort (ALWAYS explicit on task_create — never rely on the default, \
-it changes over time and task_create rejects calls without `model` or `effort`): use `haiku` for \
-mechanical, well-specified work — renames, formatting, boilerplate, simple scripted \
-changes — it's the cheapest and fastest. Use `sonnet` for most everyday feature work, \
-bug fixes, and typical PRs. Use `opus` with `effort: \"high\"` or `\"xhigh\"` for hard \
-architecture decisions, ambiguous or high-stakes changes, security-sensitive work, or \
-anything you'd want a second, careful pass on. `effort` is required too: \
-`low`/`medium` for mechanical work, `medium`/`high` for everyday work. When unsure, \
-pick `sonnet` + `medium` explicitly rather than omitting. Agents you spawn are Claude \
-unless you pass `agent: \"codex\"` — do that only when the user asks for Codex (e.g. \
-Claude is out of credit), and then use a Codex `model` (`default` or a `gpt-…` id) and \
-effort (`default` or `low`…`max`)."
-            .to_string()
+        "DEFAULT to `claude`; use `codex` ONLY if the user explicitly asks for Codex or \
+tells you the Claude account is out of credit."
     };
+    let codex_models = CODEX_MODELS
+        .iter()
+        .filter(|m| **m != "default")
+        .map(|m| format!("`{m}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let choosing = format!(
+        "Choosing agent/model/effort — `agent`, `model` and `effort` are ALL REQUIRED on \
+every task_create (task_create rejects a call missing any of them; never rely on a \
+default, it changes over time). Decide in this order:\n\n\
+1. AGENT (provider). {provider_default} Codex only works in Thanx-profile repos. Never \
+switch provider on your own initiative (e.g. not for a \"second opinion\").\n\n\
+2. CLAUDE agent — pick the FIRST row that fits (model / effort):\n\
+- Mechanical, fully specified (renames, formatting, boilerplate, dependency bumps, scripted edits): haiku / low\n\
+- Small, well-scoped fix or feature with a clear spec, few files: sonnet / medium\n\
+- Typical feature or bug needing some investigation, multi-file: sonnet / high\n\
+- Ambiguous requirements, architecture/design decisions, cross-cutting refactors, DB migrations, security-sensitive work, production data, payments/money: opus / high\n\
+- Hardest or highest-stakes (subtle concurrency/data-integrity, a previous attempt failed, or the user says \"be extra careful\"): opus / xhigh\n\
+Use `fable` ONLY when the user explicitly asks for it — never pick it yourself. Use \
+effort `max` only when the user asks. When unsure between two rows, pick the higher one.\n\n\
+3. CODEX agent — `model`: `default` almost always; a specific id ({codex_models}) ONLY \
+if the user names it. `effort` by difficulty: mechanical → low, small well-scoped → \
+medium, typical multi-file → high, ambiguous/high-stakes → xhigh; `max` only if the \
+user asks. When unsure between two, pick the higher one. A Codex agent can't take a \
+Claude model/effort and vice versa."
+    );
     format!(
         "You are an ORCHESTRATOR session in Flock. You don't ship code yourself — \
 you direct a fleet of coding agents (Claude Code or Codex), each working in its own git worktree/branch \
@@ -1790,23 +1794,34 @@ mod tests {
     #[test]
     fn orchestrator_prompt_tells_it_to_always_pass_a_model() {
         let sys = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CLAUDE);
-        assert!(sys.contains("task_create(repo, prompt, model, effort,"));
-        assert!(sys.contains("ALWAYS explicit on task_create"));
+        assert!(sys.contains("task_create(repo, prompt, agent, model, effort,"));
+        assert!(sys.contains("ALL REQUIRED on every task_create"));
         assert!(!sys.contains("omit for the default"));
     }
 
     #[test]
-    fn child_agent_defaults_to_the_orchestrators_own_agent() {
+    fn orchestrated_work_requires_explicit_agent() {
+        use super::require_explicit_agent as req;
+        assert!(req(Some(1), None).is_err());
+        assert!(req(Some(1), Some("  ")).is_err());
+        let err = req(Some(1), None).unwrap_err().to_string();
+        assert!(err.contains("agent is required: pass \"claude\" or \"codex\" explicitly"), "{err}");
+        assert!(req(Some(1), Some("claude")).is_ok());
+        assert!(req(Some(1), Some("codex")).is_ok());
+        // No parent (desktop / plain API callers) keeps the old behavior.
+        assert!(req(None, None).is_ok());
+        assert!(req(None, Some("codex")).is_ok());
+    }
+
+    #[test]
+    fn child_agent_is_explicit_or_claude() {
         use super::resolve_child_agent as r;
-        assert_eq!(r(None, Some("codex")).unwrap(), "codex");
-        assert_eq!(r(None, Some("claude")).unwrap(), "claude");
-        // No parent (desktop / plain API) → Claude.
-        assert_eq!(r(None, None).unwrap(), "claude");
-        // Explicit wins either way; blank counts as omitted.
-        assert_eq!(r(Some("claude"), Some("codex")).unwrap(), "claude");
-        assert_eq!(r(Some("codex"), None).unwrap(), "codex");
-        assert_eq!(r(Some(" "), Some("codex")).unwrap(), "codex");
-        assert!(r(Some("gemini"), None).is_err());
+        // No agent (desktop / plain API) → Claude.
+        assert_eq!(r(None).unwrap(), "claude");
+        assert_eq!(r(Some(" ")).unwrap(), "claude");
+        assert_eq!(r(Some("claude")).unwrap(), "claude");
+        assert_eq!(r(Some("codex")).unwrap(), "codex");
+        assert!(r(Some("gemini")).is_err());
     }
 
     #[test]
@@ -1830,16 +1845,29 @@ mod tests {
     #[test]
     fn orchestrator_prompt_documents_the_agent_param_for_both_agents() {
         let claude = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CLAUDE);
-        assert!(claude.contains("task_create(repo, prompt, model, effort, agent?, confirm_cross_account?)"));
-        assert!(claude.contains("unless you pass `agent: \"codex\"`"));
+        assert!(claude.contains("task_create(repo, prompt, agent, model, effort, confirm_cross_account?)"));
+        assert!(claude.contains("`agent`, `model` and `effort` are ALL REQUIRED"));
+        assert!(!claude.contains("omit it"));
         let codex = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CODEX);
-        assert!(codex.contains("task_create(repo, prompt, model, effort, agent?, confirm_cross_account?)"));
-        assert!(codex.contains("you are running as Codex"));
+        assert!(codex.contains("task_create(repo, prompt, agent, model, effort, confirm_cross_account?)"));
+        assert!(codex.contains("`agent`, `model` and `effort` are ALL REQUIRED"));
+        assert!(!codex.contains("omit it"));
+        assert!(codex.contains("You are running as Codex"));
         assert!(codex.contains("`gpt-6.1-sol`"));
-        assert!(codex.contains("ALWAYS explicit on task_create"));
+        assert!(codex.contains("ALL REQUIRED on every task_create"));
         // The shared parts (task_remove gate etc.) are in both.
         assert!(codex.contains("ONLY call this when the user explicitly asks"));
-        assert!(!codex.contains("use `haiku` for"));
+        // Both variants carry the full decision rules.
+        for sys in [&claude, &codex] {
+            assert!(sys.contains("Use `fable` ONLY when the user explicitly asks"));
+            assert!(sys.contains("Use effort `max` only when the user asks"));
+            assert!(sys.contains("Never switch provider"));
+            assert!(sys.contains("pick the FIRST row that fits"));
+            assert!(sys.contains("opus / xhigh"));
+            assert!(sys.contains("ALL REQUIRED"));
+        }
+        assert!(claude.contains("DEFAULT to `claude`; use `codex` ONLY if the user explicitly asks"));
+        assert!(codex.contains("DEFAULT to `codex`; use `claude` only if the user asks for Claude"));
     }
 
     #[test]
