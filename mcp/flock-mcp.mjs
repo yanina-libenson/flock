@@ -215,6 +215,29 @@ const TOOLS = [
       ),
   },
   {
+    name: "notify_orchestrator",
+    description:
+      "Message the Flock orchestrator that spawned you (only works if one did). Flock finds your orchestrator itself — no id needed — and delivers `text` to it tagged with your task. Use it when you finish (kind \"done\": short summary + PR URL if any), are stuck (\"blocked\"), need a decision (\"question\", sent before you stop to ask), or found something it must know now (\"info\"). Keep it short; no progress updates.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["done", "blocked", "question", "info"] },
+        text: { type: "string", description: "The message, a sentence or two" },
+      },
+      required: ["kind", "text"],
+    },
+    handler: (a) => {
+      if (!process.env.FLOCK_WORKTREE_ID) {
+        throw new Error("notify_orchestrator only works inside a Flock session (FLOCK_WORKTREE_ID is unset)");
+      }
+      return apiCall("POST", "/api/notify", {
+        from: Number(process.env.FLOCK_WORKTREE_ID),
+        kind: a.kind,
+        text: a.text,
+      });
+    },
+  },
+  {
     name: "schedule_create",
     description:
       "Create a scheduled task. spec is '@every 30m' / '@every 2h' / '@every 1d' or 'HH:MM' (daily, local time).",

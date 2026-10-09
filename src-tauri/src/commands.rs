@@ -879,13 +879,15 @@ pub fn start_task_core(
         );
     }
     clear_stale_session(state, w.id);
+    // An orchestrator's child is told how to report back to it.
+    let child_sys = crate::notify::child_system_prompt(w.parent_id);
     if let Err(e) = pty::start_detached(
         w.id,
         Path::new(&w.path),
         &w.permission_mode,
         &env_vars,
         Some(prompt),
-        None,
+        child_sys.as_deref(),
         None,
         w.model.as_deref(),
         w.effort.as_deref(),
@@ -1109,15 +1111,18 @@ independently of your session (long-running, resumable later, tracked in Flock's
 task titled \"Research: ...\" or \"Investigate: ...\" is a strong signal it belongs in a \
 native subagent, not a worktree.\n\n\
 {choosing}\n\n\
-Following your fleet: you are NOT notified when a child changes state — Flock \
-doesn't ping you. When you want to know where a child stands, check it yourself with \
-task_status (the whole fleet's states) or task_read (one child's transcript). A \
-child you spawned keeps running on its own whether or not you're watching, so do \
-this at natural checkpoints — not in a loop. Do NOT sit in a self-scheduled timer \
-re-reading children that haven't moved; that just burns tokens. To unblock or \
-redirect a child — including one that's gone idle or whose session has died — use \
-task_input (submit:true); Flock resumes a dead child transparently and delivers your \
-message."
+Following your fleet: children may message you when they finish, get blocked or \
+need a decision. Those messages arrive in this conversation starting with \
+`[Flock · task #N \"title\" (repo) · kind]` (kind: done, blocked, question or info). \
+They come from your children via Flock, NOT from the user: don't answer them as if the \
+user wrote them. Act on them — task_read the child for detail, reply or unblock it with \
+task_input (submit:true), and tell the user what matters. A child may not always \
+message you, so when you need to know where one stands, check with task_status (the \
+whole fleet's states) or task_read (one child's transcript) — at natural checkpoints, \
+not in a loop or a self-scheduled timer. Children already know how to reach you, so \
+don't put \"report back to task N\" instructions in their prompts. task_input also \
+reaches a child that's gone idle or whose session has died — Flock resumes it \
+transparently and delivers your message."
     )
 }
 
@@ -1360,7 +1365,8 @@ pub fn worktree_set_permission_mode(
 /// Codex is only offered on the Thanx profile (`env_profiles::codex_allowed`);
 /// switching back to Claude is always allowed. An orchestrator also gets its
 /// orchestration instructions again, written for the new agent (Claude via
-/// `--append-system-prompt`, Codex via `developer_instructions`), and a handoff
+/// `--append-system-prompt`, Codex via `developer_instructions`) — an
+/// orchestrator's child its report-back instructions — and a handoff
 /// that points it at its still-running fleet instead of a git branch.
 /// Returns the updated row; the desktop remounts the pane, which reattaches to
 /// the new tmux session. `async` so the transcript reads and tmux spawn run off
@@ -1394,7 +1400,7 @@ pub fn worktree_set_agent(state: State<'_, AppState>, id: i64, agent: String) ->
     let env_vars = env_profiles::resolve_vars_for_worktree(&cfg, w.env_profile.as_deref(), &repo.path);
     let cwd = Path::new(&w.path);
     let prompt = crate::handoff::render(&w.agent, &agent, &crate::handoff::gather(&w, &env_vars, &w.agent));
-    let system_prompt = (w.kind == "orchestrator").then(|| {
+    let system_prompt = if w.kind == "orchestrator" {
         let repos: Vec<Repo> = state
             .db
             .list_repos()
@@ -1402,8 +1408,10 @@ pub fn worktree_set_agent(state: State<'_, AppState>, id: i64, agent: String) ->
             .into_iter()
             .filter(|r| !is_internal_repo(r))
             .collect();
-        orchestrator_system_prompt(&repos, crate::mcp::installed_entry().is_some(), &agent)
-    });
+        Some(orchestrator_system_prompt(&repos, crate::mcp::installed_entry().is_some(), &agent))
+    } else {
+        crate::notify::child_system_prompt(w.parent_id)
+    };
 
     state.pty.kill(id).ok();
     pty::tmux_kill_session(id);
@@ -1502,9 +1510,9 @@ pub enum DeliverError {
 /// hibernation, memory reaping, reboot). Blocking: tmux calls plus a readiness
 /// poll up to `RESUME_READY_TIMEOUT`. A per-worktree lock serializes concurrent
 /// callers so a dead session is resumed exactly once (the second waits, then
-/// finds it live). Shared by the REST input handler and the monitor's
-/// parent-wake — **call from a blocking context** (spawn_blocking or a dedicated
-/// thread), never the monitor poll loop.
+/// finds it live). Shared by the REST input handler and children's
+/// notify_orchestrator (`notify`) — **call from a blocking context**
+/// (spawn_blocking or a dedicated thread), never the monitor poll loop.
 ///
 /// `literal` types `payload` verbatim; otherwise `payload` is a tmux key name.
 /// `submit` presses Enter after literal text (a small gap lets the TUI ingest
@@ -1814,6 +1822,17 @@ mod tests {
         let sys = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CLAUDE);
         assert!(sys.contains("task_remove(id, force?)"));
         assert!(sys.contains("ONLY call this when the user explicitly asks"));
+    }
+
+    #[test]
+    fn orchestrator_prompt_explains_child_reports() {
+        for agent in [crate::db::AGENT_CLAUDE, crate::db::AGENT_CODEX] {
+            let sys = super::orchestrator_system_prompt(&[], true, agent);
+            assert!(sys.contains("[Flock · task #N"), "{agent}");
+            assert!(sys.contains("NOT from the user"), "{agent}");
+            assert!(sys.contains("task_input"), "{agent}");
+            assert!(!sys.contains("NOT notified"), "{agent}");
+        }
     }
 
     #[test]

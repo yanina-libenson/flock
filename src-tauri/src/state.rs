@@ -25,12 +25,12 @@ pub struct AppState {
     /// the frontend. The idle-hibernation monitor never reaps this one — you're
     /// looking at it.
     pub active_worktree: Mutex<Option<i64>>,
-    /// Per-worktree locks serializing input delivery (resume-on-input + the
-    /// monitor's parent-wake), so two near-simultaneous deliveries to a dead
+    /// Per-worktree locks serializing input delivery (task_input + children's
+    /// notify_orchestrator), so two near-simultaneous deliveries to a dead
     /// session resume it exactly once (the second waits, then finds it live).
     /// Keyed by worktree id; created lazily, dropped on `worktree_remove`. Plain
     /// `std::sync::Mutex` because every holder lives on a blocking thread
-    /// (spawn_blocking / the monitor's wake thread) — never held across `.await`.
+    /// (spawn_blocking) — never held across `.await`.
     pub input_locks: Mutex<HashMap<i64, Arc<Mutex<()>>>>,
     /// Removals requested through the API, waiting on the user's answer in the
     /// desktop UI (see `commands::remove_worktree_for_orchestrator`).

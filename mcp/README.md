@@ -31,6 +31,7 @@ with `FLOCK_TOKEN` / `FLOCK_API_URL` env vars if needed.
 | `task_status`     | Counts of agents by status                                          |
 | `task_read`       | Read an agent's conversation transcript (follow what a child is doing) |
 | `task_input`      | Send text or a key (enter/escape/tab/arrows/ctrl-c) to an agent     |
+| `notify_orchestrator` | From a child: message the orchestrator that spawned it (`done` / `blocked` / `question` / `info`) |
 | `schedule_create` | Schedule a recurring task (`@every 30m` / `@every 1d` / `HH:MM`; `agent`, `model`, `effort` required) |
 | `schedule_list`   | List scheduled tasks (with each one's agent/model/effort)          |
 | `kb_search`       | Search the knowledge base (Obsidian vault) — your durable memory    |
@@ -44,7 +45,11 @@ An orchestrator agent can `task_create` to fan work out across repos, poll
 child is doing, and `task_input` to nudge one that's waiting. When the agent runs
 inside a Flock session, `task_create` auto-links the new worktree to it (via the
 injected `FLOCK_WORKTREE_ID`) so it shows up as part of that orchestrator's fleet
-— see Flock's first-class **Orchestrator** sessions.
+— see Flock's first-class **Orchestrator** sessions. Going the other way, a child
+calls `notify_orchestrator` when it finishes, gets blocked or needs a decision:
+Flock looks its orchestrator up and submits the message there as
+`[Flock · task #N "title" (repo) · kind] …`. Orchestrator-spawned children are
+told about the tool in their system prompt.
 
 ## Knowledge base
 

@@ -207,7 +207,7 @@ fn map_key(key: &str) -> Option<&'static str> {
 /// (`claude --resume`) and the input is delivered once the session is ready —
 /// so sending input "just works" whether the session was alive, idle, or dead.
 /// The resume-aware delivery (and its per-worktree lock) lives in
-/// `commands::deliver_input`, shared with the monitor's parent-wake.
+/// `commands::deliver_input`, shared with children's notify_orchestrator.
 async fn input(
     State(ctx): State<ApiCtx>,
     Path(id): Path<i64>,
@@ -240,6 +240,51 @@ async fn input(
         Err(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "input task join failed").into_response()
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct NotifyBody {
+    /// The reporting worktree — the MCP sends its own FLOCK_WORKTREE_ID. Its
+    /// orchestrator is looked up from the row, never taken from the caller.
+    from: i64,
+    kind: String,
+    text: String,
+}
+
+/// `notify_orchestrator`: a child messages the orchestrator that spawned it.
+/// `{"from": id, "kind": "done|blocked|question|info", "text": "..."}`.
+async fn notify_h(State(ctx): State<ApiCtx>, Json(body): Json<NotifyBody>) -> Response {
+    let from = body.from;
+    let app = ctx.app.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        crate::notify::notify_parent(&st, from, &body.kind, &body.text)
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => Json(serde_json::json!({ "result": "delivered" })).into_response(),
+        Ok(Err(e)) => notify_error_response(e, from),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "notify task join failed").into_response(),
+    }
+}
+
+fn notify_error_response(err: crate::notify::NotifyError, id: i64) -> Response {
+    use crate::notify::NotifyError;
+    match err {
+        NotifyError::NotFound => {
+            (StatusCode::NOT_FOUND, format!("worktree {id} not found")).into_response()
+        }
+        NotifyError::NoParent => (
+            StatusCode::CONFLICT,
+            format!(
+                "worktree {id} has no orchestrator — it wasn't spawned by one, so there's \
+                 nobody to notify. Tell the user directly instead."
+            ),
+        )
+            .into_response(),
+        NotifyError::Invalid(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        NotifyError::Deliver(e) => input_error_response(e, id),
     }
 }
 
@@ -779,6 +824,7 @@ fn build_router(ctx: ApiCtx) -> Router {
         .route("/worktrees/:id/transcript", get(transcript_h))
         .route("/worktrees/:id/remove", post(remove_worktree_h))
         .route("/tasks", post(create_task))
+        .route("/notify", post(notify_h))
         .route("/schedules", get(schedules_list).post(schedule_create_h))
         .route("/schedules/:id", delete(schedule_delete_h))
         .route("/schedules/:id/run", post(schedule_run_h))
@@ -935,6 +981,17 @@ mod tests {
         assert_eq!(
             input_error_response(DeliverError::SendFailed, 4).status(),
             StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn notify_errors_map_to_clear_codes() {
+        use crate::notify::NotifyError;
+        assert_eq!(notify_error_response(NotifyError::NotFound, 1).status(), StatusCode::NOT_FOUND);
+        assert_eq!(notify_error_response(NotifyError::NoParent, 1).status(), StatusCode::CONFLICT);
+        assert_eq!(
+            notify_error_response(NotifyError::Invalid("x".into()), 1).status(),
+            StatusCode::BAD_REQUEST
         );
     }
 
