@@ -449,6 +449,9 @@ struct CreateScheduleBody {
     title: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    /// `"claude"` or `"codex"`. Required when `parent_id` is set
+    /// (orchestrator-created); omitted otherwise → Claude. Codex only in Thanx repos.
+    agent: Option<String>,
     /// Orchestrator worktree id that's creating this schedule, so the
     /// cross-account guard can check it and the resulting fired tasks link
     /// into its fleet. Sent by the Flock MCP (from FLOCK_WORKTREE_ID).
@@ -471,13 +474,6 @@ async fn schedule_create_h(
     let Some(repo_id) = repo_id else {
         return (StatusCode::BAD_REQUEST, format!("unknown repo {:?}", body.repo)).into_response();
     };
-    if let Err(e) = crate::commands::require_explicit_model_and_effort(
-        body.parent_id,
-        body.model.as_deref(),
-        body.effort.as_deref(),
-    ) {
-        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
-    }
     match crate::commands::schedule_create_core(
         &st.db,
         repo_id,
@@ -486,6 +482,7 @@ async fn schedule_create_h(
         body.title.as_deref(),
         body.model.as_deref(),
         body.effort.as_deref(),
+        body.agent.as_deref(),
         body.parent_id,
         body.confirm_cross_account,
     ) {
@@ -522,8 +519,8 @@ async fn schedule_run_h(State(ctx): State<ApiCtx>, Path(id): Path<i64>) -> Respo
             s.parent_id,
             s.model.clone(),
             s.effort.clone(),
-            // Claude, as in commands::schedule_run_now.
-            Some(crate::db::AGENT_CLAUDE.to_string()),
+            // The schedule's own agent, as in commands::schedule_run_now.
+            Some(s.agent.clone()),
             // Already gated at schedule_create time.
             true,
         )?;

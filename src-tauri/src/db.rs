@@ -84,6 +84,10 @@ pub struct Schedule {
     /// `commands::check_cross_account`) and replayed at fire time so the
     /// resulting task links into the same fleet.
     pub parent_id: Option<i64>,
+    /// Which coding agent every fired task runs: `"claude"` (default) or
+    /// `"codex"`. `model`/`effort` are validated against it. See
+    /// `Worktree::agent`.
+    pub agent: String,
 }
 
 /// A knowledge-base search hit (ranked FTS5 match with a highlighted snippet).
@@ -182,7 +186,8 @@ impl Db {
               created_at INTEGER NOT NULL,
               model      TEXT,
               effort     TEXT,
-              parent_id  INTEGER REFERENCES worktrees(id) ON DELETE SET NULL
+              parent_id  INTEGER REFERENCES worktrees(id) ON DELETE SET NULL,
+              agent      TEXT NOT NULL DEFAULT 'claude'
             );
 
             -- Knowledge base: an FTS5 index over an Obsidian vault (the vault on
@@ -239,6 +244,10 @@ impl Db {
         let _ = conn.execute("ALTER TABLE schedules ADD COLUMN effort TEXT", []);
         let _ = conn.execute(
             "ALTER TABLE schedules ADD COLUMN parent_id INTEGER REFERENCES worktrees(id) ON DELETE SET NULL",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE schedules ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'",
             [],
         );
         // Index on parent_id must come AFTER the defensive ALTER above: on a DB
@@ -508,12 +517,13 @@ impl Db {
         model: Option<&str>,
         effort: Option<&str>,
         parent_id: Option<i64>,
+        agent: &str,
     ) -> AppResult<Schedule> {
         let c = self.c()?;
         c.execute(
-            "INSERT INTO schedules (repo_id, prompt, spec, title, enabled, next_run, created_at, model, effort, parent_id)
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9)",
-            params![repo_id, prompt, spec, title, next_run, now(), model, effort, parent_id],
+            "INSERT INTO schedules (repo_id, prompt, spec, title, enabled, next_run, created_at, model, effort, parent_id, agent)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![repo_id, prompt, spec, title, next_run, now(), model, effort, parent_id, agent],
         )?;
         let id = c.last_insert_rowid();
         drop(c);
@@ -534,13 +544,14 @@ impl Db {
             model: row.get(9)?,
             effort: row.get(10)?,
             parent_id: row.get(11)?,
+            agent: row.get(12)?,
         })
     }
 
     pub fn get_schedule(&self, id: i64) -> AppResult<Schedule> {
         let c = self.c()?;
         let s = c.query_row(
-            "SELECT id, repo_id, prompt, spec, title, enabled, last_run, next_run, created_at, model, effort, parent_id
+            "SELECT id, repo_id, prompt, spec, title, enabled, last_run, next_run, created_at, model, effort, parent_id, agent
              FROM schedules WHERE id = ?1",
             params![id],
             Self::row_to_schedule,
@@ -551,7 +562,7 @@ impl Db {
     pub fn list_schedules(&self) -> AppResult<Vec<Schedule>> {
         let c = self.c()?;
         let mut stmt = c.prepare(
-            "SELECT id, repo_id, prompt, spec, title, enabled, last_run, next_run, created_at, model, effort, parent_id
+            "SELECT id, repo_id, prompt, spec, title, enabled, last_run, next_run, created_at, model, effort, parent_id, agent
              FROM schedules ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], Self::row_to_schedule)?;
@@ -845,6 +856,42 @@ mod tests {
         }
         let db = Db::open_at(&p).unwrap();
         assert_eq!(db.get_worktree(1).unwrap().agent, super::AGENT_CLAUDE);
+        drop(db);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn schedule_agent_persists_and_roundtrips() {
+        // Every fire reads the agent back from the row (see schedule::spawn /
+        // schedule_run_now), so it must survive the insert → get/list trip.
+        let db = temp_db();
+        let repo = db.insert_repo("acme", "/tmp/acme-sched").unwrap();
+        let s = db
+            .insert_schedule(repo.id, "p", "@every 1h", None, 0, Some("default"), Some("high"), None, super::AGENT_CODEX)
+            .unwrap();
+        assert_eq!(s.agent, super::AGENT_CODEX);
+        assert_eq!(db.get_schedule(s.id).unwrap().agent, super::AGENT_CODEX);
+        assert_eq!(db.list_schedules().unwrap()[0].agent, super::AGENT_CODEX);
+    }
+
+    #[test]
+    fn schedule_agent_column_is_added_to_a_db_that_predates_it() {
+        // Schedules created before the agent column must keep firing as Claude.
+        let mut p = std::env::temp_dir();
+        p.push(format!("flock-test-legacy-sched-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        {
+            let c = Connection::open(&p).unwrap();
+            c.execute_batch(
+                "CREATE TABLE repos (id INTEGER PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
+                 CREATE TABLE schedules (id INTEGER PRIMARY KEY, repo_id INTEGER NOT NULL, prompt TEXT NOT NULL, spec TEXT NOT NULL, title TEXT, enabled INTEGER NOT NULL DEFAULT 1, last_run INTEGER, next_run INTEGER NOT NULL, created_at INTEGER NOT NULL);
+                 INSERT INTO repos VALUES (1, 'acme', '/tmp/legacy-sched', 0);
+                 INSERT INTO schedules (id, repo_id, prompt, spec, next_run, created_at) VALUES (1, 1, 'p', '@every 1h', 0, 0);",
+            )
+            .unwrap();
+        }
+        let db = Db::open_at(&p).unwrap();
+        assert_eq!(db.get_schedule(1).unwrap().agent, super::AGENT_CLAUDE);
         drop(db);
         let _ = std::fs::remove_file(&p);
     }
