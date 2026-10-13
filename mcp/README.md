@@ -14,7 +14,10 @@ Flock's local REST API.
    ```bash
    cd mcp && npm install
    ```
-3. Add it to an agent (e.g. Claude Code):
+3. Sessions Flock launches get it automatically: Flock installs a copy in its
+   data dir and passes it to every Claude (`--mcp-config`) and Codex
+   (`-c mcp_servers.flock.*`) session it starts, whatever the profile's own
+   config says. For an agent outside Flock, add it yourself (e.g. Claude Code):
    ```bash
    claude mcp add flock -- node /absolute/path/to/flock/mcp/flock-mcp.mjs
    ```

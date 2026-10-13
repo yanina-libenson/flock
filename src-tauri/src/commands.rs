@@ -1173,8 +1173,8 @@ pub fn start_orchestrator_core(
     bootstrap_claude_settings(Path::new(&repo.path), &path);
 
     // Best-effort: install + wire the Flock MCP so the orchestrator can spawn
-    // and watch agents out of the box. (Codex gets the same server per
-    // invocation — see `pty::codex_invocation`.)
+    // and watch agents out of the box. (Every session also gets the same
+    // server per invocation — see `pty::agent_invocation`.)
     let mcp_path = crate::mcp::ensure_installed(app);
     if let Some(mjs) = &mcp_path {
         write_orchestrator_mcp_config(&path, mjs);

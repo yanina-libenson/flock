@@ -377,6 +377,18 @@ fn shell_escape(s: &str) -> String {
 /// the result is embedded in a `sh -c` string. `resume_id` and `initial_prompt`
 /// are mutually exclusive in practice — resume continues an existing session
 /// (no new first turn), seeding a prompt starts a fresh task.
+///
+/// `mcp_entry` (the installed Flock MCP server) is wired per invocation with
+/// `--mcp-config`, on fresh and resumed sessions alike, so the `kb_*`/`task_*`
+/// tools don't depend on the profile's `.claude.json` registering them. It's
+/// named `flock`, and Claude Code lets a `--mcp-config` server override a
+/// user- or project-scope one of the same name (one server, no warning), so a
+/// profile that already registers `flock` doesn't get duplicate tools. The
+/// other configured servers still load (no `--strict-mcp-config`). The
+/// `--mcp-config=<json>` form matters: the flag is variadic and would take a
+/// following positional prompt as another config. Claude hands an MCP server
+/// its whole environment, so `FLOCK_WORKTREE_ID` & co. arrive without help, and
+/// its default tool timeout is far longer than `task_remove`'s wait.
 fn claude_invocation(
     permission_mode: &str,
     initial_prompt: Option<&str>,
@@ -384,6 +396,7 @@ fn claude_invocation(
     append_system_prompt: Option<&str>,
     model: Option<&str>,
     effort: Option<&str>,
+    mcp_entry: Option<&str>,
 ) -> String {
     let mut cmd = if permission_mode == "default" || permission_mode.is_empty() {
         "claude".to_string()
@@ -405,6 +418,12 @@ fn claude_invocation(
             cmd = format!("{cmd} --append-system-prompt {}", shell_escape(sp));
         }
     }
+    if let Some(entry) = mcp_entry.filter(|e| !e.is_empty()) {
+        let cfg = serde_json::json!({
+            "mcpServers": { "flock": { "command": "node", "args": [entry] } }
+        });
+        cmd = format!("{cmd} {}", shell_escape(&format!("--mcp-config={cfg}")));
+    }
     if let Some(id) = resume_id {
         if !id.is_empty() {
             cmd = format!("{cmd} --resume {}", shell_escape(id));
@@ -419,9 +438,9 @@ fn claude_invocation(
 }
 
 /// The agent command for a worktree's session: `claude …` or `codex …`
-/// depending on the worktree's `agent` column. `cwd` and `mcp_entry` (the
-/// installed Flock MCP server, see `mcp::installed_entry`) are only used by
-/// Codex; Claude gets its MCP servers from its own config.
+/// depending on the worktree's `agent` column. `mcp_entry` (the installed Flock
+/// MCP server, see `mcp::installed_entry`) is wired into both; `cwd` is only
+/// used by Codex.
 ///
 /// A row keeps its model/effort across agent switches, so each agent only
 /// receives values it understands: Claude never gets a Codex model id (or
@@ -462,6 +481,7 @@ fn agent_invocation(
             append_system_prompt,
             model,
             effort,
+            mcp_entry,
         )
     }
 }
@@ -1355,17 +1375,17 @@ mod tests {
     #[test]
     fn plain_attach_has_no_resume_or_prompt() {
         assert_eq!(
-            claude_invocation("bypassPermissions", None, None, None, None, None),
+            claude_invocation("bypassPermissions", None, None, None, None, None, None),
             "claude --permission-mode 'bypassPermissions'"
         );
         // default mode → bare `claude`, no --permission-mode flag.
-        assert_eq!(claude_invocation("default", None, None, None, None, None), "claude");
+        assert_eq!(claude_invocation("default", None, None, None, None, None, None), "claude");
     }
 
     #[test]
     fn resume_id_is_baked_in_after_permission_mode() {
         assert_eq!(
-            claude_invocation("bypassPermissions", None, Some("abc-123"), None, None, None),
+            claude_invocation("bypassPermissions", None, Some("abc-123"), None, None, None, None),
             "claude --permission-mode 'bypassPermissions' --resume 'abc-123'"
         );
     }
@@ -1373,7 +1393,7 @@ mod tests {
     #[test]
     fn initial_prompt_is_a_trailing_positional() {
         assert_eq!(
-            claude_invocation("default", Some("fix the bug"), None, None, None, None),
+            claude_invocation("default", Some("fix the bug"), None, None, None, None, None),
             "claude 'fix the bug'"
         );
     }
@@ -1381,7 +1401,7 @@ mod tests {
     #[test]
     fn empty_resume_id_is_ignored() {
         assert_eq!(
-            claude_invocation("default", None, Some(""), None, None, None),
+            claude_invocation("default", None, Some(""), None, None, None, None),
             "claude"
         );
     }
@@ -1395,13 +1415,14 @@ mod tests {
                 None,
                 Some("you orchestrate"),
                 None,
+                None,
                 None
             ),
             "claude --permission-mode 'bypassPermissions' --append-system-prompt 'you orchestrate' 'go'"
         );
         // Empty system prompt is ignored.
         assert_eq!(
-            claude_invocation("default", None, None, Some(""), None, None),
+            claude_invocation("default", None, None, Some(""), None, None, None),
             "claude"
         );
     }
@@ -1415,18 +1436,19 @@ mod tests {
                 None,
                 None,
                 Some("opus"),
-                Some("high")
+                Some("high"),
+                None
             ),
             "claude --permission-mode 'bypassPermissions' --model 'opus' --effort 'high'"
         );
         // Omitted → no flags at all, identical to today's default behavior.
         assert_eq!(
-            claude_invocation("default", None, None, None, None, None),
+            claude_invocation("default", None, None, None, None, None, None),
             "claude"
         );
         // Empty strings are ignored, same as the other optional flags.
         assert_eq!(
-            claude_invocation("default", None, None, None, Some(""), Some("")),
+            claude_invocation("default", None, None, None, Some(""), Some(""), None),
             "claude"
         );
     }
@@ -1601,6 +1623,48 @@ mod tests {
         assert!(!cmd.contains(" -m "));
     }
 
+    /// The `--mcp-config=<json>` token of a `claude` command, parsed.
+    fn claude_mcp_config(cmd: &str) -> serde_json::Value {
+        let start = cmd.find("'--mcp-config=").expect("no --mcp-config");
+        let end = cmd[start + 1..].find('\'').unwrap() + start + 2;
+        let tok = unquote(&cmd[start..end]);
+        serde_json::from_str(tok.strip_prefix("--mcp-config=").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn claude_fresh_start_wires_flock_mcp_before_the_prompt() {
+        let entry = "/Users/y/Library/Application Support/Flock/mcp/flock-mcp.mjs";
+        let cmd = claude_invocation("bypassPermissions", Some("fix the bug"), None, None, None, None, Some(entry));
+        // One shell word, `=` form: the variadic flag can't swallow the prompt.
+        assert!(cmd.starts_with("claude --permission-mode 'bypassPermissions' '--mcp-config={"));
+        assert!(cmd.ends_with("}' 'fix the bug'"));
+        assert_eq!(
+            claude_mcp_config(&cmd),
+            serde_json::json!({"mcpServers": {"flock": {"command": "node", "args": [entry]}}})
+        );
+        assert!(!cmd.contains("--strict-mcp-config"));
+    }
+
+    #[test]
+    fn claude_resume_also_wires_flock_mcp() {
+        let entry = "/Users/y/Library/Application Support/Flock/mcp/flock-mcp.mjs";
+        let cmd = claude_invocation("default", None, Some("abc-123"), None, Some("opus"), None, Some(entry));
+        assert!(cmd.starts_with("claude --model 'opus' '--mcp-config={"));
+        assert!(cmd.ends_with("}' --resume 'abc-123'"));
+        assert_eq!(claude_mcp_config(&cmd)["mcpServers"]["flock"]["args"][0], entry);
+    }
+
+    #[test]
+    fn claude_without_mcp_entry_has_no_mcp_config() {
+        for entry in [None, Some("")] {
+            assert_eq!(claude_invocation("default", Some("go"), None, None, None, None, entry), "claude 'go'");
+            assert_eq!(
+                claude_invocation("default", None, Some("abc"), None, None, None, entry),
+                "claude --resume 'abc'"
+            );
+        }
+    }
+
     #[test]
     fn codex_toml_strings_escape_quotes_and_backslashes() {
         assert_eq!(super::toml_str(r#"/a "b" \c"#), r#""/a \"b\" \\c""#);
@@ -1670,7 +1734,8 @@ mod tests {
     fn agent_invocation_dispatches_on_agent() {
         use super::agent_invocation;
         let claude = agent_invocation("claude", "default", None, Some("s1"), None, Some("opus"), None, "/w", Some("/m.mjs"));
-        assert_eq!(claude, "claude --model 'opus' --resume 's1'");
+        assert!(claude.starts_with("claude --model 'opus' '--mcp-config="));
+        assert!(claude.ends_with(" --resume 's1'"));
         let codex = agent_invocation("codex", "default", None, Some("s1"), None, Some("opus"), None, "/w", Some("/m.mjs"));
         assert!(codex.starts_with("codex resume --no-daemon"));
         assert!(codex.contains("mcp_servers.flock"));
