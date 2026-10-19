@@ -374,8 +374,9 @@ export interface WorktreeUsageLimitEvent {
   limited: boolean;
 }
 
-/// An orchestrator asked (task_remove) to remove a worktree; the backend waits
-/// for the user's answer before tearing anything down.
+/// An orchestrator asked (task_remove, force) to remove a worktree with
+/// uncommitted changes; the backend waits for the user's answer before tearing
+/// anything down.
 export interface RemoveRequest {
   request_id: number;
   worktree_id: number;
@@ -384,8 +385,8 @@ export interface RemoveRequest {
   repo: string;
   /// The asking orchestrator's label, when it identified itself.
   requested_by: string | null;
-  /// Uncommitted changes that removal would throw away (only with force).
-  dirty: DirtySummary | null;
+  /// The uncommitted changes that removal would throw away.
+  dirty: DirtySummary;
   timeout_secs: number;
 }
 

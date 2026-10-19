@@ -569,8 +569,9 @@ pub struct RemoveRequest {
     pub repo: String,
     /// Label of the orchestrator that asked, when the caller identified itself.
     pub requested_by: Option<String>,
-    /// Uncommitted changes that removing will throw away (only with `force`).
-    pub dirty: Option<git::DirtySummary>,
+    /// The uncommitted changes that removing will throw away. Only a forced
+    /// removal of a dirty worktree reaches the dialog.
+    pub dirty: git::DirtySummary,
     pub timeout_secs: u64,
 }
 
@@ -583,13 +584,26 @@ fn worktree_label(w: &Worktree) -> String {
         .to_string()
 }
 
+/// What a removal needs before it can run: `Ok(None)` — go ahead; `Ok(Some(d))` —
+/// the user must approve losing `d`; `Err(Dirty)` — refused. A clean worktree
+/// never needs approval, and a dirty one only gets that far with `force`.
+fn removal_gate(
+    dirty: Option<git::DirtySummary>,
+    force: bool,
+) -> Result<Option<git::DirtySummary>, RemoveRefusal> {
+    match (dirty, force) {
+        (Some(d), false) => Err(RemoveRefusal::Dirty(d)),
+        (dirty, _) => Ok(dirty),
+    }
+}
+
 /// Remove a worktree on an orchestrator's behalf — the same teardown the
-/// sidebar's ✕ does, but only after the user approves it in a desktop dialog
-/// (orchestrators have removed worktrees nobody asked them to). Never an
-/// orchestrator, and never a dirty worktree unless `force`. The git branch
-/// itself is kept (only the checkout + session go away). `requested_by` is the
-/// calling orchestrator's worktree id, shown in the dialog. Blocks up to
-/// `REMOVE_CONFIRM_TIMEOUT`.
+/// sidebar's ✕ does. A clean worktree goes right away; a dirty one is refused
+/// unless `force`, and then only after the user approves losing the work in a
+/// desktop dialog. Never an orchestrator. The git branch itself is kept (only
+/// the checkout + session go away). `requested_by` is the calling
+/// orchestrator's worktree id, shown in the dialog. Blocks up to
+/// `REMOVE_CONFIRM_TIMEOUT` when the dialog is shown.
 pub fn remove_worktree_for_orchestrator(
     app: &AppHandle,
     state: &AppState,
@@ -605,9 +619,9 @@ pub fn remove_worktree_for_orchestrator(
     let dirty = git::dirty_summary(Path::new(&w.path))
         .ok()
         .filter(|d| d.staged + d.unstaged + d.untracked > 0);
-    if let (Some(d), false) = (&dirty, force) {
-        return Err(RemoveRefusal::Dirty(d.clone()));
-    }
+    let Some(dirty) = removal_gate(dirty, force)? else {
+        return teardown_worktree(app, state, &w, force).map_err(RemoveRefusal::Other);
+    };
     let req = RemoveRequest {
         request_id: 0,
         worktree_id: w.id,
@@ -1049,7 +1063,7 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool, agent: &str) -> Str
          - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's agent/model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
-         - task_remove(id, force?): remove a worktree — the same as the ✕ in Flock's sidebar (kills its session, deletes the checkout; the git branch is kept). ONLY call this when the user explicitly asks you to remove specific worktrees in this conversation — never on your own initiative, never as cleanup after a task finishes. Confirm which ids you're about to remove if there's any ambiguity. Flock also asks the user to approve every removal in a dialog and waits up to 2 minutes; the result says removed, declined by the user, or timed out (not removed). Respect a decline. It refuses dirty worktrees unless force:true; only pass force after telling the user what uncommitted work would be lost and getting an explicit yes. It can't remove orchestrators.\n\
+         - task_remove(id, force?): remove a worktree — the same as the ✕ in Flock's sidebar (kills its session, deletes the checkout; the git branch is kept). ONLY call this when the user explicitly asks you to remove specific worktrees in this conversation — never on your own initiative, never as cleanup after a task finishes. Confirm which ids you're about to remove if there's any ambiguity. Removal happens immediately, with no dialog. It refuses worktrees with uncommitted changes unless force:true; only pass force after telling the user what uncommitted work would be lost and getting an explicit yes. A forced removal of a worktree that really has uncommitted changes also asks the user in Flock to approve and waits up to 2 minutes; the result says removed, declined by the user, or timed out (not removed). Respect a decline. It can't remove orchestrators.\n\
          - kb_search / kb_read / kb_ingest: your durable memory across sessions."
     } else {
         "The Flock MCP tools could not be auto-wired. Ask the user to enable Remote access in Flock settings and add the Flock MCP, then restart you."
@@ -1822,6 +1836,21 @@ mod tests {
         let sys = super::orchestrator_system_prompt(&[], true, crate::db::AGENT_CLAUDE);
         assert!(sys.contains("task_remove(id, force?)"));
         assert!(sys.contains("ONLY call this when the user explicitly asks"));
+        assert!(sys.contains("Removal happens immediately, with no dialog"));
+        assert!(sys.contains("only pass force after telling the user"));
+    }
+
+    #[test]
+    fn removal_gate_asks_only_for_forced_removal_of_dirty_work() {
+        use super::{removal_gate, RemoveRefusal};
+        let d = || crate::git::DirtySummary { staged: 1, unstaged: 0, untracked: 2 };
+        // Clean: removed right away, force or not.
+        assert!(matches!(removal_gate(None, false), Ok(None)));
+        assert!(matches!(removal_gate(None, true), Ok(None)));
+        // Dirty without force: refused, no dialog.
+        assert!(matches!(removal_gate(Some(d()), false), Err(RemoveRefusal::Dirty(_))));
+        // Dirty with force: the user has to approve losing it.
+        assert!(matches!(removal_gate(Some(d()), true), Ok(Some(s)) if s.untracked == 2));
     }
 
     #[test]

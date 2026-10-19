@@ -186,12 +186,6 @@ export function Sidebar(props: {
       await refresh();
       return;
     }
-    if (
-      !confirm(
-        `Remove worktree "${w.branch}"?\nThis deletes the worktree directory at\n${w.path}`,
-      )
-    )
-      return;
     try {
       await worktreeRemove(w.id, false);
     } catch {
