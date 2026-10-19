@@ -3,10 +3,11 @@ import { Trash2 } from "lucide-solid";
 import { worktreeRemoveAnswer, type RemoveRequest } from "../lib/ipc";
 import { appStore, dropRemoveRequest } from "../lib/store";
 
-/// Asks the user to approve an orchestrator's task_remove. Shows the oldest
-/// pending request; "Keep" is the default (focused, and Escape picks it). The
-/// backend treats no answer within `timeout_secs` as "keep" and closes the
-/// dialog itself (`worktree:remove_request_done`).
+/// Asks the user to approve an orchestrator's forced task_remove of a worktree
+/// with uncommitted changes. Shows the oldest pending request; "Keep" is the
+/// default (focused, and Escape picks it). The backend treats no answer within
+/// `timeout_secs` as "keep" and closes the dialog itself
+/// (`worktree:remove_request_done`).
 export function RemoveRequestModal() {
   const req = (): RemoveRequest | undefined => appStore.removeRequests[0];
   let keepRef: HTMLButtonElement | undefined;
@@ -66,18 +67,11 @@ export function RemoveRequestModal() {
                   {r().repo} · {r().branch}
                 </div>
               </div>
-              <Show
-                when={r().dirty}
-                fallback={<p>No uncommitted changes.</p>}
-              >
-                {(d) => (
-                  <p class="text-[var(--color-danger)]">
-                    It has uncommitted changes ({d().staged} staged,{" "}
-                    {d().unstaged} unstaged, {d().untracked} untracked). They
-                    will be lost.
-                  </p>
-                )}
-              </Show>
+              <p class="text-[var(--color-danger)]">
+                It has uncommitted changes ({r().dirty.staged} staged,{" "}
+                {r().dirty.unstaged} unstaged, {r().dirty.untracked} untracked).
+                They will be lost.
+              </p>
               <p class="text-[11px] text-[var(--color-fg-dim)]">
                 No answer within {Math.round(r().timeout_secs / 60)} min keeps it.
                 <Show when={appStore.removeRequests.length > 1}>

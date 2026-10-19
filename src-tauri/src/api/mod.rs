@@ -300,9 +300,10 @@ struct RemoveWorktreeBody {
     requested_by: Option<i64>,
 }
 
-/// Remove a worktree (the sidebar ✕), for orchestrators, once the user approves
-/// it in the desktop dialog. `{"force?": bool, "requested_by?": id}`. Holds the
-/// request open until the user answers or `REMOVE_CONFIRM_TIMEOUT` passes.
+/// Remove a worktree (the sidebar ✕), for orchestrators. `{"force?": bool,
+/// "requested_by?": id}`. Removes right away; only a forced removal of a dirty
+/// worktree is held open until the user answers the desktop dialog or
+/// `REMOVE_CONFIRM_TIMEOUT` passes.
 async fn remove_worktree_h(
     State(ctx): State<ApiCtx>,
     Path(id): Path<i64>,
