@@ -305,6 +305,7 @@ export function setWorktreePrStatus(
 /// orchestrator whose chosen Profile is a Codex one (it has no repo of its own). The
 /// backend enforces the same rule in `worktree_set_agent`.
 export function canUseCodex(w: Worktree): boolean {
+  if (w.id < 0 || w.kind === "review") return false;
   if (w.kind === "orchestrator") {
     return w.env_profile !== null && store.codexProfiles.includes(w.env_profile);
   }
@@ -446,12 +447,18 @@ export function prunePanes() {
 
 // Review selection is separate from opening the terminal: MCP may focus a review
 // without starting the author's agent. Generations are always explicit backend calls.
-const [reviewTabs, setReviewTabs] = createSignal<Record<number, "terminal" | "review">>({});
+const [reviewTabs, setReviewTabs] = createSignal<Record<number, "terminal" | "review" | "deep">>({});
 export { reviewTabs };
-export function setWorktreeTab(id: number, tab: "terminal" | "review") {
+export function setWorktreeTab(id: number, tab: "terminal" | "review" | "deep") {
   setReviewTabs(prev => ({ ...prev, [id]: tab }));
 }
 export function openReviewPane(id: number) {
   setWorktreeTab(id, "review");
   openPane(id);
+}
+
+const [deepSessions,setDeepSessions] = createSignal<Record<number,Worktree>>({});
+export { deepSessions };
+export function openDeepSession(id:number, session:Worktree) {
+  setDeepSessions(prev=>({...prev,[id]:session}));setWorktreeTab(id,"deep");openPane(id);
 }

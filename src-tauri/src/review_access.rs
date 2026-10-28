@@ -90,7 +90,7 @@ pub fn compact(view: ReviewView, include_context: bool) -> AppResult<CompactRevi
     })
 }
 pub fn get(state: &AppState, id: i64, include_context: bool) -> AppResult<CompactReview> {
-    compact(crate::review::load(state, id)?, include_context)
+    compact(crate::review::load_selected(state, id, None)?, include_context)
 }
 #[cfg(test)]
 mod tests {
@@ -134,6 +134,8 @@ mod tests {
             cached: true,
             last_cost_usd: 0.,
             error: None,
+            deep_available: false,
+            deep_error: None,
         };
         let json = serde_json::to_value(compact(v, false).unwrap()).unwrap();
         assert!(json.get("summary").is_none());

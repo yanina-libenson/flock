@@ -377,6 +377,7 @@ export function Sidebar(props: {
                   title={worktreeLabel(w)}
                 >
                   {worktreeLabel(w)}
+                  <Show when={w.kind === "review"}><span class="ml-1 text-[10px] text-[var(--color-fg-dim)]">solo lectura</span></Show>
                 </span>
                 <Show when={subtitle()}>
                   <span class="truncate text-[10.5px] font-mono text-[var(--color-fg-dim)] mt-px">
@@ -466,7 +467,7 @@ export function Sidebar(props: {
           </button>
           {/* Agent switch: offered on Thanx/Flock worktrees (and always on a Codex
               one, to get back to Claude). */}
-          <Show when={w.agent === "codex" || canUseCodex(w)}>
+          <Show when={w.kind !== "review" && (w.agent === "codex" || canUseCodex(w))}>
             <button
               class="p-1 rounded hover:bg-[var(--color-bg)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] transition"
               title={

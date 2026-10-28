@@ -479,7 +479,10 @@ export interface Review {
 }
 export interface ReviewDiffLine { kind: "add" | "delete" | "context" | "hunk"; text: string; left: number | null; right: number | null }
 export interface ReviewDiffFile { path: string; status: string; diff_hash: string; diff: string; skip_reason_es: string | null; lines: ReviewDiffLine[] }
-export interface ReviewView { worktree_id: number; head_sha: string; review: Review | null; files: ReviewDiffFile[]; cached: boolean; last_cost_usd: number; error: string | null }
-export const reviewLoad = (worktreeId: number) => invoke<ReviewView>("review_load", { worktreeId });
+export interface ReviewView { worktree_id: number; head_sha: string; review: Review | null; files: ReviewDiffFile[]; cached: boolean; last_cost_usd: number; error: string | null; deep_available: boolean; deep_error: string | null }
+export const reviewLoad = (worktreeId: number, deep?: boolean) => invoke<ReviewView>("review_load", { worktreeId, deep: deep ?? null });
 export const onReviewOpen = (cb: (id: number) => void) => listen<number>("review:open", e => cb(e.payload));
 export const onReviewChanged = (cb: (id: number) => void) => listen<number>("review:changed", e => cb(e.payload));
+
+export interface DeepStarted { worktree_id: number; session: Worktree }
+export const onReviewDeepOpen = (cb: (e: DeepStarted) => void) => listen<DeepStarted>("review:deep_open", e => cb(e.payload));

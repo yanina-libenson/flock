@@ -190,7 +190,7 @@ impl PtyManager {
         // kill the session here so it's recreated below with the current env.
         // Claude resumes from its own transcript (the resume logic just after),
         // so the conversation isn't lost.
-        if tmux_list_sessions().contains(&worktree_id)
+        if worktree_id > 0 && tmux_list_sessions().contains(&worktree_id)
             && session_env_drifted(worktree_id, env_vars)
         {
             eprintln!(
@@ -200,7 +200,7 @@ impl PtyManager {
             tmux_kill_session(worktree_id);
         }
 
-        let resume_id = if initial_prompt.is_none() && !tmux_list_sessions().contains(&worktree_id) {
+        let resume_id = if worktree_id > 0 && initial_prompt.is_none() && !tmux_list_sessions().contains(&worktree_id) {
             latest_session_id_for(agent, cwd, env_vars)
         } else {
             None
@@ -219,13 +219,15 @@ impl PtyManager {
         );
         let env_flags = build_env_flags(&with_worktree_id(env_vars, worktree_id));
         let session_cmd = session_command(&agent_cmd, &shell);
-        let tmux_cmd = format!(
+        let tmux_cmd = if worktree_id < 0 {
+            format!("exec tmux -L {} -f {} attach-session -d -t {}", shell_escape(TMUX_SOCKET), shell_escape(&conf_path.to_string_lossy()), shell_escape(&session_name))
+        } else { format!(
             "exec tmux -L {socket} -f {conf} new-session -A -D{env_flags} -s {name} -c {cwd} {session_cmd}",
             socket = shell_escape(TMUX_SOCKET),
             conf = shell_escape(&conf_path.to_string_lossy()),
             name = shell_escape(&session_name),
             cwd = shell_escape(&cwd_str),
-        );
+        ) };
 
         let mut cmd = CommandBuilder::new(&shell);
         cmd.arg("-i");
@@ -356,7 +358,7 @@ impl Default for PtyManager {
 /// Minimal POSIX shell quoting — wrap in single quotes and escape any embedded
 /// single quotes. Good enough for our tmux invocations (session names,
 /// absolute paths, socket names).
-fn shell_escape(s: &str) -> String {
+pub(crate) fn shell_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
     for c in s.chars() {
@@ -668,7 +670,7 @@ pub fn latest_session_id_for(
 /// vars without disturbing them (drift detection still keys off the profile set).
 fn with_worktree_id(env_vars: &[(String, String)], worktree_id: i64) -> Vec<(String, String)> {
     let mut all = env_vars.to_vec();
-    all.push(("FLOCK_WORKTREE_ID".to_string(), worktree_id.to_string()));
+    all.push(("FLOCK_WORKTREE_ID".to_string(), worktree_id.unsigned_abs().to_string()));
     all
 }
 

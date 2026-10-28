@@ -19,6 +19,10 @@ import {
   closePane,
   openPane,
   openReviewPane,
+  openDeepSession,
+  reviewTabs,
+  setWorktreeTab,
+  setAppStore,
   setActivePane,
   setWorktreeStatus,
   clearWorktreeStatus,
@@ -38,6 +42,11 @@ import {
 import {
   tmuxCheck,
   onReviewOpen,
+  onReviewDeepOpen,
+  onReviewChanged,
+  reviewLoad,
+  reposList,
+  worktreesList,
   onWorktreeStatus,
   onWorktreeTitle,
   onWorktreePrStatus,
@@ -106,7 +115,16 @@ function App() {
 
     // Track fullscreen so the top bar can swap traffic-light space for the
     // Flock wordmark. onResized fires on the fullscreen enter/exit transition.
-    const reviewUnlisten = onReviewOpen(id => openReviewPane(id));
+    const ensureReviewWorktree = async () => {
+      const repos = await reposList(); setAppStore("repos",repos);
+      for (const repo of repos) for (const w of await worktreesList(repo.id)) addWorktree(w);
+    };
+    const reviewUnlisten = onReviewOpen(async id => { await ensureReviewWorktree(); openReviewPane(id); });
+    const deepUnlisten = onReviewDeepOpen(async e => { await ensureReviewWorktree(); openDeepSession(e.worktree_id,e.session); });
+    const reviewChangedUnlisten = onReviewChanged(id => {
+      if (reviewTabs()[id] === "deep") reviewLoad(id).then(view => { if(view.review?.kind === "deep") setWorktreeTab(id,"review"); }).catch(()=>{});
+    });
+    onCleanup(() => { void deepUnlisten.then(f=>f()); void reviewChangedUnlisten.then(f=>f()); });
     onCleanup(() => { void reviewUnlisten.then(f => f()); });
     const win = getCurrentWindow();
     win.isFullscreen().then(setIsFullscreen).catch(() => {});
@@ -346,7 +364,8 @@ function App() {
   // Keep the backend's notion of the focused pane in sync so the idle-
   // hibernation monitor never reaps the worktree you're looking at.
   createEffect(() => {
-    setActiveWorktree(appStore.activePaneId).catch(() => {});
+    const id=appStore.activePaneId;
+    setActiveWorktree(id !== null && reviewTabs()[id] === "deep" ? -id : id).catch(() => {});
   });
 
   return (

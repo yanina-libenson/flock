@@ -23,8 +23,8 @@ export function ReviewPane(props: { worktree: Worktree }) {
   });
   const number = (f: ReviewFile, e: ReviewEval) => numbers().get(`${f.path}:${e.id}`);
   const issues = () => review()?.files.flatMap(f => f.evals.filter(e => e.severity !== "ok").map(e => ({ f, e }))) ?? [];
-  async function load() {
-    try { setView(await reviewLoad(props.worktree.id)); }
+  async function load(deep?: boolean) {
+    try { setView(await reviewLoad(props.worktree.id,deep)); }
     catch (e) { setError(String(e)); }
     finally { setLoading(false); }
   }
@@ -45,7 +45,7 @@ export function ReviewPane(props: { worktree: Worktree }) {
       <p class="leading-relaxed">{e().text_es}</p>
       <Show when={e().severity !== "ok"}>
         <div class="rounded-md bg-[var(--color-bg)] p-2 space-y-1">
-          <p class={heading}>Cambio sugerido</p><p>{e().fix_es}</p>
+          <Show when={props.worktree.kind !== "review"} fallback={<><p class={heading}>Se publicaría así</p><p>{e().comment_en}</p><p class="text-xs text-[var(--color-fg-muted)]">Qué dice: {e().comment_es}</p></>}><p class={heading}>Cambio sugerido</p><p>{e().fix_es}</p></Show>
         </div>
       </Show>
     </article>;
@@ -60,7 +60,9 @@ export function ReviewPane(props: { worktree: Worktree }) {
       </>}</Show>
       <Show when={stale()}><span class="text-[var(--color-warn)]">Hay commits nuevos. Pedí que la actualicen.</span></Show>
       <Show when={!review() && (view()?.last_cost_usd ?? 0) > 0}><span>Último intento: {money(view()!.last_cost_usd)}</span></Show>
+      <Show when={view()?.deep_available}><div class="ml-auto flex gap-4" role="tablist" aria-label="Tipo de revisión"><button role="tab" class="py-1 border-b border-transparent" classList={{"border-[var(--color-accent)]! text-[var(--color-fg)]!":review()?.kind !== "deep"}} aria-selected={review()?.kind !== "deep"} onClick={() => void load(false)}>Rápida</button><button role="tab" class="py-1 border-b border-transparent" classList={{"border-[var(--color-accent)]! text-[var(--color-fg)]!":review()?.kind === "deep"}} aria-selected={review()?.kind === "deep"} onClick={() => void load(true)}>Profunda</button></div></Show>
     </div>
+    <Show when={view()?.deep_error}><p role="alert" class="p-3 text-[var(--color-warn)]">La revisión profunda no se pudo leer: {view()?.deep_error}</p></Show>
     <Show when={error() || view()?.error}><p role="alert" class="p-3 text-[var(--color-warn)] border-b border-[var(--color-border)]">{error() || view()?.error}</p></Show>
     <Show when={review()} fallback={<div class="flex-1 flex flex-col gap-4 items-center justify-center p-8 text-center text-[var(--color-fg-muted)]">
       <p>{loading() ? "Cargando la revisión…" : "Pedile al agente o al orquestador: «mostrame explicado este PR»"}</p>

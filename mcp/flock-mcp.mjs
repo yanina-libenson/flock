@@ -159,15 +159,37 @@ const TOOLS = [
   },
   {
     name: "review_open",
-    description: "Show a worktree PR explained in plain Spanish in Flock’s Revisar tab. Opens the cache for free; generates a quick Sonnet review only if the current commit has no cache and generate is true (default). Returns status, eval_count and cost_usd. Never posts to GitHub.",
-    inputSchema: { type: "object", properties: { worktree_id: { type: "number" }, generate: { type: "boolean", default: true } }, required: ["worktree_id"] },
-    handler: (a) => apiCall("POST", "/api/review/open", { worktree_id: a.worktree_id, generate: a.generate !== false }),
+    description: "Show a worktree or GitHub PR explained in plain Spanish in Flock’s read-only Revisar tab. Generate/update only when the user asks. Generates a quick independent Sonnet explanation only if the current commit has no cache, reusing unchanged file explanations after new commits. Cached opens cost nothing. Returns status, eval_count and cost_usd. Supply exactly one of worktree_id or pr_url; a URL opens a review-only worktree with no author agent. generate defaults to true; false only opens the cache.",
+    inputSchema: { type: "object", properties: { worktree_id: { type: "number" }, pr_url: { type: "string" }, generate: { type: "boolean", default: true } }, oneOf: [{ required: ["worktree_id"] }, { required: ["pr_url"] }] },
+    handler: (a) => apiCall("POST", "/api/review/open", { worktree_id: a.worktree_id, pr_url: a.pr_url, generate: a.generate !== false }),
   },
   {
     name: "review_get",
-    description: "Read the cached review as compact numbered findings (verdict_es, n, path, side, start/end, severity, kind, text_es, fix_es, comment_en, comment_es). No generation. Speak Spanish and refer to evals by number. For your own PR, forward the chosen fix_es items to the worktree agent with task_input(submit:true), or make the changes yourself when already in that worktree. Context (parts/flows) is omitted unless include_context is true.",
-    inputSchema: { type: "object", properties: { worktree_id: { type: "number" }, include_context: { type: "boolean", default: false } }, required: ["worktree_id"] },
-    handler: (a) => apiCall("POST", "/api/review/get", { worktree_id: a.worktree_id, include_context: a.include_context === true }),
+    description: "Read the displayed cached review as compact numbered findings: verdict_es, n, path, side, start/end, severity, kind, text_es, fix_es, comment_en, comment_es. No generation. Speak Spanish and refer to evals by number. For the user’s own PR, forward chosen fix_es items to its agent with task_input(submit:true), or make the changes yourself if already in that worktree. Parts/flows are omitted unless include_context is true. Supply exactly one of worktree_id or pr_url.",
+    inputSchema: { type: "object", properties: { worktree_id: { type: "number" }, pr_url: { type: "string" }, include_context: { type: "boolean", default: false } }, oneOf: [{ required: ["worktree_id"] }, { required: ["pr_url"] }] },
+    handler: (a) => apiCall("POST", "/api/review/get", { worktree_id: a.worktree_id, pr_url: a.pr_url, include_context: a.include_context === true }),
+  },
+  {
+    name: "review_post_preview",
+    description: "Validate and freeze an exact GitHub review in English, mapping comments from displayed eval numbers or explicit diff lines. Does NOT post. Translate the user’s Spanish yourself into short, human English; no model call is made here. Show her the EXACT final English body and every comment, with a Spanish gloss under each, and get an EXPLICIT YES before calling review_post(preview_id). A request to prepare, preview, or edit is not approval. Any edit requires a new preview and a new explicit yes. Previews expire after 30 minutes or one posting attempt. Supply exactly one of worktree_id or pr_url.",
+    inputSchema: { type: "object", properties: {
+      worktree_id: { type: "number" }, pr_url: { type: "string" },
+      event: { type: "string", enum: ["COMMENT", "REQUEST_CHANGES", "APPROVE"] }, body_en: { type: "string" },
+      comments: { type: "array", items: { type: "object", properties: { n: { type: "integer", minimum: 1 }, path: { type: "string" }, side: { type: "string", enum: ["LEFT", "RIGHT"] }, start: { type: "integer", minimum: 1 }, end: { type: "integer", minimum: 1 }, text_en: { type: "string" } }, required: ["text_en"], oneOf: [{ required: ["n"] }, { required: ["path", "side", "start", "end"] }] } },
+    }, required: ["event", "body_en", "comments"], oneOf: [{ required: ["worktree_id"] }, { required: ["pr_url"] }] },
+    handler: (a) => apiCall("POST", "/api/review/post-preview", { worktree_id: a.worktree_id, pr_url: a.pr_url, event: a.event, body_en: a.body_en, comments: a.comments }),
+  },
+  {
+    name: "review_post",
+    description: "Post EXACTLY the immutable payload stored by review_post_preview. ONLY call after showing the user the exact final English body and every comment with a Spanish gloss under each AND receiving her EXPLICIT YES in chat. Never infer approval from preparing, previewing, or editing a review. Takes only preview_id, so text cannot change after approval. Single-use; expires after 30 minutes. If the PR changed or the preview expired, create a new preview, show the exact text again, and obtain a new explicit yes. If publication was ambiguous, inspect GitHub before trying a new preview.",
+    inputSchema: { type: "object", properties: { preview_id: { type: "string" } }, required: ["preview_id"], additionalProperties: false },
+    handler: (a) => apiCall("POST", "/api/review/post", { preview_id: a.preview_id }),
+  },
+  {
+    name: "review_deep",
+    description: "Start a separate interactive Claude Opus session running /review-pr <pr_url> --flock-json <path>. WARN the user in Spanish that this costs much more than the quick review and obtain an EXPLICIT YES BEFORE calling this tool. Never start it automatically or treat a request for the quick explanation as consent. Flock shows the deep review in the read-only tab when its validated JSON appears. Supply exactly one of worktree_id or pr_url.",
+    inputSchema: { type: "object", properties: { worktree_id: { type: "number" }, pr_url: { type: "string" } }, oneOf: [{ required: ["worktree_id"] }, { required: ["pr_url"] }] },
+    handler: (a) => apiCall("POST", "/api/review/deep", { worktree_id: a.worktree_id, pr_url: a.pr_url }),
   },
   {
     name: "task_list",
