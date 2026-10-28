@@ -137,6 +137,16 @@ async fn review_open_h(State(ctx): State<ApiCtx>, Json(body): Json<ReviewOpenBod
     }
 }
 
+#[derive(Deserialize)]
+struct ReviewGetBody { worktree_id: i64, include_context: Option<bool> }
+async fn review_get_h(State(ctx): State<ApiCtx>, Json(body): Json<ReviewGetBody>) -> Response {
+    match tokio::task::spawn_blocking(move || crate::review_access::get(&ctx.app.state::<AppState>(),body.worktree_id,body.include_context.unwrap_or(false))).await {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST,e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,e.to_string()).into_response(),
+    }
+}
+
 async fn worktrees(State(ctx): State<ApiCtx>) -> Json<Vec<WorktreeRow>> {
     let st = ctx.app.state::<AppState>();
     let statuses = st.statuses.lock().unwrap().clone();
@@ -831,6 +841,7 @@ async fn kb_reindex_h(State(ctx): State<ApiCtx>) -> Response {
 fn build_router(ctx: ApiCtx) -> Router {
     let api = Router::new()
         .route("/review/open", post(review_open_h))
+        .route("/review/get", post(review_get_h))
         .route("/worktrees", get(worktrees))
         .route("/worktrees/:id/input", post(input))
         .route("/worktrees/:id/transcript", get(transcript_h))

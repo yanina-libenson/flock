@@ -159,9 +159,15 @@ const TOOLS = [
   },
   {
     name: "review_open",
-    description: "Show a worktree PR explained in plain Spanish in Flock’s Revisar tab. Opens the cache for free; generates a quick Sonnet review only if the current commit has no cache and generate is true (default). Returns status and cost_usd. Never posts to GitHub.",
+    description: "Show a worktree PR explained in plain Spanish in Flock’s Revisar tab. Opens the cache for free; generates a quick Sonnet review only if the current commit has no cache and generate is true (default). Returns status, eval_count and cost_usd. Never posts to GitHub.",
     inputSchema: { type: "object", properties: { worktree_id: { type: "number" }, generate: { type: "boolean", default: true } }, required: ["worktree_id"] },
     handler: (a) => apiCall("POST", "/api/review/open", { worktree_id: a.worktree_id, generate: a.generate !== false }),
+  },
+  {
+    name: "review_get",
+    description: "Read the cached review as compact numbered findings (verdict_es, n, path, side, start/end, severity, kind, text_es, fix_es, comment_en, comment_es). No generation. Speak Spanish and refer to evals by number. For your own PR, forward the chosen fix_es items to the worktree agent with task_input(submit:true), or make the changes yourself when already in that worktree. Context (parts/flows) is omitted unless include_context is true.",
+    inputSchema: { type: "object", properties: { worktree_id: { type: "number" }, include_context: { type: "boolean", default: false } }, required: ["worktree_id"] },
+    handler: (a) => apiCall("POST", "/api/review/get", { worktree_id: a.worktree_id, include_context: a.include_context === true }),
   },
   {
     name: "task_list",

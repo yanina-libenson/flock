@@ -66,3 +66,5 @@ grows from your sessions.
 ### PR explanations
 
 `review_open({worktree_id, generate:true})` focuses the worktree's read-only Revisar tab. It generates a quick Spanish explanation only when that commit has no cache, reuses unchanged files after new commits, and returns status and cost. Pass `generate:false` to open without generating. The tab has no generation actions; ask in chat to explain or update the PR.
+
+`review_get({worktree_id, include_context:false})` reads the cached verdict and numbered non-ok evaluations without generating. Speak Spanish and refer to those numbers. When the user says “mandale el 2 y el 5”, forward those evaluations' Spanish `fix_es` texts and `path:line` to the worktree agent with `task_input(submit:true)`; inside the worktree, make the changes directly. Parts and flows are omitted unless explicitly requested with `include_context:true`. `review_open` also returns `eval_count`.
