@@ -1,7 +1,6 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
-import { reviewLoad, reviewGenerate, onReviewChanged, type ReviewEval, type ReviewFile, type ReviewRange, type ReviewView, type Worktree } from "../lib/ipc";
+import { reviewLoad, onReviewChanged, type ReviewEval, type ReviewFile, type ReviewRange, type ReviewView, type Worktree } from "../lib/ipc";
 
-export const reviewButton = "px-3 py-1.5 text-xs rounded-md border border-[var(--color-border-strong)] hover:bg-[var(--color-bg-hover)] disabled:opacity-40 disabled:cursor-wait transition";
 const heading = "text-[11px] uppercase tracking-wider font-semibold text-[var(--color-fg-muted)]";
 const column = "min-w-0 overflow-auto p-5 space-y-4";
 const kinds = { comment: "Comentario", naming: "Nombre", logic: "Lógica", test: "Test", scope: "Alcance", bug: "Error", ok: "Bien" };
@@ -10,7 +9,6 @@ export const money = (n: number) => `US$${n.toFixed(4)}`;
 export function ReviewPane(props: { worktree: Worktree }) {
   const [view, setView] = createSignal<ReviewView>();
   const [error, setError] = createSignal("");
-  const [busy, setBusy] = createSignal(false);
   const [loading, setLoading] = createSignal(true);
   const [selected, setSelected] = createSignal<string | null>(null);
   const [highlight, setHighlight] = createSignal<ReviewRange | null>(null);
@@ -29,19 +27,13 @@ export function ReviewPane(props: { worktree: Worktree }) {
     const listener = onReviewChanged(id => { if (id === props.worktree.id) void load(); });
     onCleanup(() => { void listener.then(f => f()); });
   });
-  async function generate() {
-    setBusy(true); setError("");
-    try { setView(await reviewGenerate(props.worktree.id)); }
-    catch (e) { setError(String(e)); await load(); }
-    finally { setBusy(false); }
-  }
   function EvalCard(p: { eval: ReviewEval; file: ReviewFile; showFile?: boolean }) {
     const e = () => p.eval;
     return <article class="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3 space-y-2 hover:border-[var(--color-accent)]"
       onMouseEnter={() => setHighlight(e())} onMouseLeave={() => setHighlight(null)} onFocusIn={() => setHighlight(e())} onFocusOut={() => setHighlight(null)}>
       <div class="flex gap-2 items-center text-[11px] text-[var(--color-fg-muted)]">
         <span class="rounded-full px-2 py-0.5 font-semibold" classList={{ "text-[var(--color-warn)] bg-[var(--color-warn)]/10": e().severity === "warn", "text-[var(--color-accent)] bg-[var(--color-accent)]/10": e().severity === "info", "text-[var(--color-success)] bg-[var(--color-success)]/10": e().severity === "ok" }}>{kinds[e().kind]}</span>
-        <button class="hover:underline text-left" onClick={() => { setSelected(p.file.path); setHighlight(e()); }}>{p.showFile ? `${p.file.name_es} · ` : ""}línea {e().start}{e().end !== e().start ? `–${e().end}` : ""}{e().side === "LEFT" ? " (antes)" : ""}</button>
+        <span>{p.showFile ? `${p.file.name_es} · ` : ""}línea {e().start}{e().end !== e().start ? `–${e().end}` : ""}{e().side === "LEFT" ? " (antes)" : ""}</span>
       </div>
       <p class="leading-relaxed">{e().text_es}</p>
       <Show when={e().severity !== "ok"}>
@@ -59,15 +51,12 @@ export function ReviewPane(props: { worktree: Worktree }) {
         <span>{money(r().usage.cost_usd)} · última vez: {money(view()?.last_cost_usd ?? 0)}</span>
         <Show when={view()?.cached}><span class="text-[var(--color-success)]">Volver a abrir: 0</span></Show>
       </>}</Show>
-      <Show when={stale()}><span class="text-[var(--color-warn)]">Hay commits nuevos</span></Show>
+      <Show when={stale()}><span class="text-[var(--color-warn)]">Hay commits nuevos. Pedí que la actualicen.</span></Show>
       <Show when={!review() && (view()?.last_cost_usd ?? 0) > 0}><span>Último intento: {money(view()!.last_cost_usd)}</span></Show>
-      <Show when={review()}><button class={`${reviewButton} ml-auto`} disabled={busy() || !stale()} onClick={() => void generate()}>{busy() ? "Generando…" : "Actualizar"}</button></Show>
-      <Show when={busy()}><span role="status">Explicando los cambios…</span></Show>
     </div>
     <Show when={error() || view()?.error}><p role="alert" class="p-3 text-[var(--color-warn)] border-b border-[var(--color-border)]">{error() || view()?.error}</p></Show>
     <Show when={review()} fallback={<div class="flex-1 flex flex-col gap-4 items-center justify-center p-8 text-center text-[var(--color-fg-muted)]">
-      <p>{loading() ? "Cargando la revisión…" : "Te explica el PR en palabras, archivo por archivo, y marca lo que conviene revisar."}</p>
-      <Show when={!loading()}><button class={`${reviewButton} text-[var(--color-fg)]`} disabled={busy()} onClick={() => void generate()}>{busy() ? "Generando…" : "Generar"}</button></Show>
+      <p>{loading() ? "Cargando la revisión…" : "Pedile al agente o al orquestador: «mostrame explicado este PR»"}</p>
     </div>}>
       <div class="flex flex-1 min-h-0">
         <nav class="w-56 shrink-0 overflow-auto border-r border-[var(--color-border)] p-2 space-y-1" aria-label="Archivos del PR">
@@ -99,11 +88,11 @@ export function ReviewPane(props: { worktree: Worktree }) {
                   <For each={diff()?.lines}>{line => {
                     const marked = () => f().evals.find(e => e.severity !== "ok" && (e.side === "RIGHT" ? line.right : line.left) === e.start);
                     const lit = () => { const h = highlight(); const n = h?.side === "LEFT" ? line.left : line.right; return !!h && n != null && n >= h.start && n <= h.end; };
-                    return <button class="flex w-full min-w-max text-left leading-6 px-2 hover:bg-[var(--color-bg-hover)]" classList={{ "bg-[var(--color-success)]/8": line.kind === "add", "bg-[var(--color-danger)]/10": line.kind === "delete", "text-[var(--color-accent)]": line.kind === "hunk", "italic text-[var(--color-fg-muted)]": /^\s*(#|\/\/|\/\*|\*|<!--)/.test(line.text), "bg-[var(--color-accent)]/25!": lit() }} disabled={line.kind === "hunk"} onClick={() => { const n = line.right ?? line.left; if (n) setHighlight({ side: line.right ? "RIGHT" : "LEFT", start: n, end: n }); }} aria-label={`Línea ${line.right ?? line.left ?? "del bloque"}`}>
+                    return <div class="flex w-full min-w-max text-left leading-6 px-2" classList={{ "bg-[var(--color-success)]/8": line.kind === "add", "bg-[var(--color-danger)]/10": line.kind === "delete", "text-[var(--color-accent)]": line.kind === "hunk", "italic text-[var(--color-fg-muted)]": /^\s*(#|\/\/|\/\*|\*|<!--)/.test(line.text), "bg-[var(--color-accent)]/25!": lit() }} aria-label={`Línea ${line.right ?? line.left ?? "del bloque"}`}>
                       <span class="w-4 shrink-0" classList={{ "text-[var(--color-warn)]": marked()?.severity === "warn", "text-[var(--color-accent)]": marked()?.severity === "info" }}>{marked() ? "●" : ""}</span>
                       <span class="w-9 shrink-0 text-right pr-2 text-[var(--color-fg-dim)]">{line.left}</span><span class="w-9 shrink-0 text-right pr-2 text-[var(--color-fg-dim)]">{line.right}</span>
                       <span class="w-4 shrink-0 text-[var(--color-fg-dim)]">{line.kind === "add" ? "+" : line.kind === "delete" ? "−" : ""}</span><span class="whitespace-pre">{line.text || " "}</span>
-                    </button>;
+                    </div>;
                   }}</For>
                 </div>
               </div>

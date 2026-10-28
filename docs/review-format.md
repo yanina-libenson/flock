@@ -43,3 +43,5 @@ The deep-review integration uses an interactive Claude Opus session with first p
 ```
 
 The output path is `<Flock data>/reviews/<worktree_id>/<head_sha>.deep.json`. The skill writes a complete format-v1 document with `kind: "deep"`, the matching target commits, hashes and real line locations. Write to a temporary file then rename it into place so the watcher only sees complete JSON. The app validates and renders the same contract. Implementing the skill's `--flock-json` export is outside this app's scope.
+
+The Revisar tab is read-only. Opening, generating and updating are chat actions through MCP `review_open({worktree_id, generate:true})` (POST `/api/review/open`). `generate:false` only focuses the cached explanation. Empty and stale views ask the user to request the explanation or update in chat; the tab never generates text by itself.

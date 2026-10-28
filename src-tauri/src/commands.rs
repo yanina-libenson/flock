@@ -1062,7 +1062,7 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool, agent: &str) -> Str
          - task_create(repo, prompt, agent, model, effort, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `agent`, `model` and `effort` are ALL REQUIRED — see \"Choosing agent/model/effort\" below. `agent` is \"claude\" or \"codex\"; pick it explicitly every time. Codex agents are only allowed in repos on the Thanx or Flock profile (task_create refuses otherwise), and `model`/`effort` must be valid for the agent you spawn. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
          - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's agent/model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
-         - review_open(worktree_id, generate?): show the user a PR explained in plain Spanish in Flock’s Revisar tab. Use this to show a PR to the user; generate defaults to true, pass false to open without spending tokens. Cached reviews cost nothing.\n\
+         - review_open(worktree_id, generate?): show the user a PR explained in plain Spanish in Flock’s Revisar tab. Use this when the user asks to see a PR explained; the tab is read-only and generations happen through chat, not UI buttons; generate defaults to true, pass false to open without spending tokens. Cached reviews cost nothing.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
          - task_remove(id, force?): remove a worktree — the same as the ✕ in Flock's sidebar (kills its session, deletes the checkout; the git branch is kept). ONLY call this when the user explicitly asks you to remove specific worktrees in this conversation — never on your own initiative, never as cleanup after a task finishes. Confirm which ids you're about to remove if there's any ambiguity. Removal happens immediately, with no dialog. It refuses worktrees with uncommitted changes unless force:true; only pass force after telling the user what uncommitted work would be lost and getting an explicit yes. A forced removal of a worktree that really has uncommitted changes also asks the user in Flock to approve and waits up to 2 minutes; the result says removed, declined by the user, or timed out (not removed). Respect a decline. It can't remove orchestrators.\n\
          - kb_search / kb_read / kb_ingest: your durable memory across sessions."
@@ -2070,13 +2070,4 @@ mod tests {
 pub async fn review_load(app: AppHandle, worktree_id: i64) -> AppResult<crate::review::ReviewView> {
     tauri::async_runtime::spawn_blocking(move || crate::review::load(&app.state::<AppState>(), worktree_id))
         .await.map_err(|e| AppError::msg(e.to_string()))?
-}
-
-#[tauri::command]
-pub async fn review_generate(app: AppHandle, worktree_id: i64) -> AppResult<crate::review::ReviewView> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let result = crate::review::generate(&app.state::<AppState>(), worktree_id);
-        let _ = app.emit("review:changed", worktree_id);
-        result
-    }).await.map_err(|e| AppError::msg(e.to_string()))?
 }
