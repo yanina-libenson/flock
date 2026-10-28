@@ -2095,3 +2095,18 @@ pub async fn review_load(app: AppHandle, worktree_id: i64, deep: Option<bool>) -
     tauri::async_runtime::spawn_blocking(move || crate::review::load_selected(&app.state::<AppState>(), worktree_id, deep))
         .await.map_err(|e| AppError::msg(e.to_string()))?
 }
+
+#[tauri::command]
+pub async fn review_pr_url(app: AppHandle, worktree_id: i64) -> AppResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let w = state.db.get_worktree(worktree_id)?;
+        let env = crate::review::worktree_env(&state, &w)?;
+        let result = crate::review::run(
+            Path::new(&w.path), "gh", &["pr", "view", "--json", "url"], &env,
+        );
+        Ok(result.ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["url"].as_str().map(String::from)))
+    }).await.map_err(|e| AppError::msg(e.to_string()))?
+}

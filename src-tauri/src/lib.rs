@@ -49,6 +49,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::review_load,
+            commands::review_pr_url,
             commands::repo_add,
             commands::repos_list,
             commands::repo_remove,
