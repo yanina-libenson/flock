@@ -158,6 +158,12 @@ const TOOLS = [
       }),
   },
   {
+    name: "review_open",
+    description: "Show a worktree PR explained in plain Spanish in Flock’s Revisar tab. Opens the cache for free; generates a quick Sonnet review only if the current commit has no cache and generate is true (default). Returns status and cost_usd. Never posts to GitHub.",
+    inputSchema: { type: "object", properties: { worktree_id: { type: "number" }, generate: { type: "boolean", default: true } }, required: ["worktree_id"] },
+    handler: (a) => apiCall("POST", "/api/review/open", { worktree_id: a.worktree_id, generate: a.generate !== false }),
+  },
+  {
     name: "task_list",
     description: "List all worktrees with their live agent status (working / idle / needs_input).",
     inputSchema: { type: "object", properties: {} },
