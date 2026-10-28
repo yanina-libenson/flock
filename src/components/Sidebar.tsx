@@ -118,7 +118,7 @@ export function Sidebar(props: {
     try {
       const codex = await codexOptions();
       setAppStore("codexRepoIds", codex.repo_ids);
-      setAppStore("codexProfile", codex.profile);
+      setAppStore("codexProfiles", codex.profiles);
     } catch (e) {
       console.error("codexOptions failed", e);
     }
@@ -464,7 +464,7 @@ export function Sidebar(props: {
           >
             <Pencil size={12} />
           </button>
-          {/* Agent switch: offered on Thanx worktrees (and always on a Codex
+          {/* Agent switch: offered on Thanx/Flock worktrees (and always on a Codex
               one, to get back to Claude). */}
           <Show when={w.agent === "codex" || canUseCodex(w)}>
             <button

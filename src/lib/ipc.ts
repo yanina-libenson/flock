@@ -38,7 +38,7 @@ export interface Worktree {
 }
 
 /// "claude" (default) or "codex" — the fallback when the Claude account is
-/// out of credit. Codex is only offered for Thanx-profile worktrees.
+/// out of credit. Codex is only offered for Thanx/Flock-profile worktrees.
 export type Agent = "claude" | "codex";
 
 export type PermissionMode =
@@ -128,11 +128,11 @@ export const worktreeSetPermissionMode = (id: number, mode: PermissionMode) =>
 /// updated row.
 export const worktreeSetAgent = (id: number, agent: Agent) =>
   invoke<Worktree>("worktree_set_agent", { id, agent });
-/// Where Codex is offered: the one env profile it runs under (orchestrators
+/// Where Codex is offered: the env profiles it runs under (orchestrators
 /// match on their chosen Profile) and the repos bound to it (worktrees match on
 /// their repo). The backend enforces the same rule.
 export interface CodexOptions {
-  profile: string;
+  profiles: string[];
   repo_ids: number[];
 }
 export const codexOptions = () => invoke<CodexOptions>("codex_options");
@@ -287,7 +287,7 @@ export interface CreateOrchestratorArgs {
   model: string;
   /// Claude `--effort` for the orchestrator. Always explicit.
   effort: string;
-  /// Which agent runs the orchestrator. Codex only on the Thanx profile.
+  /// Which agent runs the orchestrator. Codex only on the Thanx or Flock profile.
   agent?: Agent;
 }
 

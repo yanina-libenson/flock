@@ -313,7 +313,7 @@ pub fn resolve_child_agent(explicit: Option<&str>) -> AppResult<String> {
 
 /// Settle the agent a task (or every task a schedule fires) runs, and validate
 /// everything that depends on it: `model`/`effort` must suit that agent, and
-/// Codex is only allowed in Thanx-profile repos. Shared by `start_task_core`
+/// Codex is only allowed in repos on a Codex profile (Thanx or Flock). Shared by `start_task_core`
 /// and `schedule_create_core` so both refuse before creating anything.
 fn settle_agent(
     cfg: &env_profiles::EnvConfig,
@@ -333,7 +333,7 @@ fn settle_agent(
         return Err(AppError::msg(format!(
             "refusing: Codex agents are only allowed in repos on the {} profile, and repo {:?} \
              isn't one. Pass agent: \"claude\" to spawn a Claude agent there instead.",
-            env_profiles::CODEX_PROFILE,
+            env_profiles::codex_profiles_label(),
             repo.name
         )));
     }
@@ -1059,7 +1059,7 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool, agent: &str) -> Str
     };
     let tools = if has_mcp {
         "You have the Flock MCP tools:\n\
-         - task_create(repo, prompt, agent, model, effort, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `agent`, `model` and `effort` are ALL REQUIRED — see \"Choosing agent/model/effort\" below. `agent` is \"claude\" or \"codex\"; pick it explicitly every time. Codex agents are only allowed in repos on the Thanx profile (task_create refuses otherwise), and `model`/`effort` must be valid for the agent you spawn. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
+         - task_create(repo, prompt, agent, model, effort, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `agent`, `model` and `effort` are ALL REQUIRED — see \"Choosing agent/model/effort\" below. `agent` is \"claude\" or \"codex\"; pick it explicitly every time. Codex agents are only allowed in repos on the Thanx or Flock profile (task_create refuses otherwise), and `model`/`effort` must be valid for the agent you spawn. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
          - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's agent/model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
@@ -1085,7 +1085,7 @@ tells you the Claude account is out of credit."
         "Choosing agent/model/effort — `agent`, `model` and `effort` are ALL REQUIRED on \
 every task_create (task_create rejects a call missing any of them; never rely on a \
 default, it changes over time). Decide in this order:\n\n\
-1. AGENT (provider). {provider_default} Codex only works in Thanx-profile repos. Never \
+1. AGENT (provider). {provider_default} Codex only works in repos on the Thanx or Flock profile. Never \
 switch provider on your own initiative (e.g. not for a \"second opinion\").\n\n\
 2. CLAUDE agent — pick the FIRST row that fits (model / effort):\n\
 - Mechanical, fully specified (renames, formatting, boilerplate, dependency bumps, scripted edits): haiku / low\n\
@@ -1160,12 +1160,12 @@ pub fn start_orchestrator_core(
     validate_model_for(agent, model)?;
     validate_effort_for(agent, effort)?;
     let cfg = env_profiles::load();
-    // Same Thanx-only rule as worktrees. The scratch dir matches no binding, so
-    // this is really "the chosen Profile is Thanx".
+    // Same Codex-profile rule as worktrees. The scratch dir matches no binding, so
+    // this is really "the chosen Profile is a Codex one".
     if agent == AGENT_CODEX && !env_profiles::codex_allowed(&cfg, env.as_deref(), "") {
         return Err(AppError::msg(format!(
             "Codex orchestrators need the {} profile",
-            env_profiles::CODEX_PROFILE
+            env_profiles::codex_profiles_label()
         )));
     }
     let repo = ensure_internal_repo(&state.db)?;
@@ -1270,7 +1270,7 @@ pub struct CreateOrchestratorArgs {
     pub model: String,
     /// `--effort` for the orchestrator. Required, same reason as model.
     pub effort: String,
-    /// `"claude"` (default) or `"codex"` (Thanx profile only).
+    /// `"claude"` (default) or `"codex"` (Thanx or Flock profile only).
     #[serde(default)]
     pub agent: Option<String>,
 }
@@ -1376,7 +1376,7 @@ pub fn worktree_set_permission_mode(
 /// the incoming agent already has a session here (a previous switch), it's
 /// resumed with the handoff as its next turn, so it keeps its own context.
 ///
-/// Codex is only offered on the Thanx profile (`env_profiles::codex_allowed`);
+/// Codex is only offered on the Thanx and Flock profiles (`env_profiles::codex_allowed`);
 /// switching back to Claude is always allowed. An orchestrator also gets its
 /// orchestration instructions again, written for the new agent (Claude via
 /// `--append-system-prompt`, Codex via `developer_instructions`) — an
@@ -1408,7 +1408,7 @@ pub fn worktree_set_agent(state: State<'_, AppState>, id: i64, agent: String) ->
     if agent == AGENT_CODEX && !env_profiles::codex_allowed(&cfg, w.env_profile.as_deref(), &repo.path) {
         return Err(AppError::msg(format!(
             "Codex is only available on the {} profile",
-            env_profiles::CODEX_PROFILE
+            env_profiles::codex_profiles_label()
         )));
     }
     let env_vars = env_profiles::resolve_vars_for_worktree(&cfg, w.env_profile.as_deref(), &repo.path);
@@ -1462,7 +1462,7 @@ pub fn worktree_set_agent(state: State<'_, AppState>, id: i64, agent: String) ->
 /// `start_task_core` and `start_orchestrator_core` enforce the same rule.
 #[derive(serde::Serialize)]
 pub struct CodexOptions {
-    pub profile: &'static str,
+    pub profiles: &'static [&'static str],
     pub repo_ids: Vec<i64>,
 }
 
@@ -1470,7 +1470,7 @@ pub struct CodexOptions {
 pub fn codex_options(state: State<'_, AppState>) -> AppResult<CodexOptions> {
     let cfg = env_profiles::load();
     Ok(CodexOptions {
-        profile: env_profiles::CODEX_PROFILE,
+        profiles: env_profiles::CODEX_PROFILES,
         repo_ids: state
             .db
             .list_repos()?
@@ -1971,11 +1971,11 @@ mod tests {
         // Claude rejects Codex-only values.
         assert!(s(&thanx, Some("claude"), Some("gpt-5.5"), Some("high")).is_err());
         assert!(s(&thanx, Some("claude"), Some("sonnet"), Some("default")).is_err());
-        // Codex only on Thanx-profile repos.
+        // Codex only on Thanx/Flock-profile repos.
         let err = s(&repo("/tmp/Personal/ixi"), Some("codex"), Some("default"), Some("high"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("Codex agents are only allowed in repos on the Thanx profile"), "{err}");
+        assert!(err.contains("Codex agents are only allowed in repos on the Thanx or Flock profile"), "{err}");
         assert_eq!(s(&repo("/tmp/Personal/ixi"), None, Some("sonnet"), Some("high")).unwrap(), "claude");
     }
 

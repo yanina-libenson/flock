@@ -39,10 +39,9 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
   const [model, setModel] = createSignal<string>("opus");
   const [effort, setEffort] = createSignal<string>("high");
 
-  /// Codex is offered only when the chosen Profile is the Codex one (Thanx);
-  /// the backend refuses it otherwise.
-  const codexAllowed = () =>
-    appStore.codexProfile !== null && selectedEnv() === appStore.codexProfile;
+  /// Codex is offered only when the chosen Profile is a Codex one (Thanx or
+  /// Flock); the backend refuses it otherwise.
+  const codexAllowed = () => appStore.codexProfiles.includes(selectedEnv());
   const modelOptions = (): readonly string[] =>
     agent() === "codex" ? CODEX_MODEL_OPTIONS : MODEL_OPTIONS;
   const effortOptions = (): readonly string[] =>
@@ -54,7 +53,7 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
     setModel(a === "codex" ? "default" : "opus");
     setEffort("high");
   }
-  // Moving off the Thanx profile drops a Codex choice back to Claude.
+  // Moving off a Codex profile drops a Codex choice back to Claude.
   createEffect(() => {
     if (!codexAllowed() && agent() === "codex") setAgent("claude");
   });
