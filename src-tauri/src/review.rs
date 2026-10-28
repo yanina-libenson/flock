@@ -890,6 +890,7 @@ fn generate_at(state: &AppState, id: i64, root: &Path) -> AppResult<ReviewView> 
 pub struct Opened {
     pub worktree_id: i64,
     pub status: String,
+    pub eval_count: usize,
     pub cost_usd: f64,
 }
 pub fn open(app: &AppHandle, id: i64, should_generate: bool) -> AppResult<Opened> {
@@ -913,6 +914,11 @@ pub fn open(app: &AppHandle, id: i64, should_generate: bool) -> AppResult<Opened
     };
     Ok(Opened {
         worktree_id: id,
+        eval_count: view
+            .review
+            .as_ref()
+            .map(|r| crate::review_access::evals(r).len())
+            .unwrap_or(0),
         status: if view
             .review
             .as_ref()

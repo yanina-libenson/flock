@@ -12,6 +12,7 @@ mod monitor;
 mod notify;
 mod pr;
 mod review;
+mod review_access;
 mod pty;
 mod schedule;
 mod state;

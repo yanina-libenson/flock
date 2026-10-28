@@ -16,6 +16,12 @@ export function ReviewPane(props: { worktree: Worktree }) {
   const stale = () => !!review() && review()!.target.head_sha !== view()?.head_sha;
   const file = createMemo(() => review()?.files.find(f => f.path === selected()));
   const diff = createMemo(() => view()?.files.find(f => f.path === selected()));
+  const numbers = createMemo(() => {
+    const result = new Map<string,number>(); let n=0;
+    for (const f of review()?.files ?? []) for (const e of f.evals) if(e.severity !== "ok") result.set(`${f.path}:${e.id}`,++n);
+    return result;
+  });
+  const number = (f: ReviewFile, e: ReviewEval) => numbers().get(`${f.path}:${e.id}`);
   const issues = () => review()?.files.flatMap(f => f.evals.filter(e => e.severity !== "ok").map(e => ({ f, e }))) ?? [];
   async function load() {
     try { setView(await reviewLoad(props.worktree.id)); }
@@ -32,6 +38,7 @@ export function ReviewPane(props: { worktree: Worktree }) {
     return <article class="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3 space-y-2 hover:border-[var(--color-accent)]"
       onMouseEnter={() => setHighlight(e())} onMouseLeave={() => setHighlight(null)} onFocusIn={() => setHighlight(e())} onFocusOut={() => setHighlight(null)}>
       <div class="flex gap-2 items-center text-[11px] text-[var(--color-fg-muted)]">
+        <Show when={e().severity !== "ok"}><span class="font-mono font-semibold text-[var(--color-fg)]" aria-label={`Evaluación ${number(p.file,e())}`}>{number(p.file,e())}</span></Show>
         <span class="rounded-full px-2 py-0.5 font-semibold" classList={{ "text-[var(--color-warn)] bg-[var(--color-warn)]/10": e().severity === "warn", "text-[var(--color-accent)] bg-[var(--color-accent)]/10": e().severity === "info", "text-[var(--color-success)] bg-[var(--color-success)]/10": e().severity === "ok" }}>{kinds[e().kind]}</span>
         <span>{p.showFile ? `${p.file.name_es} · ` : ""}línea {e().start}{e().end !== e().start ? `–${e().end}` : ""}{e().side === "LEFT" ? " (antes)" : ""}</span>
       </div>
@@ -86,10 +93,10 @@ export function ReviewPane(props: { worktree: Worktree }) {
               <div class={column}><h2 class={heading}>Código</h2><p class="font-mono text-[11px] text-[var(--color-fg-dim)] break-all">{f().path}</p>
                 <div class="overflow-auto border border-[var(--color-border)] rounded-md py-2 bg-black font-mono text-xs">
                   <For each={diff()?.lines}>{line => {
-                    const marked = () => f().evals.find(e => e.severity !== "ok" && (e.side === "RIGHT" ? line.right : line.left) === e.start);
+                    const marked = () => f().evals.filter(e => e.severity !== "ok" && (e.side === "RIGHT" ? line.right : line.left) === e.start);
                     const lit = () => { const h = highlight(); const n = h?.side === "LEFT" ? line.left : line.right; return !!h && n != null && n >= h.start && n <= h.end; };
                     return <div class="flex w-full min-w-max text-left leading-6 px-2" classList={{ "bg-[var(--color-success)]/8": line.kind === "add", "bg-[var(--color-danger)]/10": line.kind === "delete", "text-[var(--color-accent)]": line.kind === "hunk", "italic text-[var(--color-fg-muted)]": /^\s*(#|\/\/|\/\*|\*|<!--)/.test(line.text), "bg-[var(--color-accent)]/25!": lit() }} aria-label={`Línea ${line.right ?? line.left ?? "del bloque"}`}>
-                      <span class="w-4 shrink-0" classList={{ "text-[var(--color-warn)]": marked()?.severity === "warn", "text-[var(--color-accent)]": marked()?.severity === "info" }}>{marked() ? "●" : ""}</span>
+                      <span class="min-w-6 pr-1 shrink-0 text-[10px]" classList={{ "text-[var(--color-warn)]": marked().some(e=>e.severity === "warn"), "text-[var(--color-accent)]": marked().every(e=>e.severity === "info") }}>{marked().map(e=>number(f(),e)).join(",")}</span>
                       <span class="w-9 shrink-0 text-right pr-2 text-[var(--color-fg-dim)]">{line.left}</span><span class="w-9 shrink-0 text-right pr-2 text-[var(--color-fg-dim)]">{line.right}</span>
                       <span class="w-4 shrink-0 text-[var(--color-fg-dim)]">{line.kind === "add" ? "+" : line.kind === "delete" ? "−" : ""}</span><span class="whitespace-pre">{line.text || " "}</span>
                     </div>;
