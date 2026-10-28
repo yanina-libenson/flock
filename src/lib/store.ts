@@ -443,3 +443,15 @@ export function prunePanes() {
     return { ...s, openPaneIds, activePaneId, activatedPaneIds };
   });
 }
+
+// Review selection is separate from opening the terminal: MCP may focus a review
+// without starting the author's agent. Generations are always explicit backend calls.
+const [reviewTabs, setReviewTabs] = createSignal<Record<number, "terminal" | "review">>({});
+export { reviewTabs };
+export function setWorktreeTab(id: number, tab: "terminal" | "review") {
+  setReviewTabs(prev => ({ ...prev, [id]: tab }));
+}
+export function openReviewPane(id: number) {
+  setWorktreeTab(id, "review");
+  openPane(id);
+}

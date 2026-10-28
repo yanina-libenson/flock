@@ -9,7 +9,7 @@ import {
 } from "solid-js";
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
-import { TerminalPane } from "./components/TerminalPane";
+import { WorktreePane } from "./components/WorktreePane";
 import { NewWorktreeModal } from "./components/NewWorktreeModal";
 import { NewOrchestratorModal } from "./components/NewOrchestratorModal";
 import { SettingsModal, remoteEnabledPref } from "./components/SettingsModal";
@@ -18,6 +18,7 @@ import {
   appStore,
   closePane,
   openPane,
+  openReviewPane,
   setActivePane,
   setWorktreeStatus,
   clearWorktreeStatus,
@@ -36,6 +37,7 @@ import {
 } from "./lib/store";
 import {
   tmuxCheck,
+  onReviewOpen,
   onWorktreeStatus,
   onWorktreeTitle,
   onWorktreePrStatus,
@@ -104,6 +106,8 @@ function App() {
 
     // Track fullscreen so the top bar can swap traffic-light space for the
     // Flock wordmark. onResized fires on the fullscreen enter/exit transition.
+    const reviewUnlisten = onReviewOpen(id => openReviewPane(id));
+    onCleanup(() => { void reviewUnlisten.then(f => f()); });
     const win = getCurrentWindow();
     win.isFullscreen().then(setIsFullscreen).catch(() => {});
     const fsUnlisten = win.onResized(() => {
@@ -441,7 +445,7 @@ function App() {
                   // nothing until clicked, which re-activates and resumes them.
                   return (
                     <Show when={w() && appStore.activatedPaneIds.includes(id)}>
-                      <TerminalPane
+                      <WorktreePane
                         worktree={w()!}
                         active={appStore.activePaneId === id}
                       />

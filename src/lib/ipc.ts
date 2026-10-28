@@ -455,3 +455,31 @@ export const onWorktreeCreated = (
   cb: (w: Worktree) => void,
 ): Promise<UnlistenFn> =>
   listen<Worktree>("worktree:created", (e) => cb(e.payload));
+
+// ---------- Revisar (shared JSON contract: docs/review-format.md) ----------
+export type ReviewSide = "LEFT" | "RIGHT";
+export interface ReviewRange { side: ReviewSide; start: number; end: number }
+export interface ReviewPart extends ReviewRange { name_es: string; code_name: string; what_es: string }
+export interface ReviewEval extends ReviewRange {
+  id: string; severity: "warn" | "info" | "ok";
+  kind: "comment" | "naming" | "logic" | "test" | "scope" | "bug" | "ok";
+  text_es: string; fix_es: string; comment_en: string; comment_es: string;
+}
+export interface ReviewFile {
+  path: string; status: "added" | "modified" | "deleted" | "renamed"; diff_hash: string;
+  skipped: boolean; skip_reason_es: string | null; name_es: string; role_es: string;
+  parts: ReviewPart[]; evals: ReviewEval[];
+}
+export interface ReviewUsage { model: string; input_tokens: number; output_tokens: number; cache_read_tokens: number; cost_usd: number }
+export interface Review {
+  version: 1; kind: "quick" | "deep";
+  target: { repo: string; own: boolean; worktree_id: number; pr_url: string | null; base_sha: string; head_sha: string };
+  summary: { what_es: string; flows: { who_es: string; steps: { label_es: string; changed: boolean }[] }[]; verdict_es: string };
+  files: ReviewFile[]; usage: ReviewUsage; generated_at: string;
+}
+export interface ReviewDiffLine { kind: "add" | "delete" | "context" | "hunk"; text: string; left: number | null; right: number | null }
+export interface ReviewDiffFile { path: string; status: string; diff_hash: string; diff: string; skip_reason_es: string | null; lines: ReviewDiffLine[] }
+export interface ReviewView { worktree_id: number; head_sha: string; review: Review | null; files: ReviewDiffFile[]; cached: boolean; last_cost_usd: number; error: string | null }
+export const reviewLoad = (worktreeId: number) => invoke<ReviewView>("review_load", { worktreeId });
+export const onReviewOpen = (cb: (id: number) => void) => listen<number>("review:open", e => cb(e.payload));
+export const onReviewChanged = (cb: (id: number) => void) => listen<number>("review:changed", e => cb(e.payload));

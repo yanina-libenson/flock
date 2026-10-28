@@ -11,6 +11,7 @@ mod mcp;
 mod monitor;
 mod notify;
 mod pr;
+mod review;
 mod pty;
 mod schedule;
 mod state;
@@ -36,12 +37,14 @@ pub fn run() {
         .setup(|app| {
             monitor::spawn(app.handle().clone());
             pr::spawn(app.handle().clone());
+            review::spawn(app.handle().clone());
             schedule::spawn(app.handle().clone());
             kb::start_indexing(app.handle().clone());
             mcp::prewarm(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::review_load,
             commands::repo_add,
             commands::repos_list,
             commands::repo_remove,

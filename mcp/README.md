@@ -62,3 +62,7 @@ SQLite FTS5 and kept fresh as you edit notes in Obsidian. The server's
 instructions tell the agent to `kb_search` for context before working and
 `kb_ingest` learnings back as linked markdown notes — so the knowledge graph
 grows from your sessions.
+
+### PR explanations
+
+`review_open({worktree_id, generate:true})` focuses the worktree's read-only Revisar tab. It generates a quick Spanish explanation only when that commit has no cache, reuses unchanged files after new commits, and returns status and cost. Pass `generate:false` to open without generating. The tab has no generation actions; ask in chat to explain or update the PR.
