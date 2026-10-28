@@ -501,9 +501,13 @@ fn teardown_worktree(app: &AppHandle, state: &AppState, w: &Worktree, force: boo
     // and the server logs get noisy.
     state.pty.kill(w.id).ok();
     pty::tmux_kill_session(w.id);
+    state.pty.kill(-w.id).ok();
+    pty::tmux_kill_session(-w.id);
     // Drop the worktree's resume-on-input lock — it's gone for good now.
     state.input_locks.lock().unwrap().remove(&w.id);
-    if w.kind == "orchestrator" {
+    if w.kind == "review" && crate::review_github::source(w.id).is_ok_and(|s| !s.checkout) {
+        let _ = std::fs::remove_dir_all(Path::new(&w.path));
+    } else if w.kind == "orchestrator" {
         // An orchestrator isn't a git worktree — it's a plain scratch dir. Just
         // remove the directory.
         let _ = std::fs::remove_dir_all(Path::new(&w.path));
@@ -665,6 +669,9 @@ pub fn worktree_remove_answer(state: State<'_, AppState>, request_id: u64, appro
 #[tauri::command]
 pub fn worktree_dirty(state: State<'_, AppState>, id: i64) -> AppResult<git::DirtySummary> {
     let w = state.db.get_worktree(id)?;
+    if w.kind == "review" && crate::review_github::source(id).is_ok_and(|s| !s.checkout) {
+        return Ok(git::DirtySummary { staged: 0, unstaged: 0, untracked: 0 });
+    }
     git::dirty_summary(Path::new(&w.path))
 }
 
@@ -710,7 +717,14 @@ pub fn session_open(
     state: State<'_, AppState>,
     args: OpenSessionArgs,
 ) -> AppResult<()> {
+    if args.worktree_id < 0 {
+        let id = args.worktree_id.checked_neg().ok_or_else(|| AppError::msg("Sesión inválida"))?;
+        return crate::review_deep::attach(&app, &state, id, args.cols, args.rows);
+    }
     let w = state.db.get_worktree(args.worktree_id)?;
+    if w.kind == "review" {
+        return Err(AppError::msg("Este worktree es de solo lectura"));
+    }
     // Resolve per-environment vars: a persisted `env_profile` (an
     // orchestrator's explicit account choice) wins; otherwise fall back to
     // the *repo's* registered path (worktrees live elsewhere, so folder
@@ -1062,8 +1076,9 @@ fn orchestrator_system_prompt(repos: &[Repo], has_mcp: bool, agent: &str) -> Str
          - task_create(repo, prompt, agent, model, effort, confirm_cross_account?): spawn an agent in a fresh worktree of `repo`. The `prompt` is delivered as the agent's FIRST TURN and runs automatically — put the full, self-contained task instructions HERE. It appears in Flock's UI and is linked to you as a child (your fleet). `repo` MUST be one of the exact names in \"Registered repos\" below — never guess a plausible-sounding name (e.g. \"backend\"); if you're not sure which registered repo a task belongs in, ask the user rather than picking the closest-sounding name; a wrong guess silently creates the worktree in an unrelated repo. `agent`, `model` and `effort` are ALL REQUIRED — see \"Choosing agent/model/effort\" below. `agent` is \"claude\" or \"codex\"; pick it explicitly every time. Codex agents are only allowed in repos on the Thanx or Flock profile (task_create refuses otherwise), and `model`/`effort` must be valid for the agent you spawn. If the repo you named resolves to a *different* Claude account than you're running under, task_create refuses with an error explaining the mismatch — that almost always means you named the wrong repo (double-check \"Registered repos\"); only pass `confirm_cross_account: true` if you're certain spawning across accounts is actually intended, and prefer asking the user first.\n\
          - task_list / task_status: see your whole fleet and whose turn it is (working / idle / needs_input); both include each child's agent/model/effort.\n\
          - task_read(id): read a child agent's conversation transcript so you can follow its work.\n\
-         - review_open(worktree_id, generate?): show the user a PR explained in plain Spanish in Flock’s Revisar tab. Use this when the user asks to see a PR explained; the tab is read-only and generations happen through chat, not UI buttons; generate defaults to true, pass false to open without spending tokens. Cached reviews cost nothing.\n\
-         - review_get(worktree_id, include_context?): get compact numbered evaluations from the cached review. Speak to the user in Spanish and refer to evals by number. For her own PR, send the chosen fix_es items to its agent through task_input(submit:true); inside that worktree, make the requested changes yourself.\n\
+         - review_open(worktree_id? | pr_url?, generate?): show a PR explained in Flock’s read-only Revisar tab. Generate or update only when the user asks; cached explanations cost nothing. review_get returns compact numbered evals; parts and flows only with include_context:true. Speak Spanish and refer to evals by number. For her own PR, forward selected fix_es items with task_input(submit:true); inside that worktree, make the changes yourself.\n\
+         - review_post_preview(worktree_id? | pr_url?, event, body_en, comments): freeze the exact English GitHub review (comments use n or an explicit path/side/start/end plus text_en). Show the final English plus a Spanish gloss of the body and EVERY comment, and ask for an explicit yes. ONLY AFTER that yes call review_post(preview_id); never infer approval from a request to prepare or preview. Previews expire in 30 minutes and are single-use; edits need a new preview and a new yes. Translate her Spanish yourself into short human English.\n\
+         - review_deep(worktree_id? | pr_url?): starts interactive Opus with /review-pr and the shared JSON export. Warn her it costs much more than the quick review, and get an explicit yes FIRST. The tab shows the deep review when the file is ready.\n\
          - task_input(id, text, submit): send a FOLLOW-UP to a running child (answer a question, redirect, unblock). To send a message it will act on, pass submit:true — that types the text AND presses Enter. Plain text without submit just sits in its input box UNSENT. Do NOT use task_input to give a child its initial task — use task_create's prompt for that.\n\
          - task_remove(id, force?): remove a worktree — the same as the ✕ in Flock's sidebar (kills its session, deletes the checkout; the git branch is kept). ONLY call this when the user explicitly asks you to remove specific worktrees in this conversation — never on your own initiative, never as cleanup after a task finishes. Confirm which ids you're about to remove if there's any ambiguity. Removal happens immediately, with no dialog. It refuses worktrees with uncommitted changes unless force:true; only pass force after telling the user what uncommitted work would be lost and getting an explicit yes. A forced removal of a worktree that really has uncommitted changes also asks the user in Flock to approve and waits up to 2 minutes; the result says removed, declined by the user, or timed out (not removed). Respect a decline. It can't remove orchestrators.\n\
          - kb_search / kb_read / kb_ingest: your durable memory across sessions."
@@ -1402,6 +1417,10 @@ pub fn worktree_set_agent(state: State<'_, AppState>, id: i64, agent: String) ->
     let _guard = lock.lock().unwrap();
 
     let w = state.db.get_worktree(id)?;
+    if w.kind == "review" {
+        return Err(AppError::msg("Este worktree es de solo lectura"));
+    }
+
     if w.agent == agent {
         return Ok(w);
     }
@@ -1511,6 +1530,7 @@ const RESUME_READY_TIMEOUT: Duration = Duration::from_secs(20);
 /// outcome — never an opaque 502 (see `api::input_error_response`).
 #[derive(Debug)]
 pub enum DeliverError {
+    ReadOnly,
     /// No worktree row for this id.
     NotFound,
     /// Worktree exists but has no persisted Claude session to resume.
@@ -1541,6 +1561,9 @@ pub fn deliver_input(
     payload: &str,
     submit: bool,
 ) -> Result<(), DeliverError> {
+    if state.db.get_worktree(id).is_ok_and(|w| w.kind == "review") {
+        return Err(DeliverError::ReadOnly);
+    }
     // Per-worktree lock so concurrent deliveries to a dead session resume once.
     let lock = {
         let mut locks = state.input_locks.lock().unwrap();
@@ -2068,7 +2091,7 @@ mod tests {
 // ---------- Revisar ----------
 
 #[tauri::command]
-pub async fn review_load(app: AppHandle, worktree_id: i64) -> AppResult<crate::review::ReviewView> {
-    tauri::async_runtime::spawn_blocking(move || crate::review::load(&app.state::<AppState>(), worktree_id))
+pub async fn review_load(app: AppHandle, worktree_id: i64, deep: Option<bool>) -> AppResult<crate::review::ReviewView> {
+    tauri::async_runtime::spawn_blocking(move || crate::review::load_selected(&app.state::<AppState>(), worktree_id, deep))
         .await.map_err(|e| AppError::msg(e.to_string()))?
 }

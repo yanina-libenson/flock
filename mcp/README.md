@@ -65,6 +65,20 @@ grows from your sessions.
 
 ### PR explanations
 
-`review_open({worktree_id, generate:true})` focuses the worktree's read-only Revisar tab. It generates a quick Spanish explanation only when that commit has no cache, reuses unchanged files after new commits, and returns status and cost. Pass `generate:false` to open without generating. The tab has no generation actions; ask in chat to explain or update the PR.
+Speak Spanish and refer to the numbered evaluations. When the user says “mandale el 2 y el 5” on her own PR, forward those findings' `fix_es` texts and `path:line` with `task_input(submit:true)`; inside that worktree, make the changes directly. Cached explanations cost nothing, and parts/flows are omitted from `review_get` unless explicitly requested.
 
-`review_get({worktree_id, include_context:false})` reads the cached verdict and numbered non-ok evaluations without generating. Speak Spanish and refer to those numbers. When the user says “mandale el 2 y el 5”, forward those evaluations' Spanish `fix_es` texts and `path:line` to the worktree agent with `task_input(submit:true)`; inside the worktree, make the changes directly. Parts and flows are omitted unless explicitly requested with `include_context:true`. `review_open` also returns `eval_count`.
+All Revisar actions happen in chat; the tab is read-only. The complete tools are:
+
+| Tool | Inputs | Result / action |
+| --- | --- | --- |
+| `review_open` | exactly one of `worktree_id`, `pr_url`; `generate` defaults true | Focus, generate or incrementally update. Cached opens cost nothing; returns status, eval_count, cost_usd. A URL creates a review-only worktree with no author agent. |
+| `review_get` | exactly one target; `include_context` defaults false | Cached verdict and numbered findings from the displayed quick/deep snapshot. No model call. |
+| `review_post_preview` | exactly one target; `event`, `body_en`, `comments` | Freeze validated English text and line mappings; return rendered text and preview_id. |
+| `review_post` | `preview_id` only | Post the exact immutable preview, once, before its 30-minute expiry. |
+| `review_deep` | exactly one target | Start the separate interactive Opus review and display its JSON export when ready. |
+
+For publication, comments use either `{n, text_en}` (a displayed evaluation number) or `{path, side, start, end, text_en}` with real file line numbers and `LEFT`/`RIGHT`. Events are `COMMENT`, `REQUEST_CHANGES`, or `APPROVE`. The chatting agent translates Spanish itself into short, human English. **Before review_post, show the exact English body and every inline comment with a Spanish gloss under each, and obtain an explicit yes in chat.** Preparing, previewing or editing is not approval. Edits or an expired/changed preview need a new preview and a new yes. If a posting response is ambiguous, inspect GitHub before trying again.
+
+Before `review_deep`, warn the user in Spanish that it costs much more than the quick review and **get an explicit yes first**. Never start it automatically. The interactive command is `/review-pr <pr_url> --flock-json <Flock data>/reviews/<worktree_id>/<head_sha>.deep.json`; the shared contract is documented in [docs/review-format.md](../docs/review-format.md).
+
+The REST routes are POST `/api/review/open`, `/api/review/get`, `/api/review/post-preview`, `/api/review/post`, and `/api/review/deep`, with the same JSON inputs and normal Flock bearer authentication. Publishing honors the repository/worktree's resolved `GH_CONFIG_DIR`.

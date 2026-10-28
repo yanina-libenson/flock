@@ -97,7 +97,7 @@ pub fn spawn(app: AppHandle) {
                 for w in worktrees {
                     // Orchestrators are repo-less scratch sessions — no branch,
                     // no PR. Skip them so we don't run `gh` against a non-repo.
-                    if w.kind == "orchestrator" {
+                    if w.kind == "orchestrator" || w.kind == "review" {
                         continue;
                     }
                     live.insert(w.id);

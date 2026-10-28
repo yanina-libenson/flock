@@ -132,7 +132,7 @@ pub fn spawn(app: AppHandle) {
                         let _ = state.pty.kill(id);
                         pty::tmux_kill_session(id);
                     }
-                    ids.retain(|id| known.contains(id));
+                    ids.retain(|id| known.contains(id) || (id.is_negative() && id.checked_neg().is_some_and(|parent| known.contains(&parent))));
                 }
             }
             let live: HashSet<i64> = ids.iter().copied().collect();
@@ -192,7 +192,7 @@ pub fn spawn(app: AppHandle) {
                     );
                 }
 
-                maybe_generate_title(&app, &mut titled, id, &captured);
+                if id > 0 { maybe_generate_title(&app, &mut titled, id, &captured); }
 
                 prev.insert(id, captured);
             }
@@ -210,7 +210,7 @@ pub fn spawn(app: AppHandle) {
 
 /// Live session ids with no worktree row behind them.
 fn orphan_sessions(live: &[i64], known: &HashSet<i64>) -> Vec<i64> {
-    live.iter().copied().filter(|id| !known.contains(id)).collect()
+    live.iter().copied().filter(|id| !known.contains(id) && !(id.is_negative() && id.checked_neg().is_some_and(|parent| known.contains(&parent)))).collect()
 }
 
 /// Reap the heaviest non-focused sessions when aggregate RSS exceeds
@@ -547,6 +547,11 @@ fn sanitize_title(raw: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn deep_sessions_belong_to_their_positive_worktree() {
+        let known = HashSet::from([1,2]);
+        assert_eq!(orphan_sessions(&[1,-1,-2,-3,i64::MIN],&known),vec![-3,i64::MIN]);
+    }
     #[test]
     fn sessions_of_removed_worktrees_are_orphans() {
         // flock-317 was recreated after its worktree's row was deleted; the

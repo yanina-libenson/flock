@@ -128,9 +128,22 @@ async fn require_auth(State(ctx): State<ApiCtx>, req: Request, next: Next) -> Re
 // ---------- handlers ----------
 
 #[derive(Deserialize)]
-struct ReviewOpenBody { worktree_id: i64, generate: Option<bool> }
+struct ReviewOpenBody {
+    worktree_id: Option<i64>,
+    pr_url: Option<String>,
+    generate: Option<bool>,
+}
 async fn review_open_h(State(ctx): State<ApiCtx>, Json(body): Json<ReviewOpenBody>) -> Response {
-    match tokio::task::spawn_blocking(move || crate::review::open(&ctx.app, body.worktree_id, body.generate.unwrap_or(true))).await {
+    match tokio::task::spawn_blocking(move || {
+        crate::review::open_request(
+            &ctx.app,
+            body.worktree_id,
+            body.pr_url,
+            body.generate.unwrap_or(true),
+        )
+    })
+    .await
+    {
         Ok(Ok(result)) => Json(result).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -138,12 +151,71 @@ async fn review_open_h(State(ctx): State<ApiCtx>, Json(body): Json<ReviewOpenBod
 }
 
 #[derive(Deserialize)]
-struct ReviewGetBody { worktree_id: i64, include_context: Option<bool> }
+struct ReviewGetBody {
+    worktree_id: Option<i64>,
+    pr_url: Option<String>,
+    include_context: Option<bool>,
+}
 async fn review_get_h(State(ctx): State<ApiCtx>, Json(body): Json<ReviewGetBody>) -> Response {
-    match tokio::task::spawn_blocking(move || crate::review_access::get(&ctx.app.state::<AppState>(),body.worktree_id,body.include_context.unwrap_or(false))).await {
+    match tokio::task::spawn_blocking(move || {
+        let state = ctx.app.state::<AppState>();
+        let w = crate::review_github::resolve_cached(&state, body.worktree_id, body.pr_url)?;
+        crate::review_access::get(&state, w.id, body.include_context.unwrap_or(false))
+    })
+    .await
+    {
         Ok(Ok(result)) => Json(result).into_response(),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST,e.to_string()).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,e.to_string()).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn review_post_preview_h(
+    State(ctx): State<ApiCtx>,
+    Json(body): Json<crate::review_post::PreviewRequest>,
+) -> Response {
+    match tokio::task::spawn_blocking(move || crate::review_post::preview(&ctx.app, body)).await {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewPostBody {
+    preview_id: String,
+}
+async fn review_post_h(State(ctx): State<ApiCtx>, Json(body): Json<ReviewPostBody>) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        crate::review_post::post(&ctx.app.state::<AppState>(), &body.preview_id)
+    })
+    .await
+    {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+#[derive(Deserialize)]
+struct ReviewDeepBody {
+    worktree_id: Option<i64>,
+    pr_url: Option<String>,
+}
+async fn review_deep_h(State(ctx): State<ApiCtx>, Json(body): Json<ReviewDeepBody>) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        let w = match (body.worktree_id, body.pr_url) {
+            (None, Some(url)) => crate::review_github::open_pr(&ctx.app, &url)?,
+            (Some(id), None) => ctx.app.state::<AppState>().db.get_worktree(id)?,
+            _ => return Err(crate::error::AppError::msg("Indicá worktree_id o pr_url")),
+        };
+        let started = crate::review_deep::start(&ctx.app, &ctx.app.state::<AppState>(), w.id)?;
+        Ok::<_, crate::error::AppError>(serde_json::json!({
+            "worktree_id": started.worktree_id, "status": "started", "model": "opus"
+        }))
+    }).await {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -387,6 +459,7 @@ fn remove_refusal_response(err: crate::commands::RemoveRefusal, id: i64) -> Resp
 fn input_error_response(err: crate::commands::DeliverError, id: i64) -> Response {
     use crate::commands::DeliverError;
     match err {
+        DeliverError::ReadOnly => (StatusCode::FORBIDDEN, "Este worktree es de solo lectura").into_response(),
         DeliverError::NotFound => {
             (StatusCode::NOT_FOUND, format!("worktree {id} not found")).into_response()
         }
@@ -842,6 +915,9 @@ fn build_router(ctx: ApiCtx) -> Router {
     let api = Router::new()
         .route("/review/open", post(review_open_h))
         .route("/review/get", post(review_get_h))
+        .route("/review/post-preview", post(review_post_preview_h))
+        .route("/review/post", post(review_post_h))
+        .route("/review/deep", post(review_deep_h))
         .route("/worktrees", get(worktrees))
         .route("/worktrees/:id/input", post(input))
         .route("/worktrees/:id/transcript", get(transcript_h))

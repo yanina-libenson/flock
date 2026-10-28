@@ -121,7 +121,7 @@ pub struct DiffFile {
     pub skip_reason_es: Option<String>,
     pub lines: Vec<DiffLine>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ReviewView {
     pub worktree_id: i64,
     pub head_sha: String,
@@ -130,6 +130,10 @@ pub struct ReviewView {
     pub cached: bool,
     pub last_cost_usd: f64,
     pub error: Option<String>,
+    #[serde(default)]
+    pub deep_available: bool,
+    #[serde(default)]
+    pub deep_error: Option<String>,
 }
 
 pub fn data_dir() -> AppResult<PathBuf> {
@@ -138,7 +142,7 @@ pub fn data_dir() -> AppResult<PathBuf> {
         .join("Flock")
         .join("reviews"))
 }
-fn valid_sha(s: &str) -> bool {
+pub fn valid_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 pub fn cache_path(root: &Path, id: i64, sha: &str, deep: bool) -> AppResult<PathBuf> {
@@ -230,7 +234,7 @@ pub fn diff_args(base: &str, head: &str) -> Vec<String> {
         "--".into(),
     ]
 }
-fn diff_between(cwd: &Path, base: &str, head: &str) -> AppResult<Vec<DiffFile>> {
+pub fn diff_between(cwd: &Path, base: &str, head: &str) -> AppResult<Vec<DiffFile>> {
     if !valid_sha(base) || !valid_sha(head) {
         return Err(AppError::msg("Commits inválidos"));
     }
@@ -478,7 +482,7 @@ pub fn changed_files<'a>(files: &'a [DiffFile], previous: Option<&Review>) -> Ve
         })
         .collect()
 }
-fn check_range(file: &DiffFile, side: &str, start: u32, end: u32) -> AppResult<()> {
+pub fn check_range(file: &DiffFile, side: &str, start: u32, end: u32) -> AppResult<()> {
     if !["LEFT", "RIGHT"].contains(&side) || start == 0 || end < start {
         return Err(AppError::msg(format!(
             "{}: ubicación inválida {side}:{start}-{end}",
@@ -530,7 +534,8 @@ pub fn validate(review: &Review, target: &Target, files: &[DiffFile], kind: &str
             return Err(fail("archivo repetido, estado o hash incorrecto"));
         }
         if f.skipped {
-            if f.skip_reason_es.as_deref().unwrap_or("").is_empty()
+            if d.skip_reason_es.is_none()
+                || f.skip_reason_es.as_deref().unwrap_or("").is_empty()
                 || !f.evals.is_empty()
                 || !f.parts.is_empty()
             {
@@ -588,18 +593,43 @@ pub fn validate(review: &Review, target: &Target, files: &[DiffFile], kind: &str
 }
 
 pub fn load(state: &AppState, id: i64) -> AppResult<ReviewView> {
-    load_at(state, id, &data_dir()?)
+    load_at(state, id, &data_dir()?, false)
 }
-fn load_at(state: &AppState, id: i64, root: &Path) -> AppResult<ReviewView> {
+pub fn load_selected(state: &AppState, id: i64, deep: Option<bool>) -> AppResult<ReviewView> {
+    let root = data_dir()?;
+    let quick = load_at(state, id, &root, false)?;
+    let selected = root.join(id.to_string()).join("selected-kind");
+    if let Some(deep) = deep {
+        std::fs::create_dir_all(selected.parent().unwrap())?;
+        std::fs::write(&selected, if deep { "deep" } else { "quick" })?;
+    }
+    let use_deep = deep.unwrap_or_else(|| {
+        std::fs::read_to_string(&selected)
+            .map(|s| s == "deep")
+            .unwrap_or(quick.deep_available)
+    });
+    if use_deep && quick.deep_available {
+        load_at(state, id, &root, true)
+    } else {
+        Ok(quick)
+    }
+}
+fn load_at(state: &AppState, id: i64, root: &Path, deep: bool) -> AppResult<ReviewView> {
     let w = state.db.get_worktree(id)?;
     if w.kind == "orchestrator" {
         return Err(AppError::msg("Elegí un worktree con código"));
     }
     let cwd = Path::new(&w.path);
-    let sha = head(cwd)?;
-    let current = cache_path(&root, id, &sha, false)?;
+    let sha = if w.kind == "review" {
+        crate::review_github::source_head(&w)?
+    } else {
+        head(cwd)?
+    };
+    let current = cache_path(&root, id, &sha, deep)?;
     let path = if current.exists() {
         Some(current)
+    } else if deep {
+        None
     } else {
         std::fs::read_to_string(root.join(id.to_string()).join("latest"))
             .ok()
@@ -614,19 +644,55 @@ fn load_at(state: &AppState, id: i64, root: &Path) -> AppResult<ReviewView> {
         cached: false,
         last_cost_usd: 0.,
         error: None,
+        deep_available: false,
+        deep_error: None,
     };
     let dir = root.join(id.to_string());
+    let deep_path = cache_path(root, id, &sha, true)?;
+    if deep_path.exists() {
+        let validation = read_json::<Review>(&deep_path).and_then(|r| {
+            let files = if w.kind == "review" {
+                crate::review_github::files(&w, &r.target.base_sha, &r.target.head_sha)?
+            } else {
+                diff_between(cwd, &r.target.base_sha, &r.target.head_sha)?
+            };
+            if r.target.worktree_id != id
+                || r.target.head_sha != sha
+                || r.target.own != (w.kind != "review")
+            {
+                return Err(AppError::msg(
+                    "La revisión profunda pertenece a otro commit o worktree",
+                ));
+            }
+            let expected = read_json::<Target>(&deep_path.with_extension("target.json"))
+                .unwrap_or_else(|_| r.target.clone());
+            validate(&r, &expected, &files, "deep")
+        });
+        match validation {
+            Ok(()) => view.deep_available = true,
+            Err(e) => view.deep_error = Some(e.to_string()),
+        }
+    }
     if let Ok(usage) = read_json::<Usage>(&dir.join(format!("{sha}.run.json"))) {
         view.last_cost_usd = usage.cost_usd;
     }
     view.error = std::fs::read_to_string(dir.join(format!("{sha}.error"))).ok();
     if let Some(path) = path {
         let r: Review = read_json(&path)?;
-        if r.target.worktree_id != id {
+        if r.target.worktree_id != id || r.target.own != (w.kind != "review") {
             return Err(AppError::msg("La revisión pertenece a otro worktree"));
         }
-        view.files = diff_between(cwd, &r.target.base_sha, &r.target.head_sha)?;
-        validate(&r, &r.target, &view.files, "quick")?;
+        view.files = if w.kind == "review" {
+            crate::review_github::files(&w, &r.target.base_sha, &r.target.head_sha)?
+        } else {
+            diff_between(cwd, &r.target.base_sha, &r.target.head_sha)?
+        };
+        validate(
+            &r,
+            &r.target,
+            &view.files,
+            if deep { "deep" } else { "quick" },
+        )?;
         if view.last_cost_usd == 0. {
             view.last_cost_usd =
                 read_json::<Usage>(&dir.join(format!("{}.run.json", r.target.head_sha)))
@@ -764,7 +830,11 @@ pub fn generate(state: &AppState, id: i64) -> AppResult<ReviewView> {
 fn generate_at(state: &AppState, id: i64, root: &Path) -> AppResult<ReviewView> {
     let lock = generation_lock(id);
     let _guard = lock.lock().unwrap();
-    let view = load_at(state, id, root)?;
+    let w = state.db.get_worktree(id)?;
+    if w.kind == "review" {
+        crate::review_github::refresh(state, &w)?;
+    }
+    let view = load_at(state, id, root, false)?;
     if view
         .review
         .as_ref()
@@ -776,29 +846,45 @@ fn generate_at(state: &AppState, id: i64, root: &Path) -> AppResult<ReviewView> 
     let repo = state.db.get_repo(w.repo_id)?;
     let cwd = Path::new(&w.path);
     let env = worktree_env(state, &w)?;
-    let base = merge_base(cwd, &env)?;
-    let sha = head(cwd)?;
-    let files = diff_between(cwd, &base, &sha)?;
-    if files.is_empty() {
+    let (target, files, pr) = if w.kind == "review" {
+        let source = crate::review_github::source(id)?;
+        let target = crate::review_github::target(&w)?;
+        let files = crate::review_github::files(&w, &target.base_sha, &target.head_sha)?;
+        (
+            target,
+            files,
+            json!({"title":source.title,"body":source.body,"url":source.pr.url}),
+        )
+    } else {
+        let base = merge_base(cwd, &env)?;
+        let sha = head(cwd)?;
+        let files = diff_between(cwd, &base, &sha)?;
+        let pr: Value = run(cwd, "gh", &["pr", "view", "--json", "title,body,url"], &env)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(Value::Null);
+        (
+            Target {
+                repo: repo.name,
+                own: true,
+                worktree_id: id,
+                pr_url: pr["url"].as_str().map(String::from),
+                base_sha: base,
+                head_sha: sha,
+            },
+            files,
+            pr,
+        )
+    };
+    let sha = target.head_sha.clone();
+    if files.is_empty() && view.review.is_none() {
         return Err(AppError::msg(
             "No hay cambios para explicar contra la base de la rama",
         ));
     }
-    let pr: Value = run(cwd, "gh", &["pr", "view", "--json", "title,body,url"], &env)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Value::Null);
-    let target = Target {
-        repo: repo.name,
-        own: true,
-        worktree_id: id,
-        pr_url: pr["url"].as_str().map(String::from),
-        base_sha: base,
-        head_sha: sha.clone(),
-    };
     let changed = changed_files(&files, view.review.as_ref());
     // Compact prior context; do not resend unchanged diffs or their assessments.
-    let previous = view.review.as_ref().map(|r| json!({"summary":r.summary,"files":r.files.iter().map(|f|json!({"path":f.path,"name_es":f.name_es,"role_es":f.role_es,"skipped":f.skipped})).collect::<Vec<_>>()}));
+    let previous = view.review.as_ref().map(|r| json!({"summary":r.summary,"files":r.files.iter().map(|f|json!({"path":f.path,"name_es":f.name_es,"role_es":f.role_es,"skipped":f.skipped,"evals":f.evals.iter().filter(|e|e.severity!="ok").map(|e|json!({"severity":e.severity,"kind":e.kind,"text_es":e.text_es})).collect::<Vec<_>>()})).collect::<Vec<_>>()}));
     let manifest: Vec<_> = files.iter().map(|f|json!({"path":f.path,"status":f.status,"diff_hash":f.diff_hash,"skip_reason_es":f.skip_reason_es})).collect();
     let input = json!({"target":target,"branch":w.branch,"pr":pr,"previous":previous,"manifest":manifest,
         "changed_files": changed.iter().map(|f|json!({"path":f.path,"status":f.status,"diff_hash":f.diff_hash,"diff":f.diff})).collect::<Vec<_>>(),
@@ -870,7 +956,7 @@ fn generate_at(state: &AppState, id: i64, root: &Path) -> AppResult<ReviewView> 
                 write_json(&path, &r)?;
                 std::fs::write(dir.join("latest"), &sha)?;
                 let _ = std::fs::remove_file(dir.join(format!("{sha}.error")));
-                return load_at(state, id, root);
+                return load_at(state, id, root, false);
             }
             Err(e) => {
                 last_error = e.to_string();
@@ -893,6 +979,26 @@ pub struct Opened {
     pub eval_count: usize,
     pub cost_usd: f64,
 }
+pub fn open_request(
+    app: &AppHandle,
+    worktree_id: Option<i64>,
+    pr_url: Option<String>,
+    should_generate: bool,
+) -> AppResult<Opened> {
+    let id = match (worktree_id, pr_url) {
+        (None, Some(url)) => crate::review_github::open_pr(app, &url)?.id,
+        (Some(id), None) => {
+            let state = app.state::<AppState>();
+            let w = state.db.get_worktree(id)?;
+            if w.kind == "review" {
+                crate::review_github::refresh(&state, &w)?;
+            }
+            id
+        }
+        _ => return Err(AppError::msg("Indicá worktree_id o pr_url")),
+    };
+    open(app, id, should_generate)
+}
 pub fn open(app: &AppHandle, id: i64, should_generate: bool) -> AppResult<Opened> {
     let state = app.state::<AppState>();
     let view = load(&state, id)?;
@@ -912,9 +1018,10 @@ pub fn open(app: &AppHandle, id: i64, should_generate: bool) -> AppResult<Opened
     } else {
         view
     };
+    let displayed = load_selected(&state, id, None)?;
     Ok(Opened {
         worktree_id: id,
-        eval_count: view
+        eval_count: displayed
             .review
             .as_ref()
             .map(|r| crate::review_access::evals(r).len())
@@ -943,6 +1050,7 @@ pub fn open(app: &AppHandle, id: i64, should_generate: bool) -> AppResult<Opened
 pub fn spawn(app: AppHandle) {
     std::thread::spawn(move || {
         let mut last = HashMap::new();
+        let mut refreshed = HashMap::<i64, Instant>::new();
         loop {
             let state = app.state::<AppState>();
             if let Ok(repos) = state.db.list_repos() {
@@ -956,8 +1064,39 @@ pub fn spawn(app: AppHandle) {
                             {
                                 continue;
                             }
-                            if let Ok(sha) = head(Path::new(&w.path)) {
-                                if last.insert(w.id, sha.clone()).as_ref() != Some(&sha) {
+                            if w.kind == "review"
+                                && refreshed
+                                    .get(&w.id)
+                                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(60))
+                            {
+                                let _ = crate::review_github::refresh(&state, &w);
+                                refreshed.insert(w.id, Instant::now());
+                            }
+                            let current = if w.kind == "review" {
+                                crate::review_github::source_head(&w)
+                            } else {
+                                head(Path::new(&w.path))
+                            };
+                            if let Ok(sha) = current {
+                                let deep_stamp = cache_path(&data_dir().unwrap(), w.id, &sha, true)
+                                    .ok()
+                                    .and_then(|p| std::fs::metadata(p).ok())
+                                    .and_then(|m| m.modified().ok());
+                                let signature = (sha, deep_stamp);
+                                if last.insert(w.id, signature.clone()).as_ref() != Some(&signature)
+                                {
+                                    if deep_stamp.is_some()
+                                        && load_at(&state, w.id, &data_dir().unwrap(), false)
+                                            .is_ok_and(|v| v.deep_available)
+                                    {
+                                        let _ = std::fs::write(
+                                            data_dir()
+                                                .unwrap()
+                                                .join(w.id.to_string())
+                                                .join("selected-kind"),
+                                            "deep",
+                                        );
+                                    }
                                     let _ = app.emit("review:changed", w.id);
                                 }
                             }
@@ -1134,6 +1273,12 @@ mod tests {
         bad.files[0].evals[0].start = 0;
         assert!(validate(&bad, &target, &files, "quick").is_err());
         let mut bad = r.clone();
+        bad.files[0].skipped = true;
+        bad.files[0].skip_reason_es = Some("No lo expliqué".into());
+        bad.files[0].parts.clear();
+        bad.files[0].evals.clear();
+        assert!(validate(&bad, &target, &files, "quick").is_err());
+        let mut bad = r.clone();
         bad.files[0].parts[0].end = 40;
         assert!(validate(&bad, &target, &files, "quick").is_err());
         let mut bad = r.clone();
@@ -1193,13 +1338,7 @@ mod tests {
 #[cfg(test)]
 mod smoke {
     use super::*;
-    /// Opt-in only: spends real Sonnet tokens. Isolated DB, checkout and cache.
-    #[test]
-    #[ignore = "real Claude call; run explicitly with --ignored --nocapture"]
-    fn real_small_worktree() {
-        let root = data_dir()
-            .unwrap()
-            .join(format!("smoke-{}", rand::random::<u64>()));
+    fn small_worktree(root: &Path) -> (AppState, Worktree) {
         let repo = root.join("repo");
         let checkout = root.join("worktree");
         std::fs::create_dir_all(&repo).unwrap();
@@ -1266,6 +1405,16 @@ mod smoke {
             input_locks: Mutex::new(HashMap::new()),
             remove_confirms: crate::confirm::PendingConfirms::default(),
         };
+        (state, w)
+    }
+    /// Opt-in only: spends real Sonnet tokens. Isolated DB, checkout and cache.
+    #[test]
+    #[ignore = "real Claude call; run explicitly with --ignored --nocapture"]
+    fn real_small_worktree() {
+        let root = data_dir()
+            .unwrap()
+            .join(format!("smoke-{}", rand::random::<u64>()));
+        let (state, w) = small_worktree(&root);
         let view = generate_at(&state, w.id, &root.join("cache")).unwrap();
         let review = view.review.unwrap();
         println!(
@@ -1276,5 +1425,52 @@ mod smoke {
         let cached = generate_at(&state, w.id, &root.join("cache")).unwrap();
         assert!(cached.cached);
         assert_eq!(cached.review.unwrap().usage.cost_usd, review.usage.cost_usd);
+    }
+    #[test]
+    fn validates_deep_exports_and_exposes_errors_without_generating() {
+        let root =
+            std::env::temp_dir().join(format!("flock-deep-export-{}", rand::random::<u64>()));
+        let (state, w) = small_worktree(&root);
+        let cwd = Path::new(&w.path);
+        let base = merge_base(cwd, &[]).unwrap();
+        let sha = head(cwd).unwrap();
+        let files = diff_between(cwd, &base, &sha).unwrap();
+        let example = include_str!("../../docs/review-format.md")
+            .split("```json\n")
+            .nth(1)
+            .unwrap()
+            .split("```")
+            .next()
+            .unwrap();
+        let mut r: Review = serde_json::from_str(example).unwrap();
+        r.kind = "deep".into();
+        r.usage.model = "opus".into();
+        r.target = Target {
+            repo: "revisar-smoke".into(),
+            own: true,
+            worktree_id: w.id,
+            pr_url: None,
+            base_sha: base,
+            head_sha: sha.clone(),
+        };
+        r.files[0].path = files[0].path.clone();
+        r.files[0].diff_hash = files[0].diff_hash.clone();
+        r.files[0].parts[0].start = 3;
+        r.files[0].parts[0].end = 4;
+        r.files[0].evals[0].start = 2;
+        r.files[0].evals[0].end = 2;
+        let cache = root.join("cache");
+        let path = cache_path(&cache, w.id, &sha, true).unwrap();
+        write_json(&path, &r).unwrap();
+        write_json(&path.with_extension("target.json"), &r.target).unwrap();
+        let view = load_at(&state, w.id, &cache, true).unwrap();
+        assert!(view.deep_available);
+        assert_eq!(view.review.unwrap().kind, "deep");
+        r.version = 2;
+        write_json(&path, &r).unwrap();
+        let view = load_at(&state, w.id, &cache, false).unwrap();
+        assert!(!view.deep_available);
+        assert!(view.deep_error.is_some());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
