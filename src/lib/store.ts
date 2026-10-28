@@ -37,10 +37,10 @@ export interface AppStoreState {
   /// no PR and nothing to submit (no badge shown).
   prStatusByWorktree: Record<number, PrStatus>;
   /// Where Codex is offered, from the backend: repos whose worktrees may
-  /// switch to it (bound to the Thanx profile) and the profile an orchestrator
-  /// must have chosen. Gates the "Continue with Codex" action.
+  /// switch to it (bound to a Codex profile) and the profiles an orchestrator
+  /// may have chosen. Gates the "Continue with Codex" action.
   codexRepoIds: number[];
-  codexProfile: string | null;
+  codexProfiles: string[];
   /// Worktrees whose screen currently shows Claude's usage-limit notice, from
   /// the backend monitor. Drives the "Continue with Codex" suggestion banner.
   usageLimitByWorktree: Record<number, boolean>;
@@ -82,7 +82,7 @@ const [store, setStore] = createStore<AppStoreState>({
   hibernationNoteByWorktree: {},
   prStatusByWorktree: {},
   codexRepoIds: [],
-  codexProfile: null,
+  codexProfiles: [],
   usageLimitByWorktree: {},
   removeRequests: [],
 });
@@ -301,12 +301,12 @@ export function setWorktreePrStatus(
   }
 }
 
-/// Whether this worktree may run Codex: a worktree in a Thanx repo, or an
-/// orchestrator whose chosen Profile is Thanx (it has no repo of its own). The
+/// Whether this worktree may run Codex: a worktree in a Codex-profile repo, or an
+/// orchestrator whose chosen Profile is a Codex one (it has no repo of its own). The
 /// backend enforces the same rule in `worktree_set_agent`.
 export function canUseCodex(w: Worktree): boolean {
   if (w.kind === "orchestrator") {
-    return store.codexProfile !== null && w.env_profile === store.codexProfile;
+    return w.env_profile !== null && store.codexProfiles.includes(w.env_profile);
   }
   return store.codexRepoIds.includes(w.repo_id);
 }

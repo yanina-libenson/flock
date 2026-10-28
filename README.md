@@ -95,7 +95,7 @@ Flock is a **macOS** app (Apple Silicon builds shipped; `aarch64`). It orchestra
 | [`claude`](https://claude.com/claude-code) | the agent each worktree runs |
 | `tmux` | session persistence (`brew install tmux`) |
 | `gh` (authenticated) | per-worktree PR status (`brew install gh && gh auth login`) |
-| [`codex`](https://github.com/openai/codex) *(optional)* | the Codex fallback agent for Thanx worktrees (`codex login`) |
+| [`codex`](https://github.com/openai/codex) *(optional)* | the Codex fallback agent for Thanx and Flock worktrees (`codex login`) |
 | `git` | worktrees |
 
 For building from source you'll also need the [Rust toolchain](https://rustup.rs) and [Node.js](https://nodejs.org).

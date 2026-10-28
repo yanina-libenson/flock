@@ -144,20 +144,26 @@ pub fn profile_name(cfg: &EnvConfig, repo_path: &str) -> Option<String> {
         .map(|b| b.env.clone())
 }
 
-/// The only env profile Codex is offered for. Codex runs on the user's work
-/// ChatGPT login, so it's a fallback for work (Thanx) worktrees only — never
-/// Personal or Flock ones.
-pub const CODEX_PROFILE: &str = "Thanx";
+/// The env profiles Codex is offered for. Codex runs on the user's work
+/// ChatGPT login, so it's a fallback for work worktrees only — never Personal
+/// ones. Flock is included because it's the tool used for Thanx work, and the
+/// user explicitly approved running Codex there.
+pub const CODEX_PROFILES: &[&str] = &["Thanx", "Flock"];
+
+/// `CODEX_PROFILES` as prose for error messages, e.g. "Thanx or Flock".
+pub fn codex_profiles_label() -> String {
+    CODEX_PROFILES.join(" or ")
+}
 
 /// Whether a worktree or orchestrator may run Codex: its resolved profile — a
 /// persisted `env_profile` (an orchestrator's chosen Profile), else the repo
-/// path's binding — is `CODEX_PROFILE`.
+/// path's binding — is one of `CODEX_PROFILES`.
 pub fn codex_allowed(cfg: &EnvConfig, env_profile: Option<&str>, repo_path: &str) -> bool {
     let name = match env_profile {
         Some(n) => Some(n.to_string()),
         None => profile_name(cfg, repo_path),
     };
-    name.as_deref() == Some(CODEX_PROFILE)
+    name.as_deref().is_some_and(|n| CODEX_PROFILES.contains(&n))
 }
 
 /// The resolved `CLAUDE_CONFIG_DIR` for a worktree — honoring a persisted
@@ -343,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_is_only_allowed_for_the_thanx_profile() {
+    fn codex_is_only_allowed_for_the_thanx_and_flock_profiles() {
         let c = accounts_cfg();
         assert!(codex_allowed(&c, None, "/Users/y/Code/Thanx/nexus"));
         assert!(!codex_allowed(&c, None, "/Users/y/Code/Personal/ixi"));
@@ -355,6 +361,21 @@ mod tests {
         assert!(!codex_allowed(&c, None, "/x/orchestrators/kyoto"));
         // A persisted profile wins over the path binding.
         assert!(!codex_allowed(&c, Some("Personal"), "/Users/y/Code/Thanx/nexus"));
+        // Flock is allowed too: by binding, by persisted orchestrator profile,
+        // and when its repo is nested under the (refused) Personal folder.
+        let mut c = c;
+        c.environments.push(Environment {
+            name: "Flock".into(),
+            vars: BTreeMap::new(),
+        });
+        c.bindings.push(Binding {
+            path: "/Users/y/Code/Personal/flock".into(),
+            env: "Flock".into(),
+        });
+        assert!(codex_allowed(&c, None, "/Users/y/Code/Personal/flock"));
+        assert!(codex_allowed(&c, Some("Flock"), "/x/orchestrators/kyoto"));
+        assert!(!codex_allowed(&c, None, "/Users/y/Code/Personal/other"));
+        assert!(!codex_allowed(&c, Some("Other"), "/x/orchestrators/kyoto"));
     }
 
     #[test]
