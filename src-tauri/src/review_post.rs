@@ -191,7 +191,7 @@ pub fn preview(app: &AppHandle, request: PreviewRequest) -> AppResult<PreviewSho
     let w = match (&request.worktree_id, &request.pr_url) {
         (None, Some(url)) => match review_github::find(&state, url)? {
             Some(w) => w,
-            None => review_github::open_pr(app, url)?,
+            None => review_github::open_pr(app, url, None)?,
         },
         _ => review_github::resolve_cached(&state, request.worktree_id, request.pr_url.clone())?,
     };

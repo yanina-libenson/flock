@@ -1,6 +1,6 @@
 //! Review-only checkouts and immutable, expiring GitHub review previews.
 use crate::{
-    db::Worktree,
+    db::{Db, Worktree},
     env_profiles,
     error::{AppError, AppResult},
     review::{self, DiffFile, Target},
@@ -132,20 +132,56 @@ fn sources_root() -> AppResult<PathBuf> {
     std::fs::create_dir_all(&root)?;
     Ok(root)
 }
-pub fn open_pr(app: &AppHandle, url: &str) -> AppResult<Worktree> {
+/// The review worktree already open for `pr`. `pr_of` reads the PR a review
+/// worktree was opened for (its `source.json`).
+fn find_review(
+    db: &Db,
+    pr: &PrRef,
+    pr_of: impl Fn(i64) -> Option<PrRef>,
+) -> AppResult<Option<Worktree>> {
+    for repo in db.list_repos()? {
+        for w in db.list_worktrees(repo.id)? {
+            if w.kind == "review" && pr_of(w.id).as_ref() == Some(pr) {
+                return Ok(Some(w));
+            }
+        }
+    }
+    Ok(None)
+}
+/// A new review worktree, linked to the orchestrator that opened it (if any).
+fn insert_review(
+    db: &Db,
+    repo_id: i64,
+    pr: &PrRef,
+    path: &Path,
+    parent_id: Option<i64>,
+) -> AppResult<Worktree> {
+    db.insert_worktree(
+        repo_id,
+        &format!("PR #{}", pr.number),
+        &path.to_string_lossy(),
+        Some(&format!("{} · PR #{}", pr.repo, pr.number)),
+        "default",
+        "review",
+        parent_id,
+        None,
+        None,
+        None,
+        "claude",
+    )
+}
+/// Opens (or reuses) the review worktree for a PR. `parent_id` only applies to
+/// a worktree created here: an existing one keeps whatever parent it has.
+pub fn open_pr(app: &AppHandle, url: &str, parent_id: Option<i64>) -> AppResult<Worktree> {
     // Serialize opens so a desktop/MCP double click never creates two checkouts.
     static OPEN: OnceLock<Mutex<()>> = OnceLock::new();
     let _guard = OPEN.get_or_init(Default::default).lock().unwrap();
     let pr = parse_url(url)?;
     let state = app.state::<AppState>();
     let repos = state.db.list_repos()?;
-    for repo in &repos {
-        for w in state.db.list_worktrees(repo.id)? {
-            if w.kind == "review" && source(w.id).is_ok_and(|s| s.pr == pr) {
-                refresh(&state, &w)?;
-                return Ok(w);
-            }
-        }
+    if let Some(w) = find_review(&state.db, &pr, |id| source(id).ok().map(|s| s.pr))? {
+        refresh(&state, &w)?;
+        return Ok(w);
     }
     let slug = format!("{}/{}", pr.owner, pr.repo).to_lowercase();
     let registered = repos.iter().find(|r| {
@@ -201,19 +237,7 @@ pub fn open_pr(app: &AppHandle, url: &str) -> AppResult<Worktree> {
     } else {
         std::fs::create_dir_all(&path)?;
     }
-    let inserted = state.db.insert_worktree(
-        repo.id,
-        &format!("PR #{}", pr.number),
-        &path.to_string_lossy(),
-        Some(&format!("{} · PR #{}", pr.repo, pr.number)),
-        "default",
-        "review",
-        None,
-        None,
-        None,
-        None,
-        "claude",
-    );
+    let inserted = insert_review(&state.db, repo.id, &pr, &path, parent_id);
     let w = match inserted {
         Ok(w) => w,
         Err(e) => {
@@ -419,6 +443,60 @@ mod tests {
         ] {
             assert!(parse_url(bad).is_err(), "{bad}");
         }
+    }
+    fn temp_db() -> Db {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "flock-review-github-test-{}-{}.db",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        let _ = std::fs::remove_file(&p);
+        Db::open_at(&p).expect("open temp db")
+    }
+    #[test]
+    fn new_review_worktree_joins_the_orchestrators_fleet() {
+        let db = temp_db();
+        let repo = db.insert_repo("PRs para revisar", "/tmp/review-fleet").unwrap();
+        let orch = db
+            .insert_worktree(repo.id, "kyoto", "/tmp/review-orch", None, "default", "orchestrator", None, None, None, None, "claude")
+            .unwrap();
+        let pr = parse_url("https://github.com/thanx/nexus/pull/7").unwrap();
+        let linked = insert_review(&db, repo.id, &pr, Path::new("/tmp/review-linked"), Some(orch.id)).unwrap();
+        assert_eq!((linked.kind.as_str(), linked.parent_id), ("review", Some(orch.id)));
+        assert_eq!(db.list_children(orch.id).unwrap().len(), 1);
+        let loose = insert_review(&db, repo.id, &pr, Path::new("/tmp/review-loose"), None).unwrap();
+        assert_eq!(loose.parent_id, None);
+    }
+    #[test]
+    fn existing_review_worktree_is_found_with_its_parent_untouched() {
+        let db = temp_db();
+        let repo = db.insert_repo("PRs para revisar", "/tmp/review-existing").unwrap();
+        let mk = |name: &str| {
+            db.insert_worktree(repo.id, name, &format!("/tmp/review-{name}"), None, "default", "orchestrator", None, None, None, None, "claude")
+                .unwrap()
+        };
+        let (first, second) = (mk("kyoto"), mk("lima"));
+        let pr = parse_url("https://github.com/thanx/nexus/pull/7").unwrap();
+        let other = parse_url("https://github.com/thanx/nexus/pull/8").unwrap();
+        let opened = insert_review(&db, repo.id, &pr, Path::new("/tmp/review-pr-7"), Some(first.id)).unwrap();
+        let by_hand = insert_review(&db, repo.id, &other, Path::new("/tmp/review-pr-8"), None).unwrap();
+        let pr_of = |id: i64| match id {
+            _ if id == opened.id => Some(pr.clone()),
+            _ if id == by_hand.id => Some(other.clone()),
+            _ => None,
+        };
+        // Another orchestrator asking for the same PR gets the existing row, still under the first.
+        let found = find_review(&db, &pr, pr_of).unwrap().unwrap();
+        assert_eq!((found.id, found.parent_id), (opened.id, Some(first.id)));
+        assert_eq!(db.get_worktree(opened.id).unwrap().parent_id, Some(first.id));
+        assert!(db.list_children(second.id).unwrap().is_empty());
+        // A row opened by hand stays loose.
+        let found = find_review(&db, &other, pr_of).unwrap().unwrap();
+        assert_eq!((found.id, found.parent_id), (by_hand.id, None));
+        // A PR with no review worktree is not found.
+        let unknown = parse_url("https://github.com/thanx/nexus/pull/9").unwrap();
+        assert!(find_review(&db, &unknown, pr_of).unwrap().is_none());
     }
     #[test]
     fn registered_repos_match_ssh_aliases_and_https_remotes() {
