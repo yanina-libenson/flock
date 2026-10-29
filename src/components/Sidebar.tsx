@@ -465,7 +465,7 @@ export function Sidebar(props: {
           >
             <Pencil size={12} />
           </button>
-          {/* Agent switch: offered on Thanx/Flock worktrees (and always on a Codex
+          {/* Agent switch: offered on Codex-enabled-profile worktrees (and always on a Codex
               one, to get back to Claude). */}
           <Show when={w.kind !== "review" && (w.agent === "codex" || canUseCodex(w))}>
             <button

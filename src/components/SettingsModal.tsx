@@ -40,6 +40,7 @@ import {
 interface EnvDraft {
   name: string;
   varsText: string;
+  codex: boolean;
 }
 
 function parseVars(text: string): Record<string, string> {
@@ -184,6 +185,7 @@ export function SettingsModal(props: { onClose: () => void }) {
         cfg.environments.map((e) => ({
           name: e.name,
           varsText: formatVars(e.vars),
+          codex: e.codex ?? false,
         })),
       );
       setBindings(cfg.bindings);
@@ -206,7 +208,7 @@ export function SettingsModal(props: { onClose: () => void }) {
   });
 
   function addEnv() {
-    setEnvs((prev) => [...prev, { name: "", varsText: "" }]);
+    setEnvs((prev) => [...prev, { name: "", varsText: "", codex: false }]);
   }
   function updateEnv(i: number, patch: Partial<EnvDraft>) {
     setEnvs((prev) => prev.map((e, idx) => (idx === i ? { ...e, ...patch } : e)));
@@ -243,7 +245,11 @@ export function SettingsModal(props: { onClose: () => void }) {
       await envConfigSet({
         environments: envs()
           .filter((e) => e.name.trim())
-          .map((e) => ({ name: e.name.trim(), vars: parseVars(e.varsText) })),
+          .map((e) => ({
+            name: e.name.trim(),
+            vars: parseVars(e.varsText),
+            codex: e.codex,
+          })),
         bindings: bindings().filter((b) => b.path && b.env),
       });
       setEnvSaved(true);
@@ -404,6 +410,15 @@ export function SettingsModal(props: { onClose: () => void }) {
                       value={env.varsText}
                       onInput={(e) => updateEnv(i(), { varsText: e.currentTarget.value })}
                     />
+                    <label class="mt-1.5 flex items-center gap-2 text-[11px] text-[var(--color-fg-muted)] cursor-pointer">
+                      <input
+                        type="checkbox"
+                        class="accent-[var(--color-accent)]"
+                        checked={env.codex}
+                        onChange={(e) => updateEnv(i(), { codex: e.currentTarget.checked })}
+                      />
+                      Allow Codex agents on this profile
+                    </label>
                   </div>
                 )}
               </For>

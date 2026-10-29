@@ -38,7 +38,7 @@ export interface Worktree {
 }
 
 /// "claude" (default) or "codex" — the fallback when the Claude account is
-/// out of credit. Codex is only offered for Thanx/Flock-profile worktrees.
+/// out of credit. Codex is only offered for Codex-enabled-profile worktrees.
 export type Agent = "claude" | "codex";
 
 export type PermissionMode =
@@ -192,6 +192,8 @@ export const remoteInfo = () => invoke<RemoteInfo>("remote_info");
 export interface FlockEnvironment {
   name: string;
   vars: Record<string, string>;
+  /// Whether Codex is offered for worktrees and orchestrators on this profile.
+  codex?: boolean;
 }
 
 export interface EnvBinding {
@@ -287,7 +289,7 @@ export interface CreateOrchestratorArgs {
   model: string;
   /// Claude `--effort` for the orchestrator. Always explicit.
   effort: string;
-  /// Which agent runs the orchestrator. Codex only on the Thanx or Flock profile.
+  /// Which agent runs the orchestrator. Codex only on a Codex-enabled profile.
   agent?: Agent;
 }
 

@@ -503,7 +503,7 @@ struct CreateTaskBody {
     /// Required when `parent_id` is set (orchestrator-spawned); optional otherwise.
     effort: Option<String>,
     /// `"claude"` or `"codex"`. Required when `parent_id` is set
-    /// (orchestrator-spawned); omitted otherwise → Claude. Codex only in Thanx repos.
+    /// (orchestrator-spawned); omitted otherwise → Claude. Codex only on Codex-enabled profiles.
     agent: Option<String>,
     /// Explicit override for the cross-account safety check: when `parent_id`
     /// is set and the target repo resolves to a different Claude account than
@@ -593,7 +593,7 @@ struct CreateScheduleBody {
     model: Option<String>,
     effort: Option<String>,
     /// `"claude"` or `"codex"`. Required when `parent_id` is set
-    /// (orchestrator-created); omitted otherwise → Claude. Codex only in Thanx repos.
+    /// (orchestrator-created); omitted otherwise → Claude. Codex only on Codex-enabled profiles.
     agent: Option<String>,
     /// Orchestrator worktree id that's creating this schedule, so the
     /// cross-account guard can check it and the resulting fired tasks link

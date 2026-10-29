@@ -14,10 +14,6 @@ import {
 import { appStore, addWorktree, openPane } from "../lib/store";
 import { Network, X, ShieldOff } from "lucide-solid";
 
-/// The env profile pre-selected for new orchestrators. Falls back to the first
-/// available profile when this exact name isn't defined.
-const DEFAULT_ENV = "Thanx";
-
 /// Which Claude account a profile resolves to, for the caption under the select.
 function accountLabel(env: FlockEnvironment | undefined): string {
   const dir = env?.vars?.CLAUDE_CONFIG_DIR ?? "";
@@ -39,8 +35,8 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
   const [model, setModel] = createSignal<string>("opus");
   const [effort, setEffort] = createSignal<string>("high");
 
-  /// Codex is offered only when the chosen Profile is a Codex one (Thanx or
-  /// Flock); the backend refuses it otherwise.
+  /// Codex is offered only when the chosen Profile is Codex-enabled; the
+  /// backend refuses it otherwise.
   const codexAllowed = () => appStore.codexProfiles.includes(selectedEnv());
   const modelOptions = (): readonly string[] =>
     agent() === "codex" ? CODEX_MODEL_OPTIONS : MODEL_OPTIONS;
@@ -73,10 +69,8 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
     envConfigGet()
       .then((cfg) => {
         setEnvs(cfg.environments);
-        const names = cfg.environments.map((e) => e.name);
-        setSelectedEnv(
-          names.includes(DEFAULT_ENV) ? DEFAULT_ENV : (names[0] ?? ""),
-        );
+        // Pre-select the first configured profile.
+        setSelectedEnv(cfg.environments[0]?.name ?? "");
       })
       .catch((e) => console.error("envConfigGet failed", e));
   });
@@ -148,7 +142,7 @@ export function NewOrchestratorModal(props: { onClose: () => void }) {
               id="orch-prompt"
               rows={4}
               class="w-full rounded-md bg-[var(--color-bg)] border border-[var(--color-border)] focus:border-[var(--color-accent)] px-3 py-2 text-[13px] text-[var(--color-fg)] outline-none transition resize-y"
-              placeholder="e.g. Add structured logging across thanx-api and thanx-loyalty, then open PRs in each."
+              placeholder="e.g. Add structured logging across acme/api and acme/web, then open PRs in each."
               value={prompt()}
               onInput={(e) => setPrompt(e.currentTarget.value)}
               onKeyDown={(e) => {

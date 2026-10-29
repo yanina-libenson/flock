@@ -104,7 +104,7 @@ const TOOLS = [
           type: "string",
           enum: ["claude", "codex"],
           description:
-            "REQUIRED. \"claude\" or \"codex\". Default claude; codex ONLY if the user asks for it, Claude is out of credit, or you are running as Codex. Never switch provider on your own initiative. Codex is only allowed in repos on the Thanx or Flock profile; Flock refuses otherwise.",
+            "REQUIRED. \"claude\" or \"codex\". Default claude; codex ONLY if the user asks for it, Claude is out of credit, or you are running as Codex. Never switch provider on your own initiative. Codex is only allowed in repos on a Codex-enabled profile (set in Flock Settings → Environments); Flock refuses otherwise.",
         },
         confirm_cross_account: {
           type: "boolean",
@@ -326,7 +326,7 @@ const TOOLS = [
           type: "string",
           enum: ["claude", "codex"],
           description:
-            "REQUIRED. \"claude\" or \"codex\" — the agent every fired task runs. Default claude; codex ONLY if the user asks for it, Claude is out of credit, or you are running as Codex. Never switch provider on your own initiative. Codex is only allowed in repos on the Thanx or Flock profile; Flock refuses otherwise.",
+            "REQUIRED. \"claude\" or \"codex\" — the agent every fired task runs. Default claude; codex ONLY if the user asks for it, Claude is out of credit, or you are running as Codex. Never switch provider on your own initiative. Codex is only allowed in repos on a Codex-enabled profile (set in Flock Settings → Environments); Flock refuses otherwise.",
         },
         confirm_cross_account: {
           type: "boolean",

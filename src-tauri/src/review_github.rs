@@ -429,11 +429,11 @@ mod tests {
     use super::*;
     #[test]
     fn github_urls_are_canonical_and_cannot_be_command_arguments() {
-        let pr = parse_url("https://github.com/Thanx/ordering/pull/42/files?diff=split#x");
+        let pr = parse_url("https://github.com/Acme/web/pull/42/files?diff=split#x");
         assert!(pr.is_err());
-        let pr = parse_url("https://github.com/Thanx/ordering/pull/42/?x=1#y").unwrap();
+        let pr = parse_url("https://github.com/Acme/web/pull/42/?x=1#y").unwrap();
         assert_eq!(pr.number, 42);
-        assert_eq!(pr.url, "https://github.com/Thanx/ordering/pull/42");
+        assert_eq!(pr.url, "https://github.com/Acme/web/pull/42");
         for bad in [
             "https://example.com/o/r/pull/1",
             "https://github.com/o/r/pull/0",
@@ -461,7 +461,7 @@ mod tests {
         let orch = db
             .insert_worktree(repo.id, "kyoto", "/tmp/review-orch", None, "default", "orchestrator", None, None, None, None, "claude")
             .unwrap();
-        let pr = parse_url("https://github.com/thanx/nexus/pull/7").unwrap();
+        let pr = parse_url("https://github.com/acme/api/pull/7").unwrap();
         let linked = insert_review(&db, repo.id, &pr, Path::new("/tmp/review-linked"), Some(orch.id)).unwrap();
         assert_eq!((linked.kind.as_str(), linked.parent_id), ("review", Some(orch.id)));
         assert_eq!(db.list_children(orch.id).unwrap().len(), 1);
@@ -477,8 +477,8 @@ mod tests {
                 .unwrap()
         };
         let (first, second) = (mk("kyoto"), mk("lima"));
-        let pr = parse_url("https://github.com/thanx/nexus/pull/7").unwrap();
-        let other = parse_url("https://github.com/thanx/nexus/pull/8").unwrap();
+        let pr = parse_url("https://github.com/acme/api/pull/7").unwrap();
+        let other = parse_url("https://github.com/acme/api/pull/8").unwrap();
         let opened = insert_review(&db, repo.id, &pr, Path::new("/tmp/review-pr-7"), Some(first.id)).unwrap();
         let by_hand = insert_review(&db, repo.id, &other, Path::new("/tmp/review-pr-8"), None).unwrap();
         let pr_of = |id: i64| match id {
@@ -495,18 +495,18 @@ mod tests {
         let found = find_review(&db, &other, pr_of).unwrap().unwrap();
         assert_eq!((found.id, found.parent_id), (by_hand.id, None));
         // A PR with no review worktree is not found.
-        let unknown = parse_url("https://github.com/thanx/nexus/pull/9").unwrap();
+        let unknown = parse_url("https://github.com/acme/api/pull/9").unwrap();
         assert!(find_review(&db, &unknown, pr_of).unwrap().is_none());
     }
     #[test]
     fn registered_repos_match_ssh_aliases_and_https_remotes() {
         assert_eq!(
-            remote_slug("git@github.com-work:Thanx/ordering.git"),
-            Some("thanx/ordering".into())
+            remote_slug("git@github.com-work:Acme/web.git"),
+            Some("acme/web".into())
         );
         assert_eq!(
-            remote_slug("https://github.com/thanx/ordering.git"),
-            Some("thanx/ordering".into())
+            remote_slug("https://github.com/acme/web.git"),
+            Some("acme/web".into())
         );
         assert_eq!(remote_slug("/tmp/local/repo"), None);
     }

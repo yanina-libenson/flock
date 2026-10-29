@@ -7,7 +7,7 @@ Quick explanations and `/review-pr` deep reviews share this JSON contract. All f
   "version": 1,
   "kind": "quick",
   "target": {
-    "repo": "thanx-ordering", "own": true, "worktree_id": 312, "pr_url": null,
+    "repo": "acme/web", "own": true, "worktree_id": 312, "pr_url": null,
     "base_sha": "1111111111111111111111111111111111111111",
     "head_sha": "2222222222222222222222222222222222222222"
   },
@@ -21,7 +21,7 @@ Quick explanations and `/review-pr` deep reviews share this JSON contract. All f
     "diff_hash": "3333333333333333333333333333333333333333",
     "skipped": false, "skip_reason_es": null,
     "name_es": "Local (modelo)", "role_es": "Guarda si el local puede recibir pedidos.",
-    "parts": [{ "name_es": "¿Está pausado ahora?", "code_name": "online_ordering_paused?", "what_es": "Mira si todavía falta para que termine la pausa. Si ya terminó, permite pedir de nuevo.", "side": "RIGHT", "start": 12, "end": 14 }],
+    "parts": [{ "name_es": "¿Está pausado ahora?", "code_name": "orders_paused?", "what_es": "Mira si todavía falta para que termine la pausa. Si ya terminó, permite pedir de nuevo.", "side": "RIGHT", "start": 12, "end": 14 }],
     "evals": [{ "id": "f2e1", "severity": "warn", "kind": "comment", "side": "RIGHT", "start": 11, "end": 11,
       "text_es": "El comentario repite el nombre del método y no agrega información.",
       "fix_es": "Borrar el comentario.", "comment_en": "This comment repeats the method name. Could we drop it?",
