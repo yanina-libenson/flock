@@ -132,6 +132,9 @@ struct ReviewOpenBody {
     worktree_id: Option<i64>,
     pr_url: Option<String>,
     generate: Option<bool>,
+    /// The calling orchestrator (the MCP sends its FLOCK_WORKTREE_ID). Only used
+    /// when `pr_url` creates a new review worktree.
+    parent_id: Option<i64>,
 }
 async fn review_open_h(State(ctx): State<ApiCtx>, Json(body): Json<ReviewOpenBody>) -> Response {
     match tokio::task::spawn_blocking(move || {
@@ -140,6 +143,7 @@ async fn review_open_h(State(ctx): State<ApiCtx>, Json(body): Json<ReviewOpenBod
             body.worktree_id,
             body.pr_url,
             body.generate.unwrap_or(true),
+            body.parent_id,
         )
     })
     .await
@@ -204,7 +208,7 @@ struct ReviewDeepBody {
 async fn review_deep_h(State(ctx): State<ApiCtx>, Json(body): Json<ReviewDeepBody>) -> Response {
     match tokio::task::spawn_blocking(move || {
         let w = match (body.worktree_id, body.pr_url) {
-            (None, Some(url)) => crate::review_github::open_pr(&ctx.app, &url)?,
+            (None, Some(url)) => crate::review_github::open_pr(&ctx.app, &url, None)?,
             (Some(id), None) => ctx.app.state::<AppState>().db.get_worktree(id)?,
             _ => return Err(crate::error::AppError::msg("Indicá worktree_id o pr_url")),
         };

@@ -161,7 +161,17 @@ const TOOLS = [
     name: "review_open",
     description: "Show a worktree or GitHub PR explained in plain Spanish in Flock’s read-only Revisar tab. Generate/update only when the user asks. Generates a quick independent Sonnet explanation only if the current commit has no cache, reusing unchanged file explanations after new commits. Cached opens cost nothing. Returns status, eval_count and cost_usd. Supply exactly one of worktree_id or pr_url; a URL opens a review-only worktree with no author agent. generate defaults to true; false only opens the cache.",
     inputSchema: { type: "object", properties: { worktree_id: { type: "number" }, pr_url: { type: "string" }, generate: { type: "boolean", default: true } }, oneOf: [{ required: ["worktree_id"] }, { required: ["pr_url"] }] },
-    handler: (a) => apiCall("POST", "/api/review/open", { worktree_id: a.worktree_id, pr_url: a.pr_url, generate: a.generate !== false }),
+    handler: (a) =>
+      apiCall("POST", "/api/review/open", {
+        worktree_id: a.worktree_id,
+        pr_url: a.pr_url,
+        generate: a.generate !== false,
+        // A URL that creates a review worktree links it into this orchestrator's
+        // fleet, like task_create. Absent (run standalone) → no parent.
+        parent_id: process.env.FLOCK_WORKTREE_ID
+          ? Number(process.env.FLOCK_WORKTREE_ID)
+          : undefined,
+      }),
   },
   {
     name: "review_get",

@@ -984,9 +984,10 @@ pub fn open_request(
     worktree_id: Option<i64>,
     pr_url: Option<String>,
     should_generate: bool,
+    parent_id: Option<i64>,
 ) -> AppResult<Opened> {
     let id = match (worktree_id, pr_url) {
-        (None, Some(url)) => crate::review_github::open_pr(app, &url)?.id,
+        (None, Some(url)) => crate::review_github::open_pr(app, &url, parent_id)?.id,
         (Some(id), None) => {
             let state = app.state::<AppState>();
             let w = state.db.get_worktree(id)?;

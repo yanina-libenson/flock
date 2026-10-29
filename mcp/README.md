@@ -71,7 +71,7 @@ All Revisar actions happen in chat; the tab is read-only. The complete tools are
 
 | Tool | Inputs | Result / action |
 | --- | --- | --- |
-| `review_open` | exactly one of `worktree_id`, `pr_url`; `generate` defaults true | Focus, generate or incrementally update. Cached opens cost nothing; returns status, eval_count, cost_usd. A URL creates a review-only worktree with no author agent. |
+| `review_open` | exactly one of `worktree_id`, `pr_url`; `generate` defaults true | Focus, generate or incrementally update. Cached opens cost nothing; returns status, eval_count, cost_usd. A URL creates a review-only worktree with no author agent, linked into the calling orchestrator's fleet like `task_create` (an already-open one keeps its parent). |
 | `review_get` | exactly one target; `include_context` defaults false | Cached verdict and numbered findings from the displayed quick/deep snapshot. No model call. |
 | `review_post_preview` | exactly one target; `event`, `body_en`, `comments` | Freeze validated English text and line mappings; return rendered text and preview_id. |
 | `review_post` | `preview_id` only | Post the exact immutable preview, once, before its 30-minute expiry. |
