@@ -1368,7 +1368,7 @@ mod smoke {
             "pause-orders",
             checkout.to_str().unwrap(),
         ]);
-        std::fs::write(checkout.join("availability.rb"),"class Availability\n  # Returns whether ordering is available\n  def available?(open, paused: false)\n    open && !paused\n  end\nend\n").unwrap();
+        std::fs::write(checkout.join("availability.rb"),"class Availability\n  # Returns whether orders are accepted\n  def available?(open, paused: false)\n    open && !paused\n  end\nend\n").unwrap();
         run(&checkout, "git", &["add", "."], &[]).unwrap();
         run(
             &checkout,

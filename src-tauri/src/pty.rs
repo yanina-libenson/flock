@@ -1777,7 +1777,7 @@ mod tests {
         // Exact match (tmux may add a trailing newline).
         assert!(tmux_env_line_matches(k, v, "GH_CONFIG_DIR=/Users/y/.config/gh-personal\n"));
         // Wrong value → drift.
-        assert!(!tmux_env_line_matches(k, v, "GH_CONFIG_DIR=/Users/y/.config/gh-thanx"));
+        assert!(!tmux_env_line_matches(k, v, "GH_CONFIG_DIR=/Users/y/.config/gh-work"));
         // Explicitly-unset form tmux prints with a leading dash → drift.
         assert!(!tmux_env_line_matches(k, v, "-GH_CONFIG_DIR"));
     }

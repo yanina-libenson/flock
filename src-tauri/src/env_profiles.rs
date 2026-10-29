@@ -22,6 +22,10 @@ pub struct Environment {
     pub name: String,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
+    /// Whether Codex agents are offered for worktrees and orchestrators on this
+    /// profile (see `codex_allowed`).
+    #[serde(default)]
+    pub codex: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -144,35 +148,45 @@ pub fn profile_name(cfg: &EnvConfig, repo_path: &str) -> Option<String> {
         .map(|b| b.env.clone())
 }
 
-/// The env profiles Codex is offered for. Codex runs on the user's work
-/// ChatGPT login, so it's a fallback for work worktrees only — never Personal
-/// ones. Flock is included because it's the tool used for Thanx work, and the
-/// user explicitly approved running Codex there.
-pub const CODEX_PROFILES: &[&str] = &["Thanx", "Flock"];
+/// The env profiles Codex is offered for: those with `codex` set. Codex runs on
+/// a separate ChatGPT login, so it's opt-in per profile rather than everywhere.
+pub fn codex_profiles(cfg: &EnvConfig) -> Vec<String> {
+    cfg.environments
+        .iter()
+        .filter(|e| e.codex)
+        .map(|e| e.name.clone())
+        .collect()
+}
 
-/// `CODEX_PROFILES` as prose for error messages, e.g. "Thanx or Flock".
-pub fn codex_profiles_label() -> String {
-    CODEX_PROFILES.join(" or ")
+/// `codex_profiles` as prose for error messages, e.g. "the Work or Tools
+/// profile".
+pub fn codex_profiles_label(cfg: &EnvConfig) -> String {
+    let names = codex_profiles(cfg);
+    if names.is_empty() {
+        "a Codex-enabled profile".to_string()
+    } else {
+        format!("the {} profile", names.join(" or "))
+    }
 }
 
 /// Whether a worktree or orchestrator may run Codex: its resolved profile — a
 /// persisted `env_profile` (an orchestrator's chosen Profile), else the repo
-/// path's binding — is one of `CODEX_PROFILES`.
+/// path's binding — has `codex` set.
 pub fn codex_allowed(cfg: &EnvConfig, env_profile: Option<&str>, repo_path: &str) -> bool {
     let name = match env_profile {
         Some(n) => Some(n.to_string()),
         None => profile_name(cfg, repo_path),
     };
-    name.as_deref().is_some_and(|n| CODEX_PROFILES.contains(&n))
+    name.is_some_and(|n| cfg.environments.iter().any(|e| e.name == n && e.codex))
 }
 
 /// The resolved `CLAUDE_CONFIG_DIR` for a worktree — honoring a persisted
 /// `env_profile` override, else path-based resolution, same precedence as
 /// `resolve_vars_for_worktree`. `None` means the default `~/.claude` account
 /// (either nothing bound, or the bound environment doesn't override the
-/// config dir — e.g. "Thanx" only sets `GH_CONFIG_DIR`). This is deliberately
+/// config dir — e.g. "Work" only sets `GH_CONFIG_DIR`). This is deliberately
 /// narrower than comparing full env-var sets or binding names: two bindings
-/// can differ (e.g. "Thanx" vs. no binding) while resolving the *same* Claude
+/// can differ (e.g. "Work" vs. no binding) while resolving the *same* Claude
 /// account, and other vars (tokens, `GH_CONFIG_DIR`) can differ without ever
 /// changing which Claude account/subscription a session authenticates as.
 /// Used to detect a cross-account task_create (see `commands::start_task_core`).
@@ -197,14 +211,17 @@ mod tests {
                 Environment {
                     name: "Work".into(),
                     vars: BTreeMap::new(),
+                    codex: false,
                 },
                 Environment {
                     name: "Personal-A".into(),
                     vars: BTreeMap::from([("RENDER_API_KEY".into(), "tok_a".into())]),
+                    codex: false,
                 },
                 Environment {
                     name: "Personal-B".into(),
                     vars: BTreeMap::from([("RENDER_API_KEY".into(), "tok_b".into())]),
+                    codex: false,
                 },
             ],
             bindings: vec![
@@ -286,10 +303,11 @@ mod tests {
         EnvConfig {
             environments: vec![
                 Environment {
-                    // Mirrors real "Thanx": binds a folder but doesn't override
-                    // CLAUDE_CONFIG_DIR — same Claude account as no binding at all.
-                    name: "Thanx".into(),
-                    vars: BTreeMap::from([("GH_CONFIG_DIR".into(), "gh-thanx".into())]),
+                    // Binds a folder but doesn't override CLAUDE_CONFIG_DIR —
+                    // same Claude account as no binding at all.
+                    name: "Work".into(),
+                    vars: BTreeMap::from([("GH_CONFIG_DIR".into(), "gh-work".into())]),
+                    codex: true,
                 },
                 Environment {
                     name: "Personal".into(),
@@ -297,12 +315,13 @@ mod tests {
                         "CLAUDE_CONFIG_DIR".into(),
                         "/Users/y/.claude-personal".into(),
                     )]),
+                    codex: false,
                 },
             ],
             bindings: vec![
                 Binding {
-                    path: "/Users/y/Code/Thanx".into(),
-                    env: "Thanx".into(),
+                    path: "/Users/y/Code/Work".into(),
+                    env: "Work".into(),
                 },
                 Binding {
                     path: "/Users/y/Code/Personal".into(),
@@ -314,10 +333,10 @@ mod tests {
 
     #[test]
     fn claude_config_dir_is_none_when_binding_does_not_override_it() {
-        // "Thanx" only sets GH_CONFIG_DIR — same default Claude account as no
+        // "Work" only sets GH_CONFIG_DIR — same default Claude account as no
         // binding at all, not a distinct one.
         assert_eq!(
-            claude_config_dir_for_worktree(&accounts_cfg(), None, "/Users/y/Code/Thanx/nexus"),
+            claude_config_dir_for_worktree(&accounts_cfg(), None, "/Users/y/Code/Work/api"),
             None
         );
     }
@@ -328,7 +347,7 @@ mod tests {
             claude_config_dir_for_worktree(
                 &accounts_cfg(),
                 None,
-                "/Users/y/Code/Personal/ixi/backend"
+                "/Users/y/Code/Personal/app/backend"
             ),
             Some("/Users/y/.claude-personal".to_string())
         );
@@ -349,33 +368,51 @@ mod tests {
     }
 
     #[test]
-    fn codex_is_only_allowed_for_the_thanx_and_flock_profiles() {
+    fn codex_is_only_allowed_for_codex_enabled_profiles() {
         let c = accounts_cfg();
-        assert!(codex_allowed(&c, None, "/Users/y/Code/Thanx/nexus"));
-        assert!(!codex_allowed(&c, None, "/Users/y/Code/Personal/ixi"));
+        assert!(codex_allowed(&c, None, "/Users/y/Code/Work/api"));
+        assert!(!codex_allowed(&c, None, "/Users/y/Code/Personal/app"));
         assert!(!codex_allowed(&c, None, "/Users/y/Code/Other/repo"));
         // Orchestrators live in a scratch dir no binding matches: their chosen
         // profile decides.
-        assert!(codex_allowed(&c, Some("Thanx"), "/x/orchestrators/kyoto"));
+        assert!(codex_allowed(&c, Some("Work"), "/x/orchestrators/kyoto"));
         assert!(!codex_allowed(&c, Some("Personal"), "/x/orchestrators/kyoto"));
         assert!(!codex_allowed(&c, None, "/x/orchestrators/kyoto"));
         // A persisted profile wins over the path binding.
-        assert!(!codex_allowed(&c, Some("Personal"), "/Users/y/Code/Thanx/nexus"));
-        // Flock is allowed too: by binding, by persisted orchestrator profile,
-        // and when its repo is nested under the (refused) Personal folder.
+        assert!(!codex_allowed(&c, Some("Personal"), "/Users/y/Code/Work/api"));
+        assert_eq!(codex_profiles_label(&c), "the Work profile");
+        // A second Codex-enabled profile works too: by binding, by persisted
+        // orchestrator profile, and when its repo is nested under the
+        // (refused) Personal folder.
         let mut c = c;
         c.environments.push(Environment {
-            name: "Flock".into(),
+            name: "Tools".into(),
             vars: BTreeMap::new(),
+            codex: true,
         });
         c.bindings.push(Binding {
-            path: "/Users/y/Code/Personal/flock".into(),
-            env: "Flock".into(),
+            path: "/Users/y/Code/Personal/tools".into(),
+            env: "Tools".into(),
         });
-        assert!(codex_allowed(&c, None, "/Users/y/Code/Personal/flock"));
-        assert!(codex_allowed(&c, Some("Flock"), "/x/orchestrators/kyoto"));
+        assert!(codex_allowed(&c, None, "/Users/y/Code/Personal/tools"));
+        assert!(codex_allowed(&c, Some("Tools"), "/x/orchestrators/kyoto"));
         assert!(!codex_allowed(&c, None, "/Users/y/Code/Personal/other"));
         assert!(!codex_allowed(&c, Some("Other"), "/x/orchestrators/kyoto"));
+        assert_eq!(codex_profiles(&c), vec!["Work", "Tools"]);
+        assert_eq!(codex_profiles_label(&c), "the Work or Tools profile");
+        // No Codex-enabled profile at all: nothing is allowed.
+        for e in &mut c.environments {
+            e.codex = false;
+        }
+        assert!(!codex_allowed(&c, None, "/Users/y/Code/Work/api"));
+        assert_eq!(codex_profiles_label(&c), "a Codex-enabled profile");
+    }
+
+    #[test]
+    fn codex_flag_defaults_to_off_for_existing_configs() {
+        let c: EnvConfig =
+            serde_json::from_str(r#"{"environments":[{"name":"Work","vars":{}}]}"#).unwrap();
+        assert!(!c.environments[0].codex);
     }
 
     #[test]
